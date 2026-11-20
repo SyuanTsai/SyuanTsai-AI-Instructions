@@ -107,6 +107,28 @@ function Get-CleanupGitExitCode {
     }
 }
 
+function Test-CleanupGitPathTracked {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $FailureMessage
+    )
+    $exitCode = Get-CleanupGitExitCode -Repository $Repository -Arguments @('ls-files','--error-unmatch','--',$Path)
+    if ($exitCode -notin @(0, 1)) { throw "$FailureMessage (git exit code $exitCode)." }
+    return $exitCode -eq 0
+}
+
+function Test-CleanupGitPathHasStagedChanges {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $FailureMessage
+    )
+    $exitCode = Get-CleanupGitExitCode -Repository $Repository -Arguments @('diff','--cached','--quiet','--',$Path)
+    if ($exitCode -notin @(0, 1)) { throw "$FailureMessage (git exit code $exitCode)." }
+    return $exitCode -eq 1
+}
+
 function ConvertFrom-CleanupGitQuotedPath {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -348,7 +370,9 @@ function Get-CleanupGitPathComparer {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
     $ignoreCase = [Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
-    if ((Get-CleanupGitExitCode -Repository $Repository -Arguments @('config','--bool','--get','core.ignorecase')) -eq 0) {
+    $configExitCode = Get-CleanupGitExitCode -Repository $Repository -Arguments @('config','--bool','--get','core.ignorecase')
+    if ($configExitCode -notin @(0, 1)) { throw "Unable to inspect Git core.ignorecase configuration (git exit code $configExitCode)." }
+    if ($configExitCode -eq 0) {
         $configured = ((Invoke-CleanupGit -Repository $Repository -Arguments @('config','--bool','--get','core.ignorecase')) | Select-Object -First 1).Trim()
         if ($configured -ceq 'true') { $ignoreCase = $true }
     }
@@ -373,7 +397,9 @@ function Open-CleanupRepositoryOperationLock {
 function Test-CleanupCanonicalSourceRepository {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
-    if ((Get-CleanupGitExitCode -Repository $Repository -Arguments @('remote','get-url','origin')) -ne 0) { return $false }
+    $originExitCode = Get-CleanupGitExitCode -Repository $Repository -Arguments @('remote','get-url','origin')
+    if ($originExitCode -notin @(0, 2)) { throw "Unable to inspect Git origin URL (git exit code $originExitCode)." }
+    if ($originExitCode -eq 2) { return $false }
     foreach ($originUrl in @(Invoke-CleanupGit -Repository $Repository -Arguments @('remote','get-url','--all','origin'))) {
         try {
             Assert-AiInstructionsCanonicalRepository -Repository ([string]$originUrl)
@@ -711,9 +737,10 @@ function Get-CleanupClaudeProjectOwnedWorktreeRoots {
     foreach ($worktreeRoot in @(Get-CleanupWorktreeRoots -Repository $Repository -Strict:$Strict)) {
         $basePath = Join-Path $worktreeRoot 'CLAUDE.md'
         $baseExists = Test-Path -LiteralPath $basePath -PathType Leaf
-        $tracked = (Get-CleanupGitExitCode -Repository $worktreeRoot -Arguments @('ls-files','--error-unmatch','--','CLAUDE.md')) -eq 0
-        $stagedExitCode = Get-CleanupGitExitCode -Repository $worktreeRoot -Arguments @('diff','--cached','--quiet','--','CLAUDE.md')
-        if ($stagedExitCode -gt 1) { throw "Unable to inspect staged Claude base ownership in linked worktree: $worktreeRoot" }
+        $tracked = Test-CleanupGitPathTracked -Repository $worktreeRoot -Path 'CLAUDE.md' `
+            -FailureMessage "Unable to inspect tracked Claude base ownership in linked worktree: $worktreeRoot"
+        $baseStaged = Test-CleanupGitPathHasStagedChanges -Repository $worktreeRoot -Path 'CLAUDE.md' `
+            -FailureMessage "Unable to inspect staged Claude base ownership in linked worktree: $worktreeRoot"
         $managedEntry = $null
         $manifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
         if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
@@ -736,7 +763,7 @@ function Get-CleanupClaudeProjectOwnedWorktreeRoots {
         $managedSha256 = if ($null -ne $managedEntry) { [string]$managedEntry.sha256 } else { $null }
         $currentSha256 = if ($baseExists) { Get-CleanupManagedHash -Path $basePath -TargetPath 'CLAUDE.md' } else { $null }
         if (Test-AiInstructionsClaudeFamilyProjectOwned -BaseExists $baseExists -BaseTracked $tracked `
-            -BaseStaged ($stagedExitCode -eq 1) -ManagedSha256 $managedSha256 -CurrentSha256 $currentSha256) {
+            -BaseStaged $baseStaged -ManagedSha256 $managedSha256 -CurrentSha256 $currentSha256) {
             $owned.Add([string]$worktreeRoot)
         }
     }
@@ -1020,9 +1047,9 @@ if ($trackedManagedPaths.Count -eq 0) { throw 'No tracked managed AI instruction
 foreach ($trackedManagedEntry in $trackedManagedEntries) {
     $indexPath = [string]$trackedManagedEntry.IndexPath
     $manifestTargetPath = [string]$trackedManagedEntry.ManifestPath
-    $stagedExitCode = Get-CleanupGitExitCode -Repository $targetRootPath -Arguments @('diff','--cached','--quiet','--',$indexPath)
-    if ($stagedExitCode -gt 1) { throw "Unable to inspect staged managed path: $indexPath" }
-    if ($stagedExitCode -eq 1) { throw "Tracked managed path already has staged changes; cleanup stopped: $indexPath" }
+    $hasStagedChanges = Test-CleanupGitPathHasStagedChanges -Repository $targetRootPath -Path $indexPath `
+        -FailureMessage "Unable to inspect staged managed path: $indexPath"
+    if ($hasStagedChanges) { throw "Tracked managed path already has staged changes; cleanup stopped: $indexPath" }
     $indexHash = Get-CleanupIndexManagedHash -Repository $targetRootPath -IndexPath $indexPath -TargetPath $manifestTargetPath
     if ($manifestTargetPath -ceq $manifestRelativePath) {
         $manifestWorktreeHash = Get-CleanupNormalizedHash -Path $manifestPath

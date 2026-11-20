@@ -72,6 +72,25 @@ Write-Output 'AI instructions synchronized as local ignored runtime artifacts wi
 "@
 }
 
+function New-RolloutTestGitShim {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][ValidateSet('inside_worktree','symbolic_HEAD','origin')][string] $FailurePoint,
+        [Parameter(Mandatory = $true)][int] $ExitCode
+    )
+    $failureCommand = switch ($FailurePoint) {
+        'inside_worktree' { 'if /I "%~3 %~4"=="rev-parse --is-inside-work-tree" exit /b {0}' -f $ExitCode }
+        'symbolic_HEAD' { 'if /I "%~3 %~4 %~5 %~6"=="symbolic-ref -q --short HEAD" exit /b {0}' -f $ExitCode }
+        'origin' { 'if /I "%~3 %~4 %~5"=="remote get-url origin" exit /b {0}' -f $ExitCode }
+    }
+    Set-RolloutTestText -Path $Path -Value @"
+@echo off
+$failureCommand
+git %*
+exit /b %ERRORLEVEL%
+"@
+}
+
 Describe 'AI instructions all-repository rollout' {
     BeforeAll { Import-Module $script:RolloutModule -Force }
 
@@ -157,6 +176,111 @@ Describe 'AI instructions all-repository rollout' {
             Remove-Module $fixtureModule -Force -ErrorAction SilentlyContinue
             Import-Module $script:RolloutModule -Force
         }
+    }
+
+    # Scenario: Repository discovery receives negative Windows process exit codes from each Git query that has a normal alternate result.
+    # Purpose: Prevent launch failures and NTSTATUS values from being interpreted as non-repositories, detached or unborn HEADs, missing origins, or absent HEAD trees.
+    It 'UnitT92_rejects_negative_<Case>_Git_exit_code_<ExitCodeLabel>' -TestCases @(
+        foreach ($exitCase in @(
+            @{ ExitCode=-1; ExitCodeLabel='minus_1' },
+            @{ ExitCode=-1073741510; ExitCodeLabel='ntstatus_1073741510' }
+        )) {
+            foreach ($caseName in @('inside_worktree','symbolic_HEAD','verified_HEAD','origin','tracked_HEAD')) {
+                @{ Case=$caseName; ExitCode=$exitCase.ExitCode; ExitCodeLabel=$exitCase.ExitCodeLabel }
+            }
+        }
+    ) {
+        param($Case,$ExitCode,$ExitCodeLabel)
+        $tokens=$null;$parseErrors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($script:RolloutModule,[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count | Should Be 0
+        $functionName=if($Case-ceq'tracked_HEAD'){'Get-RolloutTrackedReservedPaths'}else{'Resolve-RolloutRepositoryIdentity'}
+        $definition=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$functionName},$true))[0].Extent.Text
+        $message=& {
+            param($text,$name,$caseName,$injectedExitCode,$repository)
+            Invoke-Expression $text
+            function Get-RolloutGitExitCode {
+                param([string]$Repository,[string]$GitExecutable,[string[]]$Arguments)
+                $query=$Arguments -join ' '
+                if($caseName-ceq'inside_worktree'-and$query-ceq'rev-parse --is-inside-work-tree'){return $injectedExitCode}
+                if($caseName-ceq'symbolic_HEAD'-and$query-ceq'symbolic-ref -q --short HEAD'){return $injectedExitCode}
+                if($caseName-ceq'verified_HEAD'-and$query-ceq'rev-parse --verify --quiet HEAD'){return $injectedExitCode}
+                if($caseName-ceq'origin'-and$query-ceq'remote get-url origin'){return $injectedExitCode}
+                if($caseName-ceq'tracked_HEAD'-and$query-ceq'rev-parse --verify --quiet HEAD'){return $injectedExitCode}
+                if($query-ceq'symbolic-ref -q --short HEAD' -and $caseName-ceq'verified_HEAD'){return 1}
+                return 0
+            }
+            function Invoke-RolloutGit {
+                param([string]$Repository,[string]$GitExecutable,[string[]]$Arguments)
+                switch($Arguments -join ' '){
+                    'rev-parse --is-inside-work-tree' { return 'true' }
+                    'rev-parse --show-toplevel' { return $repository }
+                    'rev-parse --git-common-dir' { return '.git' }
+                    'symbolic-ref -q --short HEAD' { return 'main' }
+                    'rev-parse --verify --quiet HEAD' { return ('a'*40) }
+                    'remote get-url origin' { return 'https://example.com/team/product.git' }
+                    '-c core.quotePath=true ls-files' { return 'AGENTS.md' }
+                    default { return @() }
+                }
+            }
+            function Get-RolloutFullPath { param([string]$Path);return [IO.Path]::GetFullPath($Path) }
+            function ConvertFrom-RolloutGitPath { param([string]$Path);return $Path }
+            function Test-RolloutReservedAgentPath { param([string]$Path,[string[]]$ProtectedPaths);return $true }
+            try {
+                if($name-ceq'Get-RolloutTrackedReservedPaths'){
+                    Get-RolloutTrackedReservedPaths -Repository $repository -GitExecutable git -ProtectedPaths @() | Out-Null
+                }
+                else {
+                    Resolve-RolloutRepositoryIdentity -Path $repository -GitExecutable git | Out-Null
+                }
+                $null
+            }
+            catch { $_.Exception.Message }
+        } $definition $functionName $Case $ExitCode $TestDrive
+        $message | Should Match ([regex]::Escape([string]$ExitCode))
+    }
+
+    # Scenario: Public repository discovery receives an undefined negative exit code from a Git identity query.
+    # Purpose: Ensure discovery fails closed instead of reporting zero discovered repositories and zero failures.
+    It 'UnitT93_rethrows_discovery_<Case>_Git_exit_code_<ExitCodeLabel>' -TestCases @(
+        foreach ($exitCase in @(
+            @{ ExitCode=-1; ExitCodeLabel='minus_1' },
+            @{ ExitCode=-1073741510; ExitCodeLabel='ntstatus_1073741510' }
+        )) {
+            foreach ($caseName in @('inside_worktree','symbolic_HEAD','origin')) {
+                @{ Case=$caseName; ExitCode=$exitCase.ExitCode; ExitCodeLabel=$exitCase.ExitCodeLabel }
+            }
+        }
+    ) {
+        param($Case,$ExitCode,$ExitCodeLabel)
+        $repository = Join-Path $TestDrive ("discovery-$Case-$ExitCodeLabel")
+        New-RolloutTestRepository -Path $repository
+        $fakeGit = Join-Path $TestDrive ("fake-git-$Case-$ExitCodeLabel.cmd")
+        New-RolloutTestGitShim -Path $fakeGit -FailurePoint $Case -ExitCode $ExitCode
+
+        $failure = $null
+        try { Get-AiInstructionsRepositoryRoots -SearchRoots @($repository) -GitExecutable $fakeGit | Out-Null }
+        catch { $failure = $_.Exception }
+
+        $failure | Should Not BeNullOrEmpty
+        [string]$failure.Message | Should Match ([regex]::Escape([string]$ExitCode))
+    }
+
+    # Scenario: Public repository discovery finds a .git marker for which Git returns documented fatal exit code 128.
+    # Purpose: Preserve the existing behavior that skips an unusable repository marker without failing rollout.
+    It 'UnitT94_skips_discovery_marker_when_inside_worktree_returns_128' {
+        $candidate = Join-Path $TestDrive 'invalid-git-marker'
+        New-Item -ItemType Directory -Force -Path $candidate | Out-Null
+        Set-RolloutTestText -Path (Join-Path $candidate '.git') -Value 'invalid marker'
+        $fakeGit = Join-Path $TestDrive 'fake-git-fatal-128.cmd'
+        New-RolloutTestGitShim -Path $fakeGit -FailurePoint inside_worktree -ExitCode 128
+
+        $failure = $null
+        try { $repositories = @(Get-AiInstructionsRepositoryRoots -SearchRoots @($candidate) -GitExecutable $fakeGit) }
+        catch { $failure = $_.Exception }
+
+        $failure | Should BeNullOrEmpty
+        @($repositories).Count | Should Be 0
     }
 
     # Given: A fixed-drive-shaped search root includes a product, authority clone, dependency cache, temp fixture, and official global Skill clone.
