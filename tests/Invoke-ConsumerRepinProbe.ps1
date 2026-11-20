@@ -243,6 +243,7 @@ try{
         [void](Invoke-RepinBootstrap $bootstrap validate $gateRoot $baseRoot $consumerRoot $revision $Platform)
         [void](Invoke-RepinBootstrap $bootstrap finalize $gateRoot $baseRoot $consumerRoot $revision $Platform)
         Invoke-RepinNegativeCandidate $consumerRoot $baseRoot $bootstrap $revision
+        $global:LASTEXITCODE=0
         [Console]::Out.WriteLine("Consumer re-pin probe leg passed with old bootstrap 7338a3f: $Platform")
     }else{
         if([string]::IsNullOrWhiteSpace($LegReceiptsRoot)-or-not(Test-Path -LiteralPath $LegReceiptsRoot -PathType Container)){
@@ -255,6 +256,8 @@ try{
         [void](Invoke-RepinBootstrap $bootstrap aggregate $gateRoot $baseRoot $consumerRoot $revision aggregate)
         [Console]::Out.WriteLine('Consumer re-pin probe aggregate passed with old bootstrap 7338a3f.')
     }
+    $global:LASTEXITCODE=0
+    exit 0
 }finally{
     foreach($name in $savedEnvironment.Keys){[Environment]::SetEnvironmentVariable($name,$savedEnvironment[$name],'Process')}
     $savedEnvironment.Clear()
