@@ -3471,22 +3471,27 @@ Start-Sleep -Seconds 30
         Copy-GatePlatformRuntimeFixture $authority
         [IO.File]::WriteAllText((Join-Path $authority 'docs/standards/validation-toolchain.json'),'{}',[Text.UTF8Encoding]::new($false))
         $resolver=Join-Path $root 'resolver.ps1';[IO.File]::WriteAllText($resolver,'exit 0',[Text.UTF8Encoding]::new($false))
-        $oldResolver=$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH;$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
+        $oldResolver=$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH
         Restore-GateFixtureModule
-        $gateModule=Get-Module ConsumerGate -ErrorAction Stop
+        $gateModule=(Get-Command Invoke-GateResolver -CommandType Function -ErrorAction Stop).Module
+        if($gateModule.Name-cne'ConsumerGate'){throw 'The active resolver command is not owned by ConsumerGate.'}
         $previousGatePlatformRuntimeModule=$gateModule.SessionState.PSVariable.GetValue('GatePlatformRuntimeModule')
         $previousGatePlatformRuntimeAuthorityRoot=$gateModule.SessionState.PSVariable.GetValue('GatePlatformRuntimeAuthorityRoot')
         $previousGateGitHooksPath=$gateModule.SessionState.PSVariable.GetValue('GateGitHooksPath')
-        $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeModule',$null)
-        $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeAuthorityRoot',$null)
-        Mock Import-GatePlatformRuntime {[pscustomobject]@{ExportedCommands=@{
-                    'Invoke-PlatformPreparationCommand'={ param($Command,$Arguments,$Environment,$WorkingDirectory,$TimeoutMilliseconds)
-                        [pscustomobject]@{stdout='';stderr='';exitCode=$null} }
-                }}} -ModuleName ConsumerGate
+        $fakeRuntime=New-Module -Name ("ConsumerGateUnknownExitRuntime_{0}" -f [guid]::NewGuid().ToString('N')) -ScriptBlock {
+            function Invoke-PlatformPreparationCommand {
+                param($Command,$Arguments,$Environment,$WorkingDirectory,$TimeoutMilliseconds,$PreparationReceipt)
+                [pscustomobject]@{stdout='';stderr='';exitCode=$null;processOwnership=$null}
+            }
+            Export-ModuleMember -Function Invoke-PlatformPreparationCommand
+        }
+        $closureModule=$null;$previousClosureGitRuntime=$null
         try{
+            $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
+            $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeModule',$fakeRuntime)
+            $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeAuthorityRoot',[IO.Path]::GetFullPath($authority))
             [Console]::SetOut($consoleOut)
             [Console]::SetError($consoleError)
-            try{
             {Invoke-GateResolver (Get-Process -Id $PID).Path $authority $install pester ('a'*32) `
                     (Join-Path $source 'receipt-pester.json') latest ''}|Should Throw 'Resolver exit status is unknown.'
 
@@ -3506,19 +3511,18 @@ Start-Sleep -Seconds 30
             $binding=[pscustomobject]@{candidateRevision=('d'*40);baseRevision=('e'*40);canonicalEvent='pull_request';runId=('f'*32);commit=('1'*40)}
             $config=[pscustomobject]@{sourceRepository='https://example.test/fixture.git';activeSkills=@('fixture')}
             {Invoke-GateValidation $authority $candidate $work $binding $config $validatorPowerShell}|Should Throw 'Validator exit status is unknown.'
-        }finally{$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$oldResolver}
 
         Mock Invoke-GateOwnedGitCapture {[pscustomobject]@{ExitCode=$null;StdoutBytes=[byte[]]::new(0);StderrBytes=[byte[]]::new(0)}} -ModuleName ConsumerGate
         InModuleScope ConsumerGate {$script:GateGitHooksPath='fixture'}
         {Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD')}|Should Throw 'git exit status is unknown.'
         {Invoke-GateGitBytes $script:RepositoryRoot @('rev-parse','HEAD')}|Should Throw 'git exit status is unknown.'
 
-        Import-Module (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1') -Force
+        $closureModule=Import-Module (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1') -Force -PassThru
+        $previousClosureGitRuntime=$closureModule.SessionState.PSVariable.GetValue('ClosureGitRuntime')
         Mock Invoke-ClosureOwnedGitBytes {[pscustomobject]@{ExitCode=$null;Bytes=[byte[]]::new(0);Error=''}} -ModuleName ConsumerManifestClosure
         InModuleScope ConsumerManifestClosure {
             $script:ClosureGitRuntime=[pscustomobject]@{}
             {Invoke-ClosureGitBytes -RepositoryRoot $TestDrive -Arguments @('rev-parse','HEAD')}|Should Throw 'git exit status is unknown.'
-            $script:ClosureGitRuntime=$null
         }
 
         $helperText=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1')
@@ -3538,9 +3542,12 @@ Start-Sleep -Seconds 30
             [Console]::SetError($previousConsoleError)
             $consoleOut.Dispose()
             $consoleError.Dispose()
+            $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$oldResolver
             $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeModule',$previousGatePlatformRuntimeModule)
             $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeAuthorityRoot',$previousGatePlatformRuntimeAuthorityRoot)
             $gateModule.SessionState.PSVariable.Set('GateGitHooksPath',$previousGateGitHooksPath)
+            if($null-ne$closureModule){$closureModule.SessionState.PSVariable.Set('ClosureGitRuntime',$previousClosureGitRuntime)}
+            if($null-ne$fakeRuntime){Remove-Module -ModuleInfo $fakeRuntime -Force -ErrorAction SilentlyContinue}
             $global:LASTEXITCODE=$previousLastExitCode
         }
     }
