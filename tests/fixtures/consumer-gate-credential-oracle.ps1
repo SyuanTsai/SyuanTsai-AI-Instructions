@@ -27,6 +27,15 @@ function Test-OracleNodeInScope($Node, $Function) {
     [object]::ReferenceEquals($owner, $Function)
 }
 
+function Get-OracleFunctionParameters($Function) {
+    if ($null -eq $Function) { return @() }
+    $parameters = @($Function.Parameters | Where-Object { $null -ne $_ })
+    if ($parameters.Count -eq 0 -and $null -ne $Function.Body.ParamBlock) {
+        $parameters = @($Function.Body.ParamBlock.Parameters)
+    }
+    @($parameters)
+}
+
 function Get-OracleStatement($Ast) {
     $cursor = $Ast
     $statement = $null
@@ -75,7 +84,7 @@ function Get-ConsumerCredentialOracle([hashtable]$Sources) {
 
     foreach ($state in $states) {
         if ($null -ne $state.Function) {
-            foreach ($parameter in @($state.Function.Parameters)) {
+            foreach ($parameter in @(Get-OracleFunctionParameters $state.Function)) {
                 if ([string]$parameter.Name.VariablePath.UserPath -ieq 'Token') { [void]$state.Tainted.Add('Token') }
             }
         }
@@ -93,8 +102,13 @@ function Get-ConsumerCredentialOracle([hashtable]$Sources) {
                 $rightText -match 'GetEnvironmentVariable\s*\(\s*\$name'
             $credentialContent = $state.Name -ceq 'Assert-GateCredentialAbsent' -and $left -ceq 'content' -and
                 $rightText -match 'ReadAllBytes'
+            $supervisorCredentialContent = $state.Name -ceq 'Invoke-ConsumerGateProcess' -and
+                $left -in @('standardOutput','standardError') -and $rightText -match 'ReadAllText'
+            $supervisorEnvironment = $state.Name -ceq 'Invoke-ConsumerGateProcess' -and $left -ceq 'environment' -and
+                $rightText -match '^\s*New-ConsumerBootstrapEnvironment\b'
             $tokenVariable = $rightText -match '(?i)Get-Variable\s+token(?:\s|$)'
-            if ($credentialRead -or $authorizationWrite -or $bootstrapEnvironmentCopy -or $credentialContent -or $tokenVariable) {
+            if ($credentialRead -or $authorizationWrite -or $bootstrapEnvironmentCopy -or $credentialContent -or
+                $supervisorCredentialContent -or $supervisorEnvironment -or $tokenVariable) {
                 [void]$state.Tainted.Add($left)
             }
         }
@@ -152,7 +166,7 @@ function Get-ConsumerCredentialOracle([hashtable]$Sources) {
             foreach ($command in $commands) {
                 $callee = @($states | Where-Object { $_.Name -ceq [string]$command.GetCommandName() })
                 if ($callee.Count -ne 1) { continue }
-                $parameters = @($callee[0].Function.Parameters)
+                $parameters = @(Get-OracleFunctionParameters $callee[0].Function)
                 $position = 0
                 for ($index = 1; $index -lt $command.CommandElements.Count; $index++) {
                     $element = $command.CommandElements[$index]

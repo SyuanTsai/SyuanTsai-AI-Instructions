@@ -1750,6 +1750,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/consumer/ConsumerBootstrapSupervisor.psm1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/consumer/ConsumerGate.psm1",
       "license": "Apache-2.0"
     },
@@ -1775,6 +1779,10 @@
     },
     {
       "path": "scripts/consumer/Test-ConsumerManifestClosure.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/Invoke-ConsumerRepinProbe.ps1",
       "license": "Apache-2.0"
     },
     {

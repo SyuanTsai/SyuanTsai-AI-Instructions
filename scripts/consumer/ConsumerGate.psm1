@@ -36,10 +36,20 @@ function Get-GateDeadlineBudget {
         validatorSeconds=1800
         validatorProcessGraceSeconds=120
         gitCommandSeconds=120
-        phaseBudgets=[pscustomobject][ordered]@{prepare=[pscustomobject][ordered]@{httpAcquisitionSeconds=1800;resolverSeconds=1440;validatorSeconds=0;gitReserveSeconds=600;totalSeconds=3840};validate=[pscustomobject][ordered]@{httpAcquisitionSeconds=0;resolverSeconds=0;validatorSeconds=1920;gitReserveSeconds=600;totalSeconds=2520};finalize=[pscustomobject][ordered]@{httpAcquisitionSeconds=0;resolverSeconds=0;validatorSeconds=0;gitReserveSeconds=600;totalSeconds=600};aggregate=[pscustomobject][ordered]@{httpAcquisitionSeconds=0;resolverSeconds=0;validatorSeconds=0;gitReserveSeconds=0;totalSeconds=0}}
+        bootstrapGitCommandSeconds=60
+        bootstrapGitFetchSeconds=300
+        phaseBudgets=[pscustomobject][ordered]@{
+            prepare=[pscustomobject][ordered]@{httpAcquisitionSeconds=1800;resolverSeconds=1440;validatorSeconds=0;gitReserveSeconds=600;gateSeconds=3840;bootstrapGitReserveSeconds=720;supervisorGraceSeconds=60;totalSeconds=4620}
+            validate=[pscustomobject][ordered]@{httpAcquisitionSeconds=0;resolverSeconds=0;validatorSeconds=1920;gitReserveSeconds=600;gateSeconds=2520;bootstrapGitReserveSeconds=180;supervisorGraceSeconds=60;totalSeconds=2760}
+            finalize=[pscustomobject][ordered]@{httpAcquisitionSeconds=0;resolverSeconds=0;validatorSeconds=0;gitReserveSeconds=600;gateSeconds=600;bootstrapGitReserveSeconds=180;supervisorGraceSeconds=60;totalSeconds=840}
+            aggregate=[pscustomobject][ordered]@{httpAcquisitionSeconds=0;resolverSeconds=0;validatorSeconds=0;gitReserveSeconds=0;gateSeconds=60;bootstrapGitReserveSeconds=720;supervisorGraceSeconds=60;totalSeconds=840}
+        }
         workflowSetupSeconds=300
-        evidenceBufferSeconds=600
-        jobTimeoutMinutes=140
+        evidenceBufferSeconds=300
+        aggregateWorkflowSetupSeconds=120
+        aggregateEvidenceBufferSeconds=120
+        jobTimeoutMinutes=150
+        aggregateJobTimeoutMinutes=20
     }
     $budget.innerTotalSeconds=$budget.phaseBudgets.prepare.totalSeconds+
         $budget.phaseBudgets.validate.totalSeconds+$budget.phaseBudgets.finalize.totalSeconds+

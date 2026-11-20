@@ -213,22 +213,31 @@ Describe 'Consumer gate workflow templates' {
         $prepare.resolverSeconds|Should Be 1440
         $prepare.validatorSeconds|Should Be 0
         $prepare.gitReserveSeconds|Should Be 600
+        $prepare.bootstrapGitReserveSeconds|Should Be 720
+        $prepare.supervisorGraceSeconds|Should Be 60
         $validate.httpAcquisitionSeconds|Should Be 0
         $validate.resolverSeconds|Should Be 0
         $validate.validatorSeconds|Should Be 1920
         $validate.gitReserveSeconds|Should Be 600
+        $validate.bootstrapGitReserveSeconds|Should Be 180
+        $validate.supervisorGraceSeconds|Should Be 60
         $finalize.httpAcquisitionSeconds|Should Be 0
         $finalize.resolverSeconds|Should Be 0
         $finalize.validatorSeconds|Should Be 0
         $finalize.gitReserveSeconds|Should Be 600
+        $finalize.bootstrapGitReserveSeconds|Should Be 180
+        $finalize.supervisorGraceSeconds|Should Be 60
         $script:DeadlineBudget.innerTotalSeconds|Should Be `
             ($prepare.totalSeconds+$validate.totalSeconds+$finalize.totalSeconds+$script:DeadlineBudget.workflowSetupSeconds)
         ($script:DeadlineBudget.innerTotalSeconds+$script:DeadlineBudget.evidenceBufferSeconds-lt
             $script:DeadlineBudget.jobTimeoutMinutes*60)|Should Be $true
         ($script:DeadlineBudget.jobTimeoutMinutes*60-$script:DeadlineBudget.innerTotalSeconds-ge
             $script:DeadlineBudget.evidenceBufferSeconds)|Should Be $true
-        $script:FormalYaml.jobs.aggregate.properties.'timeout-minutes'|Should BeExactly '15'
-        $script:TransitionYaml.jobs.aggregate.properties.'timeout-minutes'|Should BeExactly '15'
+        $aggregate=$script:DeadlineBudget.phaseBudgets.aggregate
+        ($aggregate.totalSeconds+$script:DeadlineBudget.aggregateWorkflowSetupSeconds+
+            $script:DeadlineBudget.aggregateEvidenceBufferSeconds-lt$script:DeadlineBudget.aggregateJobTimeoutMinutes*60)|Should Be $true
+        $script:FormalYaml.jobs.aggregate.properties.'timeout-minutes'|Should BeExactly ([string]$script:DeadlineBudget.aggregateJobTimeoutMinutes)
+        $script:TransitionYaml.jobs.aggregate.properties.'timeout-minutes'|Should BeExactly ([string]$script:DeadlineBudget.aggregateJobTimeoutMinutes)
         $script:FormalYaml.jobs.report.properties.'timeout-minutes'|Should BeExactly '10'
         foreach($name in @('repository-contract','skill-validator','skill-tools')){
             $script:TransitionYaml.jobs[$name].properties.'timeout-minutes'|Should BeExactly '10'
@@ -398,7 +407,7 @@ Describe 'Consumer gate workflow templates' {
         $script:Probe|Should Match '(?ms)^permissions:\s*\n  contents: read\s*$'
         $probeYaml=ConvertFrom-ConsumerWorkflowYaml $script:Probe
         $probeYaml.jobs.leg.properties.'timeout-minutes'|Should BeExactly ([string]$script:DeadlineBudget.jobTimeoutMinutes)
-        $probeYaml.jobs.aggregate.properties.'timeout-minutes'|Should BeExactly '10'
+        $probeYaml.jobs.aggregate.properties.'timeout-minutes'|Should BeExactly ([string]$script:DeadlineBudget.aggregateJobTimeoutMinutes)
         $probeYaml.jobs.aggregate.properties.if|Should BeExactly 'always()'
         $aggregateSteps=@($probeYaml.jobs.aggregate.steps)
         $aggregateSteps.Count|Should BeGreaterThan 0
@@ -478,5 +487,28 @@ Describe 'Consumer gate workflow templates' {
         $assertionOffset|Should BeGreaterThan -1
         $environmentOffset|Should BeGreaterThan $assertionOffset
         $probeScript|Should Not Match 'consumer-gate-resolver-fixture|consumer-gate-validation-runner-fixture'
+    }
+
+    # Scenario: A local probe models one PR that re-pins from the 7338a3f bootstrap to the current authority.
+    # Purpose: Preserve old-bootstrap/new-authority compatibility, all four phases, and the protected-file negative case.
+    It 'UnitT87_declares_the_complete_single_PR_repin_probe' {
+        $path=Join-Path $script:RepositoryRoot 'tests/Invoke-ConsumerRepinProbe.ps1'
+        $text=Get-Content -Raw -Encoding UTF8 $path
+        foreach($required in @("OldAuthorityRevision='7338a3f6d8e2d25849b79627fb9a2cbd21ebd123'",'OldBootstrap','OldWorkflow','repin-topic',
+                'consumer re-pin probe merge','Invoke-RepinBootstrap $bootstrap prepare','Invoke-RepinBootstrap $bootstrap validate',
+                'Invoke-RepinBootstrap $bootstrap finalize','Invoke-RepinBootstrap $bootstrap aggregate','unauthorized bootstrap drift',
+                'Candidate bootstrap differs from both authority template and base.','[int]$Result.ExitCode-ne20',
+                'Assert-RepinNegativeBootstrapResult','leg-*.json')){
+            $text|Should Match ([regex]::Escape($required))
+        }
+        $text|Should Not Match '(?m)^\s*(git\s+clone|Invoke-WebRequest|Invoke-RestMethod)\b'
+        $trackedRepinWorkflows=@(& git -C $script:RepositoryRoot ls-files -- '.github/workflows/*repin*')
+        $LASTEXITCODE|Should Be 0
+        @($trackedRepinWorkflows|Where-Object{-not[string]::IsNullOrWhiteSpace($_)}).Count|Should Be 0
+        $tokens=$null;$errors=$null
+        [void][Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors)
+        @($errors).Count|Should Be 0
+        $licensing=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'licensing-scope.json')|ConvertFrom-Json
+        @($licensing.files|Where-Object path -ceq 'tests/Invoke-ConsumerRepinProbe.ps1').Count|Should Be 1
     }
 }

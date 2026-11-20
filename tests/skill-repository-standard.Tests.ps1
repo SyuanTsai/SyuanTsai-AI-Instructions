@@ -6807,7 +6807,7 @@ Describe 'P11-pin consumer authority Standard contract' {
     It 'UnitT981_requires_the_consumer_gate_workflow_and_remote_boundary' {
         $root=Split-Path -Parent $PSScriptRoot
         $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
-        foreach($required in @('scripts/consumer/Invoke-ConsumerSourceGate.ps1','repositoryChecks','requiredRepositoryChecks','base bootstrap 驗證過的 authority','pull_request_target','strict_required_status_checks_policy=true','event.before','MUST NOT** 使用 App 或 environment','同一 job 內的 candidate 竄改')){$standard.Contains($required)|Should Be $true}
+        foreach($required in @('scripts/consumer/Invoke-ConsumerSourceGate.ps1','repositoryChecks','requiredRepositoryChecks','base bootstrap 驗證過的 authority','pull_request_target','strict_required_status_checks_policy=true','event.before','MUST NOT** 使用 App 或 environment','同一 job 內的 candidate 竄改','pre-authority 最小邊界','maintenance.auto','detached GC','60／300 秒','Linux/macOS 的這段 pre-authority Git 沒有獨立 process group','Assert-AuthorityTree','Authority supervisor','phaseEnvironment','credential sentinel','0／10／20／30／40','單一 PR','candidate pin template bytes','consumer-gate-v1')){$standard.Contains($required)|Should Be $true}
         foreach($retired in @('Protected PR **MUST** 繼續由 exact protected base driver 執行','受保護 reader 的固定 tuple','current governed source-reader set','normal reader PR and merged before')){$standard.Contains($retired)|Should Be $false}
     }
     # Scenario: Internal use and migration text consume the verified authority checkout.
