@@ -15,11 +15,15 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 
-$requestedMode=$Mode;$requestedPlatform=$Platform
+$requestedMode=$Mode;$requestedRepositoryRoot=$RepositoryRoot;$requestedWorkRoot=$WorkRoot
+$requestedPlatform=$Platform;$requestedWorkflowRunId=$WorkflowRunId;$requestedWorkflowRunAttempt=$WorkflowRunAttempt
+$requestedLegReceiptsRoot=$LegReceiptsRoot
 . (Join-Path $PSScriptRoot 'Invoke-ConsumerTransitionProbe.ps1') -Mode leg -RepositoryRoot $RepositoryRoot `
     -WorkRoot $WorkRoot -Platform windows -WorkflowRunId $WorkflowRunId -WorkflowRunAttempt $WorkflowRunAttempt -DefineFunctionsOnly
-$Mode=$requestedMode;$Platform=$requestedPlatform
-Remove-Variable requestedMode,requestedPlatform
+$Mode=$requestedMode;$RepositoryRoot=$requestedRepositoryRoot;$WorkRoot=$requestedWorkRoot
+$Platform=$requestedPlatform;$WorkflowRunId=$requestedWorkflowRunId;$WorkflowRunAttempt=$requestedWorkflowRunAttempt
+$LegReceiptsRoot=$requestedLegReceiptsRoot
+Remove-Variable requestedMode,requestedRepositoryRoot,requestedWorkRoot,requestedPlatform,requestedWorkflowRunId,requestedWorkflowRunAttempt,requestedLegReceiptsRoot
 
 $script:ProbeAuthorityRepository='https://example.test/consumer-repin-authority.git'
 $script:ProbeConsumerRepository='https://example.test/example/consumer-repin-fixture.git'
