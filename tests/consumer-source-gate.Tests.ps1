@@ -2667,9 +2667,9 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate})|Should Match '^BLOCKED\|'
     }
 
-    # Scenario: All three candidate fingerprints are reported once with their exact approved reason and source line.
-    # Purpose: Re-derive transition expectations from Git trees and accept run-bound scanner evidence only when it is complete.
-    It 'UnitT77_accepts_three_of_three_run_bound_transition_suppressions' {
+    # Scenario: All three candidate fingerprints are reported once with their exact approved severity, reason and source line.
+    # Purpose: Re-derive transition expectations from Git trees and accept complete run-bound evidence with matching severity.
+    It 'UnitT77_accepts_three_of_three_run_bound_transition_suppressions_with_matching_severity' {
         $fixture=New-ScannerTransitionFixture 'scanner-transition-evidence-valid'
         $suppressed=Get-ScannerTransitionSuppressedFindings $fixture
         $suppressed.Count|Should Be 3
@@ -2777,6 +2777,17 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             [Text.UTF8Encoding]::new($false))
         $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'change referenced file without scanner transition'
         Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate $script:RepositoryRoot
+    }
+
+    # Scenario: A transitioned finding has the same identity and location as its approved exception but reports a higher severity.
+    # Purpose: Prevent a LOW approval from suppressing a MEDIUM finding after only its fingerprint and hash are re-pinned.
+    It 'UnitT88_blocks_transition_suppression_severity_mismatch' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-evidence-severity' -BaseMutation {
+            param($registry,$baseline,$root)
+            $registry.exceptions[0].severity='LOW'
+        }
+        $suppressed=Get-ScannerTransitionSuppressedFindings $fixture
+        (Get-SourceFixtureFailure {Assert-ScannerTransitionEvidenceFixture $fixture $suppressed})|Should Match '^BLOCKED\|.*severity'
     }
 
     # Scenario: Three valid legs were fetched at different official-main tips and one stable binding is then changed.
@@ -3191,6 +3202,7 @@ if($DefineFunctionsOnly){return}
         $env:CONSUMER_GATE_EVENT_LOG_PATH=$eventLog
         $env:CONSUMER_GATE_EVENT_REPOSITORY='https://example.test/fixture.git'
         try{
+            Mock Assert-GateExceptionScannerTransitionEvidence {} -ModuleName ConsumerGate
             Assert-GateFinalSourceReport $authority $candidate $work $binding ([pscustomobject]@{}) $evidence
             @(Get-Content -LiteralPath $eventLog) | Should Be @('source-report-asserted')
             Remove-Item -LiteralPath $eventLog

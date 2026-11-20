@@ -159,6 +159,7 @@ Describe 'Static parser coverage and finding preservation' {
             $baselineFull=$null
             $skillFull='candidate-skill';$bridgePath='bridge.py';$pwsh='pwsh';$pwshHash='runtime-hash'
             $reportFull='report.json';$profileRecord='profile.json';$SourceRevision='revision';$CandidateIdentity='candidate'
+            $nativeEntryPoint='from skillspector.cli_entry import app; app()'
             foreach($name in @('nativeArguments','bridgeArguments')){
                 $assignment=$parserAst.Find({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq ('$'+$name) -and $n.Operator -eq 'Equals'},$true)
                 . ([scriptblock]::Create($assignment.Extent.Text))
@@ -176,6 +177,7 @@ Describe 'Static parser coverage and finding preservation' {
             $baselineFull='candidate baseline.json'
             $skillFull='candidate-skill';$bridgePath='bridge.py';$pwsh='pwsh';$pwshHash='runtime-hash'
             $reportFull='report.json';$profileRecord='profile.json';$SourceRevision='revision';$CandidateIdentity='candidate'
+            $nativeEntryPoint='from skillspector.cli_entry import app; app()'
             foreach($name in @('nativeArguments','bridgeArguments')){
                 $assignment=$parserAst.Find({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq ('$'+$name) -and $n.Operator -eq 'Equals'},$true)
                 . ([scriptblock]::Create($assignment.Extent.Text))

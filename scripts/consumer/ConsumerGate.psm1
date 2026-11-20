@@ -1285,12 +1285,26 @@ function Get-GateJsonRequiredPositiveInteger([Text.Json.JsonElement]$Value,[stri
     }
     $number
 }
+function ConvertTo-GateCanonicalSeverity($Value,[string]$Context) {
+    $severity=[string]$Value
+    if([string]::IsNullOrWhiteSpace($severity)){Throw-GateResult BLOCKED "$Context has an empty severity."}
+    switch($severity.ToLowerInvariant()){
+        'critical' {'critical';break}
+        'high' {'high';break}
+        'medium' {'medium';break}
+        'low' {'low';break}
+        'informational' {'informational';break}
+        'info' {'informational';break}
+        default {Throw-GateResult BLOCKED "$Context has unsupported severity '$severity'."}
+    }
+}
 function ConvertTo-GateTransitionExceptionRecord([Text.Json.JsonElement]$Value) {
     $context="SkillSpector scanner-transition exception $(Get-GateJsonElementLabel $Value 'exceptionId')"
     [pscustomobject]@{
         exceptionId=Get-GateJsonRequiredString $Value 'exceptionId' $context
         skillId=Get-GateJsonRequiredString $Value 'skillId' $context
         ruleId=Get-GateJsonRequiredString $Value 'ruleId' $context
+        severity=ConvertTo-GateCanonicalSeverity (Get-GateJsonRequiredString $Value 'severity' $context) $context
         file=Get-GateJsonRequiredString $Value 'file' $context
         fingerprint=Get-GateJsonRequiredString $Value 'fingerprint' $context
         startLine=Get-GateJsonRequiredPositiveInteger $Value 'startLine' $context
@@ -1321,7 +1335,8 @@ function Get-GateTransitionExpectations([object[]]$Exceptions,[object[]]$Fingerp
             "SkillSpector scanner-transition fingerprint '$($match.hash)' is paired more than once."}
         [void]$expectations.Add([pscustomobject]@{
             skillId=[string]$match.skillId;ruleId=[string]$match.ruleId;file=[string]$match.file;reason=[string]$match.reason
-            hash=[string]$match.hash;exceptionId=[string]$exception.exceptionId;startLine=[long]$exception.startLine
+            severity=[string]$exception.severity;hash=[string]$match.hash;exceptionId=[string]$exception.exceptionId
+            startLine=[long]$exception.startLine
         })
     }
     if($used.Count-ne$Fingerprints.Count){Throw-GateResult BLOCKED `
@@ -1509,9 +1524,10 @@ function Assert-GateTransitionSuppressedFindings([object[]]$Expectations,$Suppre
     foreach($expectation in $Expectations){
         $matches=@($SuppressedFindings|Where-Object{
             [string]$_.skillId-ceq$expectation.skillId-and[string]$_.ruleId-ceq$expectation.ruleId-and
-            [string]$_.file-ceq$expectation.file-and[string]$_.suppressionReason-ceq$expectation.reason})
+            [string]$_.file-ceq$expectation.file-and[string]$_.suppressionReason-ceq$expectation.reason-and
+            (ConvertTo-GateCanonicalSeverity $_.severity 'SkillSpector scanner-transition suppressed finding')-ceq$expectation.severity})
         if($matches.Count-ne1){Throw-GateResult BLOCKED `
-            "SkillSpector scanner-transition fingerprint '$($expectation.hash)' was not used exactly once in this run."}
+            "SkillSpector scanner-transition fingerprint '$($expectation.hash)' was not used exactly once with its approved severity in this run."}
         $line=$matches[0].line
         if(($line-isnot[int]-and$line-isnot[long])-or[long]$line-ne[long]$expectation.startLine){Throw-GateResult BLOCKED `
             "SkillSpector scanner-transition exception '$($expectation.exceptionId)' suppressed finding line does not match startLine."
