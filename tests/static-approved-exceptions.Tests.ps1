@@ -25,7 +25,7 @@ Describe 'Human-approved exact static exceptions' {
             baselines=@(@{skillId='example';path='config/skillspector-exceptions/example.baseline.json'})
             exceptions=@(@{fingerprint=('sha256:'+('a'*64));skillId='example';ruleId='E1';file='SKILL.md';severity='MEDIUM';exceptionId='example-e1';necessity='documentation';riskAssessment='limited';compensatingControls='exact fingerprint';owner='reviewer';approvedOn='2026-01-01'})
         }
-        $envelope=@{suppressedFindings=@(@{skillId='example';ruleId='E1';severity='medium';file='SKILL.md';suppressionReason='approved-example'})}
+        $envelope=@{suppressedFindings=@(@{skillId='example';ruleId='E1';severity='medium';file='SKILL.md';line=1;suppressionReason='approved-example'})}
     }
 
     # Scenario: suppression is absent, null or empty. Purpose: preserve the registry-free legacy path.
@@ -132,7 +132,7 @@ Describe 'Human-approved exact static exceptions' {
         $staticIndex=$report.sourceValidation.events.Count-1
         Set-SourceGateEnvelope $report $staticIndex {
             param($value)
-            $value | Add-Member -NotePropertyName suppressedFindings -NotePropertyValue @(@{skillId='alpha';ruleId='E1';severity='medium';file='SKILL.md';suppressionReason='approved-example'})
+            $value | Add-Member -NotePropertyName suppressedFindings -NotePropertyValue @(@{skillId='alpha';ruleId='E1';severity='medium';file='SKILL.md';line=1;suppressionReason='approved-example'})
         }
         Invoke-SourceGateFixture $report | Should -BeTrue
 
@@ -171,7 +171,7 @@ if($baselineIndex -ge 0){
     if($mode -ceq 'mutate-baseline'){Add-Content -LiteralPath $baselinePath -Value ''}
     $report.suppressed_count=1
     $report.suppressed=@([ordered]@{
-        id='E1';severity='MEDIUM';location=[ordered]@{file='SKILL.md'};suppressed=$true
+        id='E1';severity='MEDIUM';location=[ordered]@{file='SKILL.md';start_line=1};suppressed=$true
         suppression_reason='approved-example'
     })
 }
@@ -255,6 +255,7 @@ $global:LASTEXITCODE=0
         $result.Envelope.suppressedFindings[0].ruleId|Should -BeExactly 'E1'
         $result.Envelope.suppressedFindings[0].severity|Should -BeExactly 'medium'
         $result.Envelope.suppressedFindings[0].file|Should -BeExactly 'SKILL.md'
+        $result.Envelope.suppressedFindings[0].line|Should -Be 1
         $result.Envelope.suppressedFindings[0].suppressionReason|Should -BeExactly 'approved-example'
         Assert-StandardValidationStaticExceptions -Envelope $result.Envelope -SnapshotRoot $fixture.Root -ActiveSkills @('example') -ScannerVersion '2.13.4' -Context 'Static analyzer'|Should -Be 1
     }

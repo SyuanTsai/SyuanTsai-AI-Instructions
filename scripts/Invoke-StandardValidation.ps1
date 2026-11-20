@@ -6320,9 +6320,14 @@ function Assert-StandardValidationStaticExceptions {
     if ($suppressed -isnot [array]) { throw "FAILED|$Context suppressedFindings are not an array." }
     if ($suppressed.Count -eq 0) { return 0 }
     foreach ($finding in $suppressed) {
+        Assert-StandardValidationExactPropertySet -Object $finding `
+            -Expected @('skillId','ruleId','severity','file','line','suppressionReason') -Context "$Context suppressed finding"
         foreach ($field in @('skillId','ruleId','severity','file','suppressionReason')) {
             $value = Get-StandardValidationProperty -Object $finding -Name $field
             if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) { throw "FAILED|$Context suppressed finding requires a nonempty string $field." }
+        }
+        if (($finding.line -isnot [int] -and $finding.line -isnot [long]) -or [long]$finding.line -lt 1) {
+            throw "FAILED|$Context suppressed finding requires a positive integer line."
         }
         if (-not (Test-StandardValidationCanonicalSeverity -Severity $finding.severity)) { throw "FAILED|$Context suppressed finding contains an unknown severity '$($finding.severity)'." }
         if ($finding.severity -ceq 'critical' -or $finding.severity -ceq 'high') { throw "FAILED|$Context suppressed a $($finding.severity) finding." }
