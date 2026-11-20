@@ -142,6 +142,46 @@ function Invoke-RepinBootstrap([string]$Bootstrap,[string]$Phase,[string]$GateRo
     if($exitCode-notin$AllowedExitCodes){throw "Consumer re-pin probe phase '$Phase' failed with exit code $exitCode."}
     $exitCode
 }
+function Get-RepinOutputExcerpt([string]$Output,[int]$Limit=4096){
+    if($null-eq$Output-or$Output.Length-le$Limit){return $Output}
+    $marker="`n... output truncated ...`n";$half=[int][Math]::Floor(($Limit-$marker.Length)/2)
+    $Output.Substring(0,$half)+$marker+$Output.Substring($Output.Length-$half)
+}
+function Invoke-RepinBootstrapCaptured([string]$Bootstrap,[string]$Phase,[string]$GateRoot,[string]$BaseRoot,
+    [string]$CandidateRoot,$Revision,[string]$PlatformValue){
+    $captureRoot=Join-Path (Split-Path -Parent ([IO.Path]::GetFullPath($GateRoot))) ".repin-bootstrap-capture-$([guid]::NewGuid().ToString('N'))"
+    [void][IO.Directory]::CreateDirectory($captureRoot)
+    $stdoutPath=Join-Path $captureRoot 'bootstrap.stdout';$stderrPath=Join-Path $captureRoot 'bootstrap.stderr'
+    try{
+        & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $Bootstrap -Phase $Phase -BaseRoot $BaseRoot `
+            -CandidateRoot $CandidateRoot -WorkRoot $GateRoot -TriggerEvent pull_request_target -BaseRevision $Revision.Base `
+            -CandidateRevision $Revision.Candidate -HeadRevision $Revision.Head -WorkflowRunId $WorkflowRunId `
+            -WorkflowRunAttempt $WorkflowRunAttempt -Platform $PlatformValue 1> $stdoutPath 2> $stderrPath
+        $exitCode=$LASTEXITCODE
+        $stdout=[IO.File]::ReadAllText($stdoutPath,[Text.UTF8Encoding]::new($false,$true))
+        $stderr=[IO.File]::ReadAllText($stderrPath,[Text.UTF8Encoding]::new($false,$true))
+        [Console]::Out.Write($stdout);[Console]::Error.Write($stderr)
+        $sections=[Collections.Generic.List[string]]::new()
+        $sections.Add("=== bootstrap stdout ===`n$stdout");$sections.Add("=== bootstrap stderr ===`n$stderr")
+        $diagnosticRoot=Join-Path $GateRoot 'bootstrap-supervisor-diagnostics'
+        if(Test-Path -LiteralPath $diagnosticRoot -PathType Container){
+            foreach($path in @(Get-ChildItem -LiteralPath $diagnosticRoot -File -Filter '*.txt'|Sort-Object Name)){
+                $content=[IO.File]::ReadAllText($path.FullName,[Text.UTF8Encoding]::new($false,$true))
+                $sections.Add("=== diagnostic $($path.Name) ===`n$content")
+            }
+        }
+        [pscustomobject]@{ExitCode=$exitCode;Output=$sections-join"`n"}
+    }finally{
+        if([IO.Directory]::Exists($captureRoot)){[IO.Directory]::Delete($captureRoot,$true)}
+    }
+}
+function Assert-RepinNegativeBootstrapResult($Result){
+    $expected='Candidate bootstrap differs from both authority template and base.'
+    if([int]$Result.ExitCode-ne20-or-not([string]$Result.Output).Contains($expected,[StringComparison]::Ordinal)){
+        $excerpt=Get-RepinOutputExcerpt ([string]$Result.Output)
+        throw "Consumer re-pin negative bootstrap returned exit code $($Result.ExitCode); expected 20 with '$expected'.`nCaptured output (truncated):`n$excerpt"
+    }
+}
 function New-RepinNegativeCandidate([string]$ConsumerRoot,$Revision){
     [void](Invoke-ProbeGit $ConsumerRoot @('checkout','--quiet','-b','negative-topic',$Revision.Base))
     Replace-RepinFile (Join-Path $script:ProbeAuthorityRoot 'consumer/bootstrap/Invoke-PinnedAuthority.ps1') `
@@ -160,8 +200,8 @@ function New-RepinNegativeCandidate([string]$ConsumerRoot,$Revision){
 function Invoke-RepinNegativeCandidate([string]$ConsumerRoot,[string]$BaseRoot,[string]$Bootstrap,$Revision){
     $negative=New-RepinNegativeCandidate $ConsumerRoot $Revision
     $negativeGate=Join-Path (Split-Path -Parent $ConsumerRoot) 'negative-gate'
-    $exit=Invoke-RepinBootstrap $Bootstrap prepare $negativeGate $BaseRoot $ConsumerRoot $negative $Platform @(10,20,30)
-    if($exit-eq0){throw 'Consumer re-pin negative bootstrap drift was accepted.'}
+    $result=Invoke-RepinBootstrapCaptured $Bootstrap prepare $negativeGate $BaseRoot $ConsumerRoot $negative $Platform
+    Assert-RepinNegativeBootstrapResult $result
 }
 function Assert-RepinFixture([string]$BaseRoot,[string]$ConsumerRoot,$Authority,$Revision){
     $baseBootstrap=[IO.File]::ReadAllBytes((Join-Path $BaseRoot 'scripts/Invoke-PinnedAuthority.ps1'))
