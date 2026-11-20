@@ -750,6 +750,20 @@ function Get-GateBlobOid([string]$Root,[string]$Revision,[string]$Path) {
     [string]$Matches[1]
 }
 
+function Get-GateTreeBlobEntry([string]$Root,[string]$Revision,[string]$Path) {
+    [byte[]]$bytes=Invoke-GateGitBytes $Root @('ls-tree','-z',$Revision,'--',$Path)
+    if($bytes.Length-eq0){return $null}
+    if($bytes[$bytes.Length-1]-ne0-or@($bytes|Where-Object{$_-eq0}).Count-ne1){Throw-GateResult BLOCKED `
+        "SkillSpector scanner-transition referenced path '$Path' is not a unique canonical tree entry."}
+    try{$record=[Text.UTF8Encoding]::new($false,$true).GetString($bytes,0,$bytes.Length-1)}catch{Throw-GateResult BLOCKED `
+        "SkillSpector scanner-transition referenced path '$Path' is not valid UTF-8."}
+    if ($record-cnotmatch '^(?<mode>[0-9]{6}) (?<type>[^ ]+) (?<oid>[0-9a-f]{40}|[0-9a-f]{64})\t(?<path>.+)$' -or
+        [string]$Matches.path -cne $Path) {
+        Throw-GateResult BLOCKED "SkillSpector scanner-transition referenced path '$Path' is not a unique canonical tree entry."
+    }
+    [pscustomobject]@{Mode=[string]$Matches.mode;Type=[string]$Matches.type;Oid=[string]$Matches.oid;Path=[string]$Matches.path}
+}
+
 function Test-GateRegularFile([string]$Path) {
     if(-not(Test-Path -LiteralPath $Path -PathType Leaf)){return $false}
     $item=Get-Item -LiteralPath $Path -Force
@@ -1314,6 +1328,35 @@ function Get-GateTransitionExpectations([object[]]$Exceptions,[object[]]$Fingerp
         'SkillSpector scanner-transition candidate baseline contains an unpaired fingerprint.'}
     return $expectations.ToArray()
 }
+function Test-GateScannerTransitionReferencePath([string]$SkillId,[string]$File) {
+    if($SkillId-cnotmatch'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'-or[string]::IsNullOrWhiteSpace($File)-or
+        $File.Contains('\',[StringComparison]::Ordinal)-or[IO.Path]::IsPathRooted($File)-or
+        $File.IndexOfAny([char[]]@('*','?','[',']',':'))-ge0-or$File.IndexOfAny([char[]](0..31))-ge0){return $false}
+    $segments=@($File-split'/')
+    @($segments|Where-Object{$_-in@('','.','..')}).Count-eq0
+}
+function Assert-GateScannerTransitionReferencedFilesUnchanged([string]$Root,[string]$BaseRevision,`
+    [string]$CandidateRevision,[object[]]$Exceptions) {
+    foreach($exception in $Exceptions){
+        $skillId=[string]$exception.skillId;$file=[string]$exception.file
+        if(-not(Test-GateScannerTransitionReferencePath $skillId $file)){Throw-GateResult BLOCKED `
+            "SkillSpector scanner-transition exception '$($exception.exceptionId)' has an unsafe referenced file: skills/$skillId/$file"}
+        $path="skills/$skillId/$file"
+        $baseEntry=Get-GateTreeBlobEntry $Root $BaseRevision $path
+        $candidateEntry=Get-GateTreeBlobEntry $Root $CandidateRevision $path
+        if($null-eq$baseEntry-or$null-eq$candidateEntry-or$baseEntry.Type-cne'blob'-or$candidateEntry.Type-cne'blob'-or
+            $baseEntry.Mode-cnotin@('100644','100755')-or$candidateEntry.Mode-cnotin@('100644','100755')-or
+            $baseEntry.Mode-cne$candidateEntry.Mode-or$baseEntry.Oid-cne$candidateEntry.Oid){Throw-GateResult BLOCKED `
+            "SkillSpector scanner-transition referenced file '$path' must be the same regular blob in base and candidate trees."}
+    }
+}
+function Get-GateStandardValidationOutputHash([string]$Stdout,[string]$Stderr) {
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{
+        $bytes=[Text.UTF8Encoding]::new($false).GetBytes([string]$Stdout+"`n---stderr---`n"+[string]$Stderr)
+        ([BitConverter]::ToString($sha.ComputeHash($bytes))-replace'-','').ToLowerInvariant()
+    }finally{$sha.Dispose()}
+}
 function Get-GateSkillSpectorApprovedSources([string]$AuthorityRoot) {
     if([string]::IsNullOrWhiteSpace($AuthorityRoot)){return $null}
     $toolchain=Read-GateJson (Join-Path $AuthorityRoot 'docs/standards/validation-toolchain.json') 'validation toolchain policy'
@@ -1435,7 +1478,10 @@ function Assert-GateExceptionSetShrinkOnly([string]$CandidateRoot,[string]$BaseR
             if($null-ne$baseBaselineDocument){$baseBaselineDocument.Dispose()}
         }
     }
-    if($null-ne$scannerTransition){[void](Get-GateTransitionExpectations $candidateExceptionRecords $candidateFingerprintRecords.ToArray())}
+    if($null-ne$scannerTransition){
+        [void](Get-GateTransitionExpectations $candidateExceptionRecords $candidateFingerprintRecords.ToArray())
+        Assert-GateScannerTransitionReferencedFilesUnchanged $CandidateRoot $BaseRevision $CandidateRevision $candidateExceptionRecords
+    }
 }
 function Get-GateCandidateTransitionExpectations([string]$CandidateRoot,[string]$CandidateRevision) {
     $scope=Get-GateExceptionScope;$tree=Get-GateExceptionTree $CandidateRoot $CandidateRevision
@@ -1492,12 +1538,15 @@ function Assert-GateExceptionScannerTransitionEvidence([string]$AuthorityRoot,[s
     if($events.Count-ne1-or-not(Test-GatePathWithin ([string]$events[0].outputPath) $ArtifactsRoot)){Throw-GateResult BLOCKED `
         'SkillSpector scanner transition has no unique authority-bound static analyzer event.'}
     $eventPath=[string]$events[0].outputPath;$eventHash=[string]$events[0].outputSha256
-    if($eventHash-cnotmatch'^[0-9a-f]{64}$'-or-not(Test-Path -LiteralPath $eventPath -PathType Leaf)-or
-        (Get-GateSha256 $eventPath)-cne$eventHash){Throw-GateResult BLOCKED `
-        'SkillSpector scanner transition static analyzer event is not bound to its reported output hash.'}
+    if($eventHash-cnotmatch'^[0-9a-f]{64}$'-or-not(Test-Path -LiteralPath $eventPath -PathType Leaf)){Throw-GateResult BLOCKED `
+        'SkillSpector scanner transition static analyzer event has no valid reported output hash.'}
+    $rawFileHash=Get-GateSha256 $eventPath
     $raw=Read-GateJson $eventPath 'SkillSpector scanner-transition raw event'
-    if((Get-GateSha256 $eventPath)-cne$eventHash){Throw-GateResult BLOCKED `
+    if((Get-GateSha256 $eventPath)-cne$rawFileHash){Throw-GateResult BLOCKED `
         'SkillSpector scanner transition static analyzer event changed during final comparison.'}
+    if((Get-GateStandardValidationOutputHash ([string]$raw.stdout) ([string]$raw.stderr))-cne$eventHash){Throw-GateResult BLOCKED `
+        'SkillSpector scanner transition static analyzer output hash does not match its raw stdout and stderr.'}
+    if([string]$events[0].status-ceq'platform-unavailable'){return}
     try{$envelope=([string]$raw.stdout)|ConvertFrom-Json -Depth 100 -ErrorAction Stop}catch{Throw-GateResult BLOCKED `
         'SkillSpector scanner-transition raw envelope is unavailable for final comparison.'}
     $property=$envelope.PSObject.Properties['suppressedFindings']
