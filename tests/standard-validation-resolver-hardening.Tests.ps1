@@ -78,6 +78,24 @@ Describe 'SYP258 source tool identity freeze' {
     }
 }
 
+Describe 'SYP-488 consumer supervisor credential boundary' {
+    # Scenario: Pre-authority Git and the verified supervisor are inspected together.
+    # Purpose: Git receives no credential alias, while only prepare may receive the resolver token through the authority supervisor.
+    It 'UnitT990_separates_pre_authority_git_from_prepare_only_token_delivery' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $bootstrap=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'consumer/bootstrap/Invoke-PinnedAuthority.ps1')
+        $supervisor=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'scripts/consumer/ConsumerBootstrapSupervisor.psm1')
+        foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){
+            $bootstrap|Should Match ([regex]::Escape("SetEnvironmentVariable(`$name,`$null,'Process')"))
+        }
+        $bootstrap|Should Match 'maintenance\.auto=false'
+        $bootstrap|Should Match 'gc\.autoDetach=false'
+        $supervisor|Should Match "CurrentPhase-ceq'prepare'"
+        $supervisor|Should Match "CurrentPhase-cne'prepare'"
+        $supervisor|Should Match 'credential sentinel and was suppressed'
+    }
+}
+
 Describe 'P11-pin phase-scoped resolver credential' {
     # Scenario: Consumer workflows acquire tools in prepare and then run candidate-controlled phases.
     # Purpose: Make the read-only workflow token unavailable to validate, finalize, aggregate, and every candidate child.

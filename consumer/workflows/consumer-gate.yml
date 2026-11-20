@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   gate:
-    timeout-minutes: 140
+    timeout-minutes: 150
     permissions:
       contents: read
     strategy:
@@ -159,7 +159,7 @@ jobs:
           if-no-files-found: error
 
   aggregate:
-    timeout-minutes: 15
+    timeout-minutes: 20
     needs: gate
     if: always()
     permissions:

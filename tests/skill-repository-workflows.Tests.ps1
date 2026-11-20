@@ -65,6 +65,31 @@ Describe 'SYP258 explicit source validation contract' {
     }
 }
 
+Describe 'SYP-488 thin consumer bootstrap workflow contract' {
+    # Scenario: Consumer phase budgets now include bootstrap Git and authority-supervisor grace.
+    # Purpose: Keep all published workflow deadlines synchronized with the authority budget and below 150 minutes.
+    It 'UnitT990_binds_consumer_deadlines_and_verified_supervisor_loading' {
+        $root=Split-Path -Parent $PSScriptRoot
+        Import-Module (Join-Path $root 'scripts/consumer/ConsumerGate.psm1') -Force
+        $budget=Get-GateDeadlineBudget
+        $budget.jobTimeoutMinutes|Should Be 150
+        $budget.aggregateJobTimeoutMinutes|Should Be 20
+        foreach($phase in @('prepare','validate','finalize','aggregate')){
+            $budget.phaseBudgets.$phase.bootstrapGitReserveSeconds|Should BeGreaterThan 0
+            $budget.phaseBudgets.$phase.supervisorGraceSeconds|Should BeGreaterThan 0
+        }
+        foreach($path in @('consumer/workflows/consumer-gate.yml','consumer/workflows/consumer-gate-transition.yml',
+                '.github/workflows/consumer-transition-probe.yml')){
+            $text=Get-Content -Raw -Encoding UTF8 (Join-Path $root $path)
+            $text|Should Match 'timeout-minutes: 150'
+            $text|Should Match 'timeout-minutes: 20'
+        }
+        $bootstrap=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'consumer/bootstrap/Invoke-PinnedAuthority.ps1')
+        $bootstrap.IndexOf('Assert-AuthorityTree',[StringComparison]::Ordinal)|Should BeLessThan `
+            $bootstrap.LastIndexOf('Import-ConsumerBootstrapSupervisor',[StringComparison]::Ordinal)
+    }
+}
+
 Describe 'SYP353 policy and workflow authority inventory parity' {
     # Scenario: Core executes its actual non-authority workflow step against six authority files and one ordinary file.
     # Purpose: Exercise inventory acquisition and exclusion before the bounded-runner handoff; source-text resemblance cannot satisfy this regression.
