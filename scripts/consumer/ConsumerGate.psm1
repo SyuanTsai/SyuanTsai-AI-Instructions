@@ -237,7 +237,7 @@ function Install-GatePowerShell([string]$AuthorityRoot,[string]$WorkRoot,[string
             version=$version;archiveSha256=$sha}
     }else{
         Import-Module (Join-Path $AuthorityRoot 'scripts/platform-runtime.psd1') -Force
-        $lease=Open-PlatformDirectory -Root $pwshRoot -RootOnly
+        $lease=Open-PlatformDirectory -Root (Resolve-PlatformPhysicalPath -Path $pwshRoot) -RootOnly
         try{$receipt=Resolve-PlatformPowerShell -Policy $policy -DestinationLease $lease -OfflineCache $archive `
             -ReleaseMetadata @{assets=@(@{name=$assetName
             sha256=$sha})}}finally{$lease.Dispose()}
@@ -644,12 +644,14 @@ function New-GateGitHooksDirectory(
 
 function Initialize-GateGitHooks([string]$WorkRoot,[string]$AuthorityRoot=([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))),[ValidateSet('prepare','validate','finalize','aggregate')][string]$Phase='prepare') {
     if ($null -ne $script:GateGitHooksPath) { Throw-GateResult INVALID 'Git hooks isolation was initialized more than once.' }
-    $script:GateGitHooksPath = New-GateGitHooksDirectory $WorkRoot
+    $runtime=Import-GatePlatformRuntime $AuthorityRoot
+    $hooksPath=New-GateGitHooksDirectory $WorkRoot
+    $script:GateGitHooksPath=& $runtime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path $hooksPath
     $captureName='git-process-capture-'+[guid]::NewGuid().ToString('N')
-    $script:GateGitCaptureRoot=Join-Path $WorkRoot $captureName
-    [void][IO.Directory]::CreateDirectory($script:GateGitCaptureRoot)
+    $captureRoot=Join-Path $WorkRoot $captureName
+    [void][IO.Directory]::CreateDirectory($captureRoot)
+    $script:GateGitCaptureRoot=& $runtime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path $captureRoot
     $script:GateGitRemainingMilliseconds=[long](Get-GateDeadlineBudget).phaseBudgets.$Phase.gitReserveSeconds*1000
-    [void](Import-GatePlatformRuntime $AuthorityRoot)
 }
 
 function Invoke-GateOwnedGitCapture([string]$Root,[string[]]$Arguments,[switch]$ByteExact) {
@@ -658,7 +660,8 @@ function Invoke-GateOwnedGitCapture([string]$Root,[string[]]$Arguments,[switch]$
     $budget=Get-GateDeadlineBudget
     $limit=[Math]::Min([long]$budget.gitCommandSeconds*1000,[long]$script:GateGitRemainingMilliseconds)
     if($limit-lt1){Throw-GateResult FAILED 'Git phase deadline was exhausted.'}
-    $git=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+    $git=& $script:GatePlatformRuntimeModule.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path `
+        (Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
     $environment=New-GateChildEnvironment $null @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')
     $id=[guid]::NewGuid().ToString('N')
     $stdoutPath=Join-Path $script:GateGitCaptureRoot "$id.stdout"
@@ -666,13 +669,19 @@ function Invoke-GateOwnedGitCapture([string]$Root,[string[]]$Arguments,[switch]$
     $bytePath=if($ByteExact){Join-Path $script:GateGitCaptureRoot "$id.bytes"}else{$null}
     $workingDirectory=$null;$lease=$null;$stopwatch=[Diagnostics.Stopwatch]::StartNew()
     try{
-        $workingDirectory=& $script:GatePlatformRuntimeModule.ExportedCommands['Open-PlatformDirectory'] -Root $Root -RootOnly
+        $physicalRoot=& $script:GatePlatformRuntimeModule.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path $Root
+        $workingDirectory=& $script:GatePlatformRuntimeModule.ExportedCommands['Open-PlatformDirectory'] -Root $physicalRoot -RootOnly
         $deadline=[DateTimeOffset]::UtcNow.AddMilliseconds($limit)
-        $executable=$git;$ownedArguments=$Arguments
+        $executable=$git;$ownedArguments=[string[]]@($Arguments)
+        for($index=0;$index-lt$ownedArguments.Count-1;$index++){
+            if($ownedArguments[$index]-ceq'-C' -and $ownedArguments[$index+1]-ceq$Root){$ownedArguments[$index+1]=$physicalRoot}
+        }
         if($ByteExact){
-            $executable=(Get-Process -Id $PID).Path
-            $payload=[Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes(($Arguments|ConvertTo-Json -Compress)))
-            $ownedArguments=@('-NoProfile','-NonInteractive','-File',(Join-Path $PSScriptRoot 'Invoke-GateGitByteCapture.ps1'),
+            $executable=& $script:GatePlatformRuntimeModule.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path (Get-Process -Id $PID).Path
+            $helper=& $script:GatePlatformRuntimeModule.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path `
+                (Join-Path $PSScriptRoot 'Invoke-GateGitByteCapture.ps1')
+            $payload=[Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes(($ownedArguments|ConvertTo-Json -Compress)))
+            $ownedArguments=@('-NoProfile','-NonInteractive','-File',$helper,
                 '-GitPath',$git,'-OutputPath',$bytePath,'-GitArgumentsBase64',$payload)
         }
         $lease=& $script:GatePlatformRuntimeModule.ExportedCommands['Start-PlatformOwnedProcess'] -ExecutablePath $executable `

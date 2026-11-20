@@ -35,6 +35,19 @@ Describe 'Authority-owned consumer source gate' {
                 $output.Trim()
             }finally{$process.Dispose()}
         }
+        function Invoke-SourceFixtureGitBytes([string]$Root,[string[]]$Arguments) {
+            $start=[Diagnostics.ProcessStartInfo]::new()
+            $start.FileName=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+            $start.UseShellExecute=$false;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+            foreach($argument in @('-C',$Root)+$Arguments){[void]$start.ArgumentList.Add($argument)}
+            $process=[Diagnostics.Process]::new();$process.StartInfo=$start;$memory=[IO.MemoryStream]::new()
+            try{
+                [void]$process.Start();$copy=$process.StandardOutput.BaseStream.CopyToAsync($memory);$errorRead=$process.StandardError.ReadToEndAsync()
+                $process.WaitForExit();$null=$copy.GetAwaiter().GetResult();$errorText=$errorRead.GetAwaiter().GetResult()
+                if($process.ExitCode-ne0){throw "fixture git failed: $errorText"}
+                Write-Output -NoEnumerate ([byte[]]$memory.ToArray())
+            }finally{$memory.Dispose();$process.Dispose()}
+        }
         function New-GitCredentialPresenceShim([string]$Root,[string]$ObservationPath) {
             [void][IO.Directory]::CreateDirectory($Root)
             $realGit=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
@@ -1367,11 +1380,11 @@ Write-Output 'scripts/Legacy.ps1'
                     $node.Name-ceq'Invoke-GateResolver'},$true))[0]
         $tokenEnvironmentWrite=@($resolver.Body.FindAll({param($node)
                     $node-is[Management.Automation.Language.AssignmentStatementAst]-and
-                    $node.Left.Extent.Text-ceq"`$start.Environment['STANDARD_VALIDATION_GITHUB_API_TOKEN']"-and
+                    $node.Left.Extent.Text-ceq"`$environment['STANDARD_VALIDATION_GITHUB_API_TOKEN']"-and
                     $node.Right.Extent.Text-ceq'$Token'
                 },$true))
         @($tokenEnvironmentWrite).Count|Should Be 1
-        $replacement="`$start.Environment['HOME']=`$Token"
+        $replacement="`$environment['HOME']=`$Token"
         $moduleText=$moduleText.Remove($tokenEnvironmentWrite[0].Extent.StartOffset,
             $tokenEnvironmentWrite[0].Extent.EndOffset-$tokenEnvironmentWrite[0].Extent.StartOffset).Insert(
                 $tokenEnvironmentWrite[0].Extent.StartOffset,$replacement)
@@ -1749,7 +1762,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|CONSUMER_GATE_PHASE_ENV_
                 elseif($cleanup.Source-ceq'scripts/consumer/Invoke-ConsumerSourceGate.ps1'-and
                     (@($cleanup.Targets)-icontains'message'-or@($cleanup.Targets)-icontains'tokenVariable'-or$cleanup.Line-eq73)){'http-error'}
                 else{'success'}
-            $leak=if($cleanup.Function-ceq'Assert-GateCredentialAbsent'-and$cleanup.Line-ge1055){'summary'}else{'none'}
+            $leak=if($cleanup.Function-ceq'Assert-GateCredentialAbsent'-and$cleanup.Line-ge1064){'summary'}else{'none'}
             $key="$($cleanup.Source):$($cleanup.Line):$($cleanup.Column)|$($cleanup.Text)"
             if($cleanup.Source-ceq'consumer/bootstrap/Invoke-PinnedAuthority.ps1'){
                 $records=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File (Join-Path $mutantRoot 'tests/fixtures/consumer-bootstrap-cleanup-fixture.ps1') `
@@ -1781,28 +1794,28 @@ consumer/bootstrap/Invoke-PinnedAuthority.ps1:293:9|$stdout = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:294:9|$stderr = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:298:28|$value = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:299:9|$Token=$null
-scripts/consumer/ConsumerGate.psm1:1055:13|$content=$null
-scripts/consumer/ConsumerGate.psm1:1058:9|$content=$null
-scripts/consumer/ConsumerGate.psm1:1058:24|$needle=$null
-scripts/consumer/ConsumerGate.psm1:1058:38|$Token=$null
+scripts/consumer/ConsumerGate.psm1:1064:13|$content=$null
+scripts/consumer/ConsumerGate.psm1:1067:9|$content=$null
+scripts/consumer/ConsumerGate.psm1:1067:24|$needle=$null
+scripts/consumer/ConsumerGate.psm1:1067:38|$Token=$null
 scripts/consumer/ConsumerGate.psm1:212:14|$headers.Remove('Authorization')
 scripts/consumer/ConsumerGate.psm1:213:5|$Token=$null
 scripts/consumer/ConsumerGate.psm1:214:5|[Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')
-scripts/consumer/ConsumerGate.psm1:1086:34|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:1086:53|$request=$null
-scripts/consumer/ConsumerGate.psm1:1087:35|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:1087:55|$response=$null
-scripts/consumer/ConsumerGate.psm1:1118:18|$stream.Dispose()
-scripts/consumer/ConsumerGate.psm1:1118:36|$memory.Dispose()
-scripts/consumer/ConsumerGate.psm1:1126:31|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:1126:73|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:1127:9|$bytes=$null
-scripts/consumer/ConsumerGate.psm1:1127:22|$buffer=$null
-scripts/consumer/ConsumerGate.psm1:1127:36|$response=$null
-scripts/consumer/ConsumerGate.psm1:1127:52|$request=$null
-scripts/consumer/ConsumerGate.psm1:1127:67|$stream=$null
-scripts/consumer/ConsumerGate.psm1:1127:81|$memory=$null
-scripts/consumer/ConsumerGate.psm1:1127:95|$Headers=$null
+scripts/consumer/ConsumerGate.psm1:1095:34|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:1095:53|$request=$null
+scripts/consumer/ConsumerGate.psm1:1096:35|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:1096:55|$response=$null
+scripts/consumer/ConsumerGate.psm1:1127:18|$stream.Dispose()
+scripts/consumer/ConsumerGate.psm1:1127:36|$memory.Dispose()
+scripts/consumer/ConsumerGate.psm1:1135:31|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:1135:73|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:1136:9|$bytes=$null
+scripts/consumer/ConsumerGate.psm1:1136:22|$buffer=$null
+scripts/consumer/ConsumerGate.psm1:1136:36|$response=$null
+scripts/consumer/ConsumerGate.psm1:1136:52|$request=$null
+scripts/consumer/ConsumerGate.psm1:1136:67|$stream=$null
+scripts/consumer/ConsumerGate.psm1:1136:81|$memory=$null
+scripts/consumer/ConsumerGate.psm1:1136:95|$Headers=$null
 scripts/consumer/ConsumerGate.psm1:397:95|[Environment]::SetEnvironmentVariable($name,$null,'Process')
 scripts/consumer/ConsumerGate.psm1:399:43|$Token=$null
 scripts/consumer/ConsumerGate.psm1:285:13|[void]$environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
@@ -1879,6 +1892,8 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         @($credentialRemoval).Count|Should Be 1
         $mutantText=$moduleText.Remove($credentialRemoval[0].Extent.StartOffset,$credentialRemoval[0].Extent.EndOffset-$credentialRemoval[0].Extent.StartOffset)
         [IO.File]::WriteAllText($mutantPath,$mutantText,[Text.UTF8Encoding]::new($false))
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1') `
+            -Destination (Join-Path $TestDrive 'Invoke-GateGitByteCapture.ps1')
         $observation=Join-Path $TestDrive 'git-mutant-observation.txt'
         $shim=New-GitCredentialPresenceShim (Join-Path $TestDrive 'git-mutant-shim') $observation
         $oldPath=$env:PATH
@@ -1958,6 +1973,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             'skill-darktide-translate' = @{ Count=49; Sha256='9fcad1291facceb4e2d20be43ccf7cf772ffe21f1ef94cad6083da2958669626' }
         }
         foreach ($entry in @($manifest.repositories | Where-Object status -eq ready)) {
+            Restore-GateFixtureModule
             $oracleLines = @($entry.files | ForEach-Object {
                     "$($_.path)|$($_.disposition)|$($_.expectedOutcome)|$($_.target)"
                 } | Sort-Object)
@@ -2486,6 +2502,45 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         }
     }
 
+    # Scenario: A transition conversion runs the complete manifest closure through an injected invoker that returns one non-enumerated byte array.
+    # Purpose: Preserve the gate-to-closure byte contract instead of wrapping the byte array in an object array before conversion.
+    It 'UnitT39a_runs_transition_manifest_closure_through_the_byte_invoker' {
+        $root=Join-Path $TestDrive 'closure-byte-invoker-transition'
+        [void][IO.Directory]::CreateDirectory((Join-Path $root 'scripts'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $root 'docs'))
+        [void](Invoke-SourceFixtureGit $root @('init','-q','-b','main'))
+        [void](Invoke-SourceFixtureGit $root @('config','user.name','Fixture'))
+        [void](Invoke-SourceFixtureGit $root @('config','user.email','fixture@example.test'))
+        [IO.File]::WriteAllText((Join-Path $root 'scripts/Legacy.ps1'),'param()',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $root 'README.md'),'fixture',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllBytes((Join-Path $root 'docs/empty.md'),[byte[]]::new(0))
+        [void](Invoke-SourceFixtureGit $root @('add','.'))
+        [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','inventory'))
+        $inventoryCommit=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+        $inventoryTree=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD^{tree}')
+        Remove-Item -LiteralPath (Join-Path $root 'scripts/Legacy.ps1')
+        [void](Invoke-SourceFixtureGit $root @('add','-A'))
+        [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','conversion'))
+        $conversionCommit=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+        $manifestPath=Join-Path $TestDrive 'closure-byte-invoker-transition.json'
+        Write-FixtureJson $manifestPath ([ordered]@{schemaVersion=1;repositories=@([ordered]@{
+                        id='fixture';repository='https://example.test/fixture.git';status='ready'
+                        inventoryCommit=$inventoryCommit;inventoryTree=$inventoryTree;requiredRepositoryChecks=@()
+                        files=@([ordered]@{path='scripts/Legacy.ps1';disposition='delete';reason='fixture migration'})
+                    })})
+        $invocations=[Collections.Generic.List[string]]::new()
+        $gitBytesCommand=Get-Command Invoke-SourceFixtureGitBytes
+        $invoker={param([string]$RepositoryRoot,[string[]]$Arguments,[int[]]$AllowedExitCodes)
+            $invocations.Add(($Arguments-join' '))|Out-Null
+            & $gitBytesCommand $RepositoryRoot $Arguments
+        }.GetNewClosure()
+        $result=Get-ConsumerManifestClosure -RepositoryRoot $root -Commit $conversionCommit -Stage conversion `
+            -InventoryCommit $inventoryCommit -Manifest $manifestPath -RepositoryId fixture `
+            -AuthorityRoot $script:RepositoryRoot -GitByteInvoker $invoker
+        $result.result|Should Be 'PASS'
+        $invocations.Count|Should BeGreaterThan 0
+    }
+
     # Scenario: Three valid legs were fetched at different official-main tips and one stable binding is then changed.
     # Purpose: Aggregate tolerates normal main advancement while keeping authority, candidate, and event identity closed.
     It 'UnitT40_rejects_missing_duplicate_nonpass_and_mismatched_leg_bindings' {
@@ -2900,10 +2955,12 @@ $values=[ordered]@{};foreach($name in $names){$values[$name]=[Environment]::GetE
         $moduleText|Should Not Match '\.WaitForExit\s*\('
         $moduleText|Should Match "ExportedCommands\['Start-PlatformOwnedProcess'\]"
         $moduleText|Should Match "ExportedCommands\['Stop-PlatformOwnedProcess'\]"
+        $moduleText|Should Match "ExportedCommands\['Resolve-PlatformPhysicalPath'\]"
         $gitBytesAst.Extent.Text|Should Match 'Invoke-GateOwnedGitCapture[\s\S]+-ByteExact'
         $closureText=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1')
         $closureText|Should Match "ExportedCommands\['Start-PlatformOwnedProcess'\]"
         $closureText|Should Match "ExportedCommands\['Stop-PlatformOwnedProcess'\]"
+        $closureText|Should Match "ExportedCommands\['Resolve-PlatformPhysicalPath'\]"
         $closureText|Should Not Match '\[Diagnostics\.Process(?:StartInfo)?\]'
         $closureText|Should Not Match '\.WaitForExit\s*\('
         $moduleText|Should Match 'GitByteInvoker=\{[\s\S]+Invoke-GateGitBytes'

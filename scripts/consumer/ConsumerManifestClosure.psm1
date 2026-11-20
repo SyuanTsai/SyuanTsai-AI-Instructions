@@ -48,7 +48,7 @@ $script:ClosureGitCleanupRoot = $null
 $script:ClosureAuthorityRoot = $null
 
 function Get-ClosureSha256 {
-    param([Parameter(Mandatory)][byte[]] $Bytes)
+    param([Parameter(Mandatory)][AllowEmptyCollection()][byte[]] $Bytes)
 
     [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Bytes)).ToLowerInvariant()
 }
@@ -76,8 +76,10 @@ function Initialize-ClosureGitCapture {
         throw 'Manifest closure owned-process authority is incomplete.'
     }
     $script:ClosureGitRuntime = Import-Module $manifest -Force -PassThru -ErrorAction Stop
-    $script:ClosureAuthorityRoot = $authority
-    $script:ClosureGitCleanupRoot = Join-Path ([IO.Path]::GetTempPath()) ('consumer-manifest-closure-' + [guid]::NewGuid().ToString('N'))
+    $script:ClosureAuthorityRoot = & $script:ClosureGitRuntime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path $authority
+    $cleanupRoot = Join-Path ([IO.Path]::GetTempPath()) ('consumer-manifest-closure-' + [guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($cleanupRoot)
+    $script:ClosureGitCleanupRoot = & $script:ClosureGitRuntime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path $cleanupRoot
     $script:ClosureGitCaptureRoot = Join-Path $script:ClosureGitCleanupRoot 'capture'
     $script:ClosureGitHooksPath = Join-Path $script:ClosureGitCleanupRoot 'hooks'
     [void][IO.Directory]::CreateDirectory($script:ClosureGitCaptureRoot)
@@ -117,7 +119,8 @@ function Invoke-ClosureOwnedGitBytes {
     }
     $limit = [Math]::Min([long]$script:ClosureGitCommandMilliseconds, [long]$script:ClosureGitRemainingMilliseconds)
     if ($limit -lt 1) { throw 'Manifest closure Git phase deadline was exhausted.' }
-    $git = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    $git = & $script:ClosureGitRuntime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path `
+        (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     $environment = [Collections.Generic.Dictionary[string,string]]::new($(if ($IsWindows) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }))
     foreach ($entry in @(Get-ChildItem Env:)) { if ($null -ne $entry.Value) { $environment[[string]$entry.Name] = [string]$entry.Value } }
     foreach ($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')) { [void]$environment.Remove($name) }
@@ -129,13 +132,16 @@ function Invoke-ClosureOwnedGitBytes {
     $lease = $null
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
     try {
-        $workingDirectory = & $script:ClosureGitRuntime.ExportedCommands['Open-PlatformDirectory'] -Root $RepositoryRoot -RootOnly
+        $physicalRepositoryRoot = & $script:ClosureGitRuntime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path $RepositoryRoot
+        $workingDirectory = & $script:ClosureGitRuntime.ExportedCommands['Open-PlatformDirectory'] -Root $physicalRepositoryRoot -RootOnly
         $isolatedArguments = @('-c', "core.hooksPath=$script:ClosureGitHooksPath", '-c', 'protocol.file.allow=never',
-            '-c', 'credential.helper=', '-C', $RepositoryRoot) + $Arguments
+            '-c', 'credential.helper=', '-C', $physicalRepositoryRoot) + $Arguments
         $payload = [Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes(($isolatedArguments | ConvertTo-Json -Compress)))
-        $executable = (Get-Process -Id $PID).Path
+        $executable = & $script:ClosureGitRuntime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path (Get-Process -Id $PID).Path
+        $helper = & $script:ClosureGitRuntime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path `
+            (Join-Path $script:ClosureAuthorityRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1')
         $ownedArguments = @('-NoProfile','-NonInteractive','-File',
-            (Join-Path $script:ClosureAuthorityRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1'),
+            $helper,
             '-GitPath',$git,'-OutputPath',$bytePath,'-GitArgumentsBase64',$payload)
         $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds($limit)
         $lease = & $script:ClosureGitRuntime.ExportedCommands['Start-PlatformOwnedProcess'] -ExecutablePath $executable `
@@ -182,7 +188,14 @@ function Invoke-ClosureGitBytes {
         if (@($AllowedExitCodes).Count -ne 1 -or $AllowedExitCodes[0] -ne 0) {
             throw 'The shared manifest closure Git boundary supports only exit code zero.'
         }
-        $bytes = [byte[]]@(& $script:ClosureGitByteInvoker $RepositoryRoot $Arguments $AllowedExitCodes)
+        $invokerResult = & $script:ClosureGitByteInvoker $RepositoryRoot $Arguments $AllowedExitCodes
+        if ($null -eq $invokerResult) {
+            $bytes = [byte[]]::new(0)
+        } elseif ($invokerResult -is [byte[]]) {
+            $bytes = $invokerResult
+        } else {
+            throw 'The shared manifest closure Git boundary must return one byte array.'
+        }
         $exitCode = 0
         $errorText = ''
     } else {
@@ -260,11 +273,12 @@ function Get-ClosureBlobBytes {
         [Parameter(Mandatory)][string] $Oid
     )
 
-    (Invoke-ClosureGitBytes -RepositoryRoot $RepositoryRoot -Arguments @('cat-file', 'blob', $Oid)).Bytes
+    $result = Invoke-ClosureGitBytes -RepositoryRoot $RepositoryRoot -Arguments @('cat-file', 'blob', $Oid)
+    Write-Output -NoEnumerate ([byte[]]$result.Bytes)
 }
 
 function ConvertFrom-ClosureBlob {
-    param([Parameter(Mandatory)][byte[]] $Bytes)
+    param([Parameter(Mandatory)][AllowEmptyCollection()][byte[]] $Bytes)
 
     try {
         if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xff -and $Bytes[1] -eq 0xfe) {
@@ -303,7 +317,7 @@ function Test-ClosureDocumentPath {
 
 function Get-ClosureLineColumn {
     param(
-        [Parameter(Mandatory)][string] $Text,
+        [Parameter(Mandatory)][AllowEmptyString()][string] $Text,
         [Parameter(Mandatory)][int] $Offset
     )
 
@@ -321,7 +335,7 @@ function Get-ClosureLineColumn {
 
 function Get-ClosureTokenMatches {
     param(
-        [Parameter(Mandatory)][string] $Text,
+        [Parameter(Mandatory)][AllowEmptyString()][string] $Text,
         [Parameter(Mandatory)][string] $Target
     )
 
@@ -899,6 +913,7 @@ function Get-ConsumerManifestClosure {
 
     Initialize-ClosureGitCapture -AuthorityRoot $AuthorityRoot -GitByteInvoker $GitByteInvoker `
         -GitCommandTimeoutSeconds $GitCommandTimeoutSeconds -GitReserveSeconds $GitReserveSeconds
+    $operationError = $null
     try {
     if ($Commit -cnotmatch '^[0-9a-f]{40}$') {
         throw 'Commit must be a full lowercase Git object ID.'
@@ -1280,8 +1295,15 @@ function Get-ConsumerManifestClosure {
         advisories    = @($advisories)
         counts        = [pscustomobject] $counts
     }
+    } catch {
+        $operationError = $_
+        throw
     } finally {
-        Complete-ClosureGitCapture
+        try {
+            Complete-ClosureGitCapture
+        } catch {
+            if ($null -eq $operationError) { throw }
+        }
     }
 }
 
