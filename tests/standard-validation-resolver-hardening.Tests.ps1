@@ -483,7 +483,7 @@ Describe 'Standard validation resolver hardening' {
         }
     }
 
-    # Scenario: policy selects the reviewed SkillSpector registry and the registry activates a native 2.13.4 entry.
+    # Scenario: policy selects the reviewed SkillSpector registry and the registry activates the native 2.13.6 entry.
     # Purpose: replace mutable latest-release discovery with an explicit multi-version trust registry.
     It 'UnitT26_binds_SkillSpector_to_the_active_approved_source_entry' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
@@ -491,10 +491,10 @@ Describe 'Standard validation resolver hardening' {
         $registry=Get-SkillSpectorApprovedSources -Path (Join-Path $script:RepositoryRoot $toolPolicy.tools.skillspector.approvedSources)
         $profile=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/static-parser-host-ownership.json') | ConvertFrom-Json
         Assert-Equal $toolPolicy.tools.skillspector.channel 'approved-source-registry' 'SkillSpector must use the approved source registry.'
-        Assert-Equal $registry.active '2.13.4' 'The reviewed 2.13.4 release must be active.'
+        Assert-Equal $registry.active '2.13.6' 'The reviewed 2.13.6 release must be active.'
         Assert-Equal $registry.activeEntry.parserCorrection 'none' 'The active release must use the native parser without the legacy bridge.'
         Assert-Equal $registry.entries.'2.13.4'.kind 'pypi-release' 'The retained 2.13.4 release must remain classified as a PyPI release.'
-        Assert-Equal $registry.entries.'2.13.4'.consoleEntryPoint 'skillspector.cli:app' 'The active release must bind its installed console entry point.'
+        Assert-Equal $registry.entries.'2.13.4'.consoleEntryPoint 'skillspector.cli:app' 'The retained 2.13.4 release must keep its installed console entry point.'
         Assert-Equal $registry.entries.'2.13.0'.parserCorrection 'powershell-native-command-ownership-v1' 'The retained reviewed 2.13.0 entry must keep its correction profile.'
         Assert-Equal $registry.entries.'2.13.6'.kind 'github-release-asset' 'The reviewed 2.13.6 release must be classified as a GitHub-only release asset.'
         Assert-Equal $registry.entries.'2.13.6'.parserCorrection 'none' 'The reviewed 2.13.6 release must use the native parser.'
@@ -523,14 +523,14 @@ Describe 'Standard validation resolver hardening' {
         foreach($mutation in @('unknown-kind','missing-field','extra-field','missing-active','key-version-mismatch','bridge-analyzer-mismatch','missing-console-entry-point','unknown-console-entry-point','github-entry-unknown-kind','github-entry-extra-url','github-entry-key-version-mismatch','github-entry-bad-wheel-name')) {
             $candidate=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
             switch($mutation) {
-                'unknown-kind' {$candidate.entries.'2.13.4'.kind='github-commit'}
-                'missing-field' {$candidate.entries.'2.13.4'.PSObject.Properties.Remove('releaseCommit')}
-                'extra-field' {$candidate.entries.'2.13.4' | Add-Member -NotePropertyName unreviewed -NotePropertyValue $true}
+                'unknown-kind' {$candidate.entries.'2.13.6'.kind='github-commit'}
+                'missing-field' {$candidate.entries.'2.13.6'.PSObject.Properties.Remove('releaseCommit')}
+                'extra-field' {$candidate.entries.'2.13.6' | Add-Member -NotePropertyName unreviewed -NotePropertyValue $true}
                 'missing-active' {$candidate.active='9.9.9'}
-                'key-version-mismatch' {$candidate.entries.'2.13.4'.version='2.13.5'}
+                'key-version-mismatch' {$candidate.entries.'2.13.6'.version='2.13.5'}
                 'bridge-analyzer-mismatch' {$candidate.entries.'2.13.0'.analyzerSha256='0'*64}
-                'missing-console-entry-point' {$candidate.entries.'2.13.4'.PSObject.Properties.Remove('consoleEntryPoint')}
-                'unknown-console-entry-point' {$candidate.entries.'2.13.4'.consoleEntryPoint='skillspector.main:app'}
+                'missing-console-entry-point' {$candidate.entries.'2.13.6'.PSObject.Properties.Remove('consoleEntryPoint')}
+                'unknown-console-entry-point' {$candidate.entries.'2.13.6'.consoleEntryPoint='skillspector.main:app'}
                 'github-entry-unknown-kind' {$candidate.entries.'2.13.6'.kind='github-release'}
                 'github-entry-extra-url' {$candidate.entries.'2.13.6' | Add-Member -NotePropertyName releaseAssetUrl -NotePropertyValue 'https://example.test/skillspector.whl'}
                 'github-entry-key-version-mismatch' {$candidate.entries.'2.13.6'.version='2.13.7'}

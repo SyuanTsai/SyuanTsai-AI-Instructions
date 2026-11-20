@@ -103,6 +103,66 @@ Describe 'Authority-owned consumer source gate' {
         function Set-ExceptionFixtureBaseline([string]$Root,$Baseline,[string]$SkillId='review-bitbucket-pull-request') {
             Write-FixtureJson (Join-Path $Root "config/skillspector-exceptions/$SkillId.baseline.json") $Baseline
         }
+        function New-ScannerTransitionFixture {
+            param(
+                [string]$Name,
+                [string]$OldVersion='2.13.4',
+                [string]$OldWheel='c5e7f290897c65018013a6e37022fabdd2ba1aeeb4994b65df2de8b0d536bea0',
+                [string]$NewVersion='2.13.6',
+                [string]$NewWheel='e7b46c55e726405b2a068d375d1ee8e799e15d86f3fc05f84feb5ba962198b15',
+                [scriptblock]$Mutation
+            )
+            $fixture=New-ExceptionFixtureRepository $Name
+            if($OldVersion-cne'2.13.4'-or$OldWheel-cne'c5e7f290897c65018013a6e37022fabdd2ba1aeeb4994b65df2de8b0d536bea0'){
+                $oldRegistry=Get-ExceptionFixtureRegistry $fixture.Root
+                $oldRegistry.scanner.version=$OldVersion;$oldRegistry.scanner.wheelSha256=$OldWheel
+                Set-ExceptionFixtureRegistry $fixture.Root $oldRegistry
+                foreach($file in @(Get-ChildItem -LiteralPath (Join-Path $fixture.Root 'config/skillspector-exceptions') -Filter '*.baseline.json')){
+                    $oldBaseline=Get-Content -Raw -Encoding UTF8 -LiteralPath $file.FullName|ConvertFrom-Json
+                    $oldBaseline.scanner_version=$OldVersion;Write-FixtureJson $file.FullName $oldBaseline
+                }
+                $fixture.Base=Save-ExceptionFixtureCandidate $fixture.Root 'establish retained scanner base'
+            }
+            $registry=Get-ExceptionFixtureRegistry $fixture.Root
+            $registry.scanner.version=$NewVersion;$registry.scanner.wheelSha256=$NewWheel
+            $registry.baselines=@($registry.baselines|Where-Object skillId -ceq 'review-bitbucket-pull-request')
+            $registry.exceptions=@($registry.exceptions|Where-Object skillId -ceq 'review-bitbucket-pull-request')
+            $baseline=Get-ExceptionFixtureBaseline $fixture.Root
+            $baseline.scanner_version=$NewVersion
+            $newHashes=@(
+                'sha256:cd03ffaa57a764f8a960ca4af6dc774b56f8374b008a9e116be86274b81bcb13',
+                'sha256:9cd21ec5e6c12ebcfd4e4c5161fccfbfe197a8c56f81aa6ce872ba2d21f61d03',
+                'sha256:07daccad20dd2bc1d865c5d7657d9242d4866c66017c25256139f14163c97806'
+            )
+            for($index=0;$index-lt$baseline.fingerprints.Count;$index++){
+                $oldHash=[string]$baseline.fingerprints[$index].hash;$newHash=$newHashes[$index]
+                $exception=@($registry.exceptions|Where-Object fingerprint -ceq $oldHash)
+                if($exception.Count-ne1){throw "Transition fixture fingerprint '$oldHash' has no unique exception."}
+                $baseline.fingerprints[$index].hash=$newHash;$exception[0].fingerprint=$newHash
+            }
+            if($null-ne$Mutation){& $Mutation $registry $baseline $fixture.Root}
+            Set-ExceptionFixtureRegistry $fixture.Root $registry
+            Set-ExceptionFixtureBaseline $fixture.Root $baseline
+            Get-ChildItem -LiteralPath (Join-Path $fixture.Root 'config/skillspector-exceptions') -Filter '*.baseline.json'|Where-Object Name -cne `
+                'review-bitbucket-pull-request.baseline.json'|Remove-Item -Force
+            [pscustomobject]@{Root=$fixture.Root;Base=$fixture.Base;Candidate=Save-ExceptionFixtureCandidate $fixture.Root 'scanner transition candidate'}
+        }
+        function Get-ScannerTransitionSuppressedFindings($Fixture) {
+            @(Get-GateCandidateTransitionExpectations $Fixture.Root $Fixture.Candidate|ForEach-Object{
+                [pscustomobject]@{skillId=$_.skillId;ruleId=$_.ruleId;severity='medium';file=$_.file;line=[long]$_.startLine;suppressionReason=$_.reason}
+            })
+        }
+        function Assert-ScannerTransitionEvidenceFixture($Fixture,[object[]]$Suppressed) {
+            $artifacts=Join-Path $TestDrive ('transition-evidence-'+[guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($artifacts)
+            $eventPath=Join-Path $artifacts 'static-event.json'
+            $envelope=[ordered]@{suppressedFindings=@($Suppressed)}|ConvertTo-Json -Depth 20 -Compress
+            Write-FixtureJson $eventPath ([ordered]@{stdout=$envelope})
+            $report=[pscustomobject]@{sourceValidation=[pscustomobject]@{events=@([pscustomobject]@{
+                toolId='static-analyzer';outputPath=$eventPath;outputSha256=Get-GateSha256 $eventPath
+            })}}
+            Assert-GateExceptionScannerTransitionEvidence $script:RepositoryRoot $Fixture.Root $Fixture.Base $Fixture.Candidate $report $artifacts
+        }
         function Replace-ExceptionFixtureRegistryText([string]$Root,[string]$Pattern,[string]$Replacement) {
             $path=Join-Path $Root 'config/skillspector-exceptions.json'
             $text=[IO.File]::ReadAllText($path,[Text.Encoding]::UTF8)
@@ -2478,6 +2538,121 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
                 else{@($result.events).Count|Should Be 0}
             }finally{Remove-SourceFixtureLease $lease}
         }
+    }
+
+    # Scenario: A retained 2.13.4 exception set is reduced to three records while every scanner-bound field is re-pinned to active 2.13.6.
+    # Purpose: Allow the exact human-approved scanner transition without weakening shrink-only semantics.
+    It 'UnitT65_accepts_the_approved_SkillSpector_scanner_transition' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-valid'
+        Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot
+    }
+
+    # Scenario: A scanner-transition candidate adds a fourth exception.
+    # Purpose: Keep transition approval shrink-only and reject additions even when scanner identities are valid.
+    It 'UnitT66_blocks_an_added_exception_during_scanner_transition' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-add' -Mutation {
+            param($registry,$baseline,$root)
+            $added=Copy-FixtureValue $registry.exceptions[0];$added.exceptionId='added-exception';$added.file='added.ps1'
+            $registry.exceptions=@($registry.exceptions)+@($added)
+        }
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|'
+    }
+
+    # Scenario: A retained exception moves to another source line during scanner transition.
+    # Purpose: Permit only fingerprint replacement and preserve the exact reviewed location.
+    It 'UnitT67_blocks_exception_location_drift_during_scanner_transition' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-line' -Mutation {param($registry,$baseline,$root) $registry.exceptions[0].startLine++}
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|.*fingerprint'
+    }
+
+    # Scenario: A retained baseline changes its human-approved reason during scanner transition.
+    # Purpose: Keep all non-hash fingerprint fields immutable.
+    It 'UnitT68_blocks_baseline_reason_drift_during_scanner_transition' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-reason' -Mutation {param($registry,$baseline,$root) $baseline.fingerprints[0].reason='changed reason'}
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|.*hash'
+    }
+
+    # Scenario: The registry scanner source changes together with an otherwise valid version transition.
+    # Purpose: Restrict scanner object changes to version and wheelSha256.
+    It 'UnitT69_blocks_scanner_source_drift_during_scanner_transition' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-source' -Mutation {param($registry,$baseline,$root) $registry.scanner.source='changed-source'}
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|.*source'
+    }
+
+    # Scenario: A candidate targets reviewed but non-active 2.13.0.
+    # Purpose: Allow transitions only to the executing authority's active scanner entry.
+    It 'UnitT70_blocks_a_scanner_transition_to_a_non_active_version' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-non-active' -NewVersion '2.13.0' `
+            -NewWheel '41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|'
+    }
+
+    # Scenario: The candidate version is active but its wheel digest is not the active approved digest.
+    # Purpose: Bind transition permission to the exact reviewed scanner artifact.
+    It 'UnitT71_blocks_an_active_scanner_transition_with_the_wrong_wheel' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-new-wheel' -NewWheel ('f'*64)
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|'
+    }
+
+    # Scenario: The base registry names a scanner version absent from approved-sources.
+    # Purpose: Require the old side of a transition to be a retained reviewed entry.
+    It 'UnitT72_blocks_a_scanner_transition_from_an_unknown_old_version' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-old-unknown' -OldVersion '9.9.9' -OldWheel ('e'*64)
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|'
+    }
+
+    # Scenario: Fingerprints change while scanner.version remains 2.13.4.
+    # Purpose: Preserve the original shrink-only rule outside a real scanner transition.
+    It 'UnitT73_blocks_fingerprint_changes_without_a_scanner_version_transition' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-same-version' -NewVersion '2.13.4' `
+            -NewWheel 'c5e7f290897c65018013a6e37022fabdd2ba1aeeb4994b65df2de8b0d536bea0'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|.*modified'
+    }
+
+    # Scenario: A candidate baseline declares a scanner_version different from the registry transition target.
+    # Purpose: Keep every retained baseline bound to the exact active scanner version.
+    It 'UnitT74_blocks_baseline_scanner_version_drift_during_transition' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-baseline-version' -Mutation {param($registry,$baseline,$root) $baseline.scanner_version='2.13.5'}
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|.*scanner_version'
+    }
+
+    # Scenario: A candidate exception fingerprint differs from its otherwise retained baseline hash.
+    # Purpose: Preserve the registry-to-baseline one-to-one pairing after re-pinning.
+    It 'UnitT75_blocks_exception_and_baseline_fingerprint_mismatch' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-pairing' -Mutation {param($registry,$baseline,$root) $registry.exceptions[0].fingerprint='sha256:'+('f'*64)}
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|.*exactly one'
+    }
+
+    # Scenario: Legacy callers invoke the three-argument shrink-only function for a version-changing candidate.
+    # Purpose: Keep old call behavior fail-closed when no authority can approve the transition.
+    It 'UnitT76_keeps_the_legacy_three_argument_gate_fail_closed' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-no-authority'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate})|Should Match '^BLOCKED\|'
+    }
+
+    # Scenario: All three candidate fingerprints are reported once with their exact approved reason and source line.
+    # Purpose: Re-derive transition expectations from Git trees and accept run-bound scanner evidence only when it is complete.
+    It 'UnitT77_accepts_three_of_three_run_bound_transition_suppressions' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-evidence-valid'
+        $suppressed=Get-ScannerTransitionSuppressedFindings $fixture
+        $suppressed.Count|Should Be 3
+        Assert-ScannerTransitionEvidenceFixture $fixture $suppressed
+    }
+
+    # Scenario: The run-bound scanner envelope omits one of three candidate fingerprints.
+    # Purpose: Reject any transitioned fingerprint that was not actually produced and used in this run.
+    It 'UnitT78_blocks_an_unused_transition_fingerprint' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-evidence-unused'
+        $suppressed=@(Get-ScannerTransitionSuppressedFindings $fixture|Select-Object -First 2)
+        (Get-SourceFixtureFailure {Assert-ScannerTransitionEvidenceFixture $fixture $suppressed})|Should Match '^BLOCKED\|.*every candidate baseline fingerprint'
+    }
+
+    # Scenario: A run-bound suppressed finding reports a line different from the paired exception startLine.
+    # Purpose: Bind new fingerprints to the exact reviewed source location rather than only rule, file, and reason.
+    It 'UnitT79_blocks_transition_suppression_line_mismatch' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-evidence-line'
+        $suppressed=Get-ScannerTransitionSuppressedFindings $fixture;$suppressed[0].line++
+        (Get-SourceFixtureFailure {Assert-ScannerTransitionEvidenceFixture $fixture $suppressed})|Should Match '^BLOCKED\|.*line'
     }
 
     # Scenario: Three valid legs were fetched at different official-main tips and one stable binding is then changed.

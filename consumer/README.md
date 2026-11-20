@@ -23,6 +23,8 @@ Before any conversion:
 
 During Atlassian conversion, the SkillSpector exception set may only shrink. This conversion removes five baseline files that no longer have findings and reduces both the registry and the remaining `review-bitbucket-pull-request` baseline to its three findings; those remaining findings stay in place until SYP-493 re-approval is handled. The source gate blocks every new or modified exception, including a new registry or baseline, a changed fingerprint or reason, and an expiry renewal.
 
+The only exception is a human-approved transition from a retained approved scanner version to the authority registry's active scanner version. Both old and new wheel hashes must match their approved entries. The registry and baseline sets may still only shrink; only `scanner.version`, `scanner.wheelSha256`, each retained exception `fingerprint`, each retained baseline `scanner_version`, and each retained fingerprint `hash` may change. All other object fields and field sets must remain byte-semantically equivalent under the gate's strict JSON comparison. After the candidate scan, authority-owned finalize logic re-derives the transition from the immutable base and candidate Git trees and requires every candidate fingerprint to be used exactly once by a suppressed finding whose skill, rule, file, and reason match that fingerprint and whose line matches the paired retained exception. Any mismatch blocks the gate. The 2.13.4 to 2.13.6 transition was manually approved by the user on 2026-11-20 with “同意切換”.
+
 Knowledge Content, Code Collaboration, and General have no exception set and may convert after the consumer gate is merged.
 
 ### 0.5 Inventory preflight and retry

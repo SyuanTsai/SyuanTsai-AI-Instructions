@@ -392,10 +392,12 @@ function Get-SkillSpectorSuppressedFindings {
         $ruleId = Get-Property -Object $entry -Name 'id' -Context 'SkillSpector suppressed finding'
         $location = Get-Property -Object $entry -Name 'location' -Context 'SkillSpector suppressed finding'
         $file = Get-Property -Object $location -Name 'file' -Context 'SkillSpector suppressed finding location'
+        $line = Get-Property -Object $location -Name 'start_line' -Context 'SkillSpector suppressed finding location'
         $reason = Get-Property -Object $entry -Name 'suppression_reason' -Context 'SkillSpector suppressed finding'
         if ($suppressedFlag -isnot [bool] -or -not $suppressedFlag -or
             $ruleId -isnot [string] -or [string]::IsNullOrWhiteSpace($ruleId) -or
             $file -isnot [string] -or [string]::IsNullOrWhiteSpace($file) -or
+            ($line -isnot [int] -and $line -isnot [long]) -or [long]$line -lt 1 -or
             $reason -isnot [string] -or [string]::IsNullOrWhiteSpace($reason)) {
             throw "SkillSpector suppression evidence is malformed for '$SkillId'."
         }
@@ -407,6 +409,7 @@ function Get-SkillSpectorSuppressedFindings {
             severity = ConvertTo-CanonicalSeverity -Value (Get-Property -Object $entry -Name 'severity' `
                 -Context 'SkillSpector suppressed finding') -Context "SkillSpector suppression for '$SkillId'"
             file = [string]$file
+            line = [long]$line
             suppressionReason = [string]$reason
         }
     }
