@@ -3198,9 +3198,11 @@ if($LASTEXITCODE-ne0){throw 'Fixture git commit failed.'}
         [IO.File]::WriteAllText($powerShell,'fixture pwsh',[Text.UTF8Encoding]::new($false))
         $hash=(Get-FileHash $trusted -Algorithm SHA256).Hash.ToLowerInvariant()
         $powerShellHash=(Get-FileHash $powerShell -Algorithm SHA256).Hash.ToLowerInvariant()
-        $gateSetup=[pscustomobject]@{trustedRoot=$trustedRoot;repositoryCheck=$trusted;pesterReceiptSha256=('a'*64)
-            pesterManifestSha256=('b'*64);pesterVersion='6.2.0';sourceValidation=[pscustomobject]{
-                frozenFiles=@([pscustomobject]@{path=$trusted;sha256=$hash},[pscustomobject]@{path=$powerShell;sha256=$powerShellHash})}}
+        $setupPath=Join-Path $root 'source-tools.json'
+        Write-FixtureJson $setupPath ([ordered]@{trustedRoot=$trustedRoot;repositoryCheck=$trusted;pesterReceiptSha256=('a'*64)
+                pesterManifestSha256=('b'*64);pesterVersion='6.2.0';sourceValidation=[ordered]@{
+                    frozenFiles=@([ordered]@{path=$trusted;sha256=$hash},[ordered]@{path=$powerShell;sha256=$powerShellHash})}})
+        $gateSetup=Read-GateJson $setupPath 'adapter setup fixture'
         $valid=@(
             [pscustomobject]@{id='repository-general';kind='general';executable=$powerShell;executableSha256=$powerShellHash
                 arguments=@('-NoProfile','-NonInteractive','-File',$trusted,'-Mode','general')},
@@ -3470,6 +3472,11 @@ Start-Sleep -Seconds 30
         $resolver=Join-Path $root 'resolver.ps1';[IO.File]::WriteAllText($resolver,'exit 0',[Text.UTF8Encoding]::new($false))
         $oldResolver=$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH;$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
         Restore-GateFixtureModule
+        $gateModule=Get-Module ConsumerGate -ErrorAction Stop
+        $previousGatePlatformRuntimeModule=$gateModule.SessionState.PSVariable.GetValue('GatePlatformRuntimeModule')
+        $previousGatePlatformRuntimeAuthorityRoot=$gateModule.SessionState.PSVariable.GetValue('GatePlatformRuntimeAuthorityRoot')
+        $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeModule',$null)
+        $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeAuthorityRoot',$null)
         Mock Import-GatePlatformRuntime {[pscustomobject]@{ExportedCommands=@{
                     'Invoke-PlatformPreparationCommand'={ [pscustomobject]@{stdout='';stderr='';exitCode=$null} }
                 }}} -ModuleName ConsumerGate
@@ -3528,7 +3535,8 @@ Start-Sleep -Seconds 30
             [Console]::SetError($previousConsoleError)
             $consoleOut.Dispose()
             $consoleError.Dispose()
-            Restore-GateFixtureModule
+            $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeModule',$previousGatePlatformRuntimeModule)
+            $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeAuthorityRoot',$previousGatePlatformRuntimeAuthorityRoot)
             $global:LASTEXITCODE=$previousLastExitCode
         }
     }
@@ -3614,9 +3622,11 @@ if($DefineFunctionsOnly){return}
     # Purpose: Execute the repository wrapper and prove closure bytes plus complete case identity are enforced behaviorally.
     It 'InterT56_executes_verified_pester_closure_and_complete_discovery' {
         $coreRunId = '1234567890abcdef1234567890abcdef'
+        Remove-Variable StandardValidationPlatformBinding -Scope Script -ErrorAction SilentlyContinue
         . (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidation.ps1') `
             -CandidateRoot $TestDrive -AdapterPath 'unused' -ArtifactsRoot $TestDrive `
             -SourceRepository 'https://example.test/consumer-check.git' -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
+        Initialize-StandardValidationPlatformRuntime
         foreach ($scenario in @('success-file','success-runner','tampered','duplicatepath','partial','duplicate','skipped','notrun')) {
             $workRoot = Join-Path $TestDrive "pester-wrapper-$scenario"
             $candidate = Join-Path $workRoot "$coreRunId/candidate"
