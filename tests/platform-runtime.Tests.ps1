@@ -5050,6 +5050,24 @@ Describe 'Unix P7c durable publication and removal' {
         } finally {$txn.Lease.Dispose()}
     }
 
+    # Scenario: A Unix transaction tree contains regular files whose leaf names include TAB and LF controls.
+    # Purpose: Refuse ambiguous canonical inventory input and owned-tree cleanup before deleting any entry.
+    It 'InterT869_refuses_control_character_unix_names_for_inventory_and_removal' {
+        $txn=New-P7cTransaction
+        try {
+            $tree=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/control-tree";[void][IO.Directory]::CreateDirectory($tree)
+            $rootState=Get-PlatformDirectoryState -ParentLease $txn.Lease -Leaf control-tree
+            $tabPath=Join-Path $tree "tab`tname";$newlinePath=Join-Path $tree "line`nname"
+            [IO.File]::WriteAllText($tabPath,'tab');[IO.File]::WriteAllText($newlinePath,'newline')
+
+            $inventoryFailure=$null;try{Get-PlatformDirectoryState -ParentLease $txn.Lease -Leaf control-tree|Out-Null}catch{$inventoryFailure=Get-P7cTypedPlatformException $_.Exception}
+            $inventoryFailure.GetType().Name|Should Be 'PlatformVerificationException';$inventoryFailure.Capability|Should Be 'directory-publication'
+            $removalFailure=$null;try{Remove-PlatformOwnedDirectoryTree -TransactionLease $txn.Lease -Leaf control-tree -ExpectedIdentity $rootState.identity|Out-Null}catch{$removalFailure=Get-P7cTypedPlatformException $_.Exception}
+            $removalFailure.GetType().Name|Should Be 'PlatformVerificationException';$removalFailure.Capability|Should Be 'owned-file-removal'
+            Test-Path -LiteralPath $tree -PathType Container|Should Be $true;Test-Path -LiteralPath $tabPath -PathType Leaf|Should Be $true;Test-Path -LiteralPath $newlinePath -PathType Leaf|Should Be $true
+        } finally {$txn.Lease.Dispose()}
+    }
+
     # Scenario: A directory leaf or one of its descendants is a symlink, FIFO, or multiply-linked regular file.
     # Purpose: Fail closed with directory-publication evidence without following or accepting the unsafe entry.
     It 'InterT870_rejects_unsafe_unix_directory_inventory_entries' {
@@ -5162,6 +5180,24 @@ Describe 'Unix P7c durable publication and removal' {
         } finally {$ordinary.Dispose();$txn.Lease.Dispose();$rootLease.Dispose()}
     }
 
+    # Scenario: An owned transaction tree contains mode-0000 regular files at its root and in a subdirectory.
+    # Purpose: Remove create-only crash remnants using descriptor-relative metadata without requiring file read permission.
+    It 'InterT891_removes_mode_zero_regular_files_without_opening_contents' {
+        $txn=New-P7cTransaction
+        try {
+            $tree=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/mode-zero-tree";$nested=Join-Path $tree nested
+            [void][IO.Directory]::CreateDirectory($nested)
+            $rootFile=Join-Path $tree root.bin;$nestedFile=Join-Path $nested nested.bin
+            [IO.File]::WriteAllText($rootFile,'root');[IO.File]::WriteAllText($nestedFile,'nested')
+            $state=Get-PlatformDirectoryState -ParentLease $txn.Lease -Leaf mode-zero-tree
+            [IO.File]::SetUnixFileMode($rootFile,[IO.UnixFileMode]0);[IO.File]::SetUnixFileMode($nestedFile,[IO.UnixFileMode]0)
+
+            $receipt=Remove-PlatformOwnedDirectoryTree -TransactionLease $txn.Lease -Leaf mode-zero-tree -ExpectedIdentity $state.identity
+            $receipt.capability|Should Be 'owned-file-removal';$receipt.removedEntryCount|Should Be 4
+            Test-Path -LiteralPath $tree|Should Be $false
+        } finally {$txn.Lease.Dispose()}
+    }
+
     # Scenario: An owned Unix transaction tree contains a FIFO after its root identity is recorded.
     # Purpose: Validate the complete tree before removal and preserve every entry when an unsupported type is present.
     It 'InterT892_rejects_unix_fifo_tree_removal_without_deleting_entries' {
@@ -5175,6 +5211,23 @@ Describe 'Unix P7c durable publication and removal' {
             $caught.GetType().Name|Should Be 'PlatformVerificationException';$caught.Capability|Should Be 'owned-file-removal'
             Test-Path -LiteralPath $tree -PathType Container|Should Be $true;Test-Path -LiteralPath $sentinel -PathType Leaf|Should Be $true;Test-Path -LiteralPath $fifo|Should Be $true
         } finally {$txn.Lease.Dispose()}
+    }
+
+    # Scenario: A same-account actor replaces a regular file inode between the two complete-tree validation passes.
+    # Purpose: Return typed identity-drift evidence before deletion and preserve both the original and replacement files.
+    It 'InterT893_rejects_owned_tree_identity_drift_between_validation_passes_without_deletion' {
+        $txn=New-P7cTransaction;$field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+        try {
+            $tree=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/identity-drift-tree";$target=Join-Path $tree target.bin;$retained=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/original-retained.bin"
+            [void][IO.Directory]::CreateDirectory($tree);[IO.File]::WriteAllText($target,'original')
+            $state=Get-PlatformDirectoryState -ParentLease $txn.Lease -Leaf identity-drift-tree
+            $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'owned-directory-tree-between-validation-passes'){[IO.File]::Move($target,$retained);[IO.File]::WriteAllText($target,'replacement')}})
+
+            $caught=$null;try{Remove-PlatformOwnedDirectoryTree -TransactionLease $txn.Lease -Leaf identity-drift-tree -ExpectedIdentity $state.identity|Out-Null}catch{$caught=Get-P7cTypedPlatformException $_.Exception}
+            $caught.GetType().Name|Should Be 'PlatformVerificationException';$caught.Capability|Should Be 'owned-file-removal'
+            [IO.File]::ReadAllText($retained)|Should Be original;[IO.File]::ReadAllText($target)|Should Be replacement
+            Test-Path -LiteralPath $tree -PathType Container|Should Be $true
+        } finally {$field.SetValue($null,$null);$txn.Lease.Dispose()}
     }
 
     # Scenario: The directory-publication probe runs on a Unix host with native no-replace rename and owned-tree cleanup.

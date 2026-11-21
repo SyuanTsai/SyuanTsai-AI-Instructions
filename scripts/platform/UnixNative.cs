@@ -290,10 +290,15 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             [DllImport(Lib, SetLastError = true)] internal static extern int unlinkat(SafeFd fd, string name, int flags);
             [DllImport(Lib, SetLastError = true)] internal static extern int linkat(SafeFd fd, string name, SafeFd other, string link, int flags);
             [DllImport(Lib, SetLastError = true)] internal static extern int symlinkat(string target, SafeFd fd, string name);
-            // F_GETFD does not consume a variadic third argument. F_DUPFD_CLOEXEC
-            // consumes an integer third argument through the fixed fcntlInt signature.
+            // F_GETFD does not consume a variadic third argument. The fixed-argument
+            // declaration is valid for Darwin x64; Darwin arm64 uses the stack shim below.
             [DllImport(Lib, SetLastError = true)] internal static extern int fcntl(SafeFd fd, int command);
             [DllImport(Lib, EntryPoint = "fcntl", SetLastError = true)] internal static extern int fcntlInt(SafeFd fd, int command, int argument);
+            // Apple arm64 passes variadic arguments on the stack. Fill x2..x7 so
+            // fcntl's integer va_arg occupies the first stack slot required by the ABI.
+            [DllImport(Lib, EntryPoint = "fcntl", SetLastError = true)]
+            internal static extern int fcntlIntArm64(SafeFd fd, int command,
+                IntPtr x2, IntPtr x3, IntPtr x4, IntPtr x5, IntPtr x6, IntPtr x7, int stackArgument);
             [DllImport(Lib, SetLastError = true)] internal static extern IntPtr fdopendir(int fd);
             [DllImport(Lib, SetLastError = true)] internal static extern IntPtr readdir(IntPtr directory);
             [DllImport(Lib, EntryPoint = "readdir$INODE64", SetLastError = true)] internal static extern IntPtr readdir64(IntPtr directory);
@@ -304,6 +309,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
 
         private static bool Mac { get { return PlatformNative.GetOperatingSystem() == "macos"; } }
         private static bool X64 { get { return PlatformNative.GetArchitecture() == "x64"; } }
+        private static bool AppleArm64 { get { return RuntimeInformation.IsOSPlatform(OSPlatform.OSX) && RuntimeInformation.ProcessArchitecture == Architecture.Arm64; } }
         // Linux aarch64 overrides asm-generic O_DIRECTORY/O_NOFOLLOW. Select by
         // both OS and architecture; these are NOT the Linux x86_64 values.
         private static int DirectoryFlags { get { return Mac ? 0x100000 : X64 ? 0x10000 : 0x4000; } }
@@ -449,12 +455,31 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private static void Chmod(SafeFd fd, uint mode) { Check(Mac ? Darwin.fchmod(fd, mode) : Linux.fchmod(fd, mode), "fchmod"); }
         private static void Unlink(SafeFd fd, string leaf, bool directory)
         { Check(Mac ? Darwin.unlinkat(fd, leaf, directory ? AtRemoveDirectory : 0) : Linux.unlinkat(fd, leaf, directory ? AtRemoveDirectory : 0), "unlinkat-probe-cleanup"); }
-        private static List<string> EnumerateChildLeaves(SafeFd directory)
+        private static int FcntlInt(SafeFd fd, int command, int argument)
         {
+            if (!Mac) return Linux.fcntlInt(fd, command, argument);
+            if (!AppleArm64) return Darwin.fcntlInt(fd, command, argument);
+            return Darwin.fcntlIntArm64(fd, command,
+                IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, argument);
+        }
+        private static bool IsDotEntry(IntPtr entry, int nameOffset, int length)
+        {
+            return (length == 1 && Marshal.ReadByte(entry, nameOffset) == (byte)'.') ||
+                (length == 2 && Marshal.ReadByte(entry, nameOffset) == (byte)'.' && Marshal.ReadByte(entry, nameOffset + 1) == (byte)'.');
+        }
+        private static void AssertSafeDirectoryLeaf(string leaf)
+        {
+            foreach (char value in leaf)
+                if (value <= '\u001f' || value == '\u007f')
+                    throw new IOException("Directory entry names containing control characters are not supported.");
+        }
+        private static List<string> EnumerateChildLeaves(SafeFd directory, int maximumLeaves, string limitMessage)
+        {
+            if (maximumLeaves < 0) throw new ArgumentOutOfRangeException("maximumLeaves");
             int duplicate;
             using (SafeFd fresh = Open(directory, ".", DirectoryFlags, 0))
             {
-                duplicate = Mac ? Darwin.fcntlInt(fresh, DuplicateCloseOnExec, 0) : Linux.fcntlInt(fresh, DuplicateCloseOnExec, 0);
+                duplicate = FcntlInt(fresh, DuplicateCloseOnExec, 0);
                 Check(duplicate, "fcntl-F_DUPFD_CLOEXEC-directory-enumeration");
                 using (SafeFd verified = new SafeFd(duplicate))
                 {
@@ -498,10 +523,12 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     int capacity = recordLength - nameOffset, length = 0;
                     while (length < capacity && Marshal.ReadByte(entry, nameOffset + length) != 0) length++;
                     if (length == capacity) throw new IOException("Directory enumeration returned an unterminated name.");
+                    if (IsDotEntry(entry, nameOffset, length)) continue;
+                    if (leaves.Count == maximumLeaves) throw new IOException(limitMessage);
                     byte[] nameBytes = new byte[length];
                     if (length != 0) Marshal.Copy(IntPtr.Add(entry, nameOffset), nameBytes, 0, length);
                     string leaf = strictUtf8.GetString(nameBytes);
-                    if (leaf == "." || leaf == "..") continue;
+                    AssertSafeDirectoryLeaf(leaf);
                     PlatformPaths.Leaf(leaf);
                     if (!unique.Add(leaf)) throw new IOException("Directory enumeration returned a duplicate name.");
                     leaves.Add(leaf);
@@ -894,9 +921,12 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             AssertNoExtendedMetadata(directory.Fd, directoryObservation);
             var inventory = new List<UnixDirectoryInventoryEntry>();
             var frames = new List<UnixDirectoryWalkFrame>();
+            List<string> rootLeaves = EnumerateChildLeaves(directory.Fd, MaximumDirectoryTreeEntries,
+                "Directory tree exceeds the 100000-entry verification limit.");
+            int discoveredEntryCount = rootLeaves.Count;
             frames.Add(new UnixDirectoryWalkFrame {
                 Directory = directory.Fd, ParentDirectory = null, Leaf = null, Prefix = String.Empty,
-                Depth = 0, Observation = directoryObservation, Leaves = EnumerateChildLeaves(directory.Fd),
+                Depth = 0, Observation = directoryObservation, Leaves = rootLeaves,
                 Index = 0, OwnsDirectory = false
             });
             try
@@ -906,7 +936,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     UnixDirectoryWalkFrame frame = frames[frames.Count - 1];
                     if (frame.Index == frame.Leaves.Count)
                     {
-                        AssertSameLeaves(frame.Leaves, EnumerateChildLeaves(frame.Directory));
+                        AssertSameLeaves(frame.Leaves, EnumerateChildLeaves(frame.Directory, frame.Leaves.Count,
+                            "Directory contents changed while the tree was being verified."));
                         AssertSnapshot(Stat(frame.Directory, null), frame.Observation);
                         if (frame.ParentDirectory != null) AssertSnapshot(Stat(frame.ParentDirectory, frame.Leaf), frame.Observation);
                         frames.RemoveAt(frames.Count - 1);
@@ -916,8 +947,6 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
 
                     string leaf = frame.Leaves[frame.Index++];
                     FileObservation named = Stat(frame.Directory, leaf);
-                    if (inventory.Count == MaximumDirectoryTreeEntries)
-                        throw new IOException("Directory tree exceeds the 100000-entry verification limit.");
                     string relativePath = frame.Prefix + leaf;
                     if (named.Kind == "directory")
                     {
@@ -932,9 +961,13 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         });
                         try
                         {
+                            List<string> childLeaves = EnumerateChildLeaves(child,
+                                MaximumDirectoryTreeEntries - discoveredEntryCount,
+                                "Directory tree exceeds the 100000-entry verification limit.");
+                            discoveredEntryCount += childLeaves.Count;
                             frames.Add(new UnixDirectoryWalkFrame {
                                 Directory = child, ParentDirectory = frame.Directory, Leaf = leaf, Prefix = relativePath + "/",
-                                Depth = depth, Observation = named, Leaves = EnumerateChildLeaves(child), Index = 0, OwnsDirectory = true
+                                Depth = depth, Observation = named, Leaves = childLeaves, Index = 0, OwnsDirectory = true
                             });
                             child = null;
                         }
@@ -1361,6 +1394,13 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             finally { if (directory != null) directory.Dispose(); }
         }
 
+        private static void AssertOwnedRegularFileMetadata(FileObservation actual, FileObservation expected)
+        {
+            if (actual.Kind != "file" || expected.Kind != "file" || actual.Device != expected.Device ||
+                actual.Inode != expected.Inode || actual.LinkCount != expected.LinkCount || actual.LinkCount != 1)
+                throw new IOException("An owned regular file changed identity, type, or link count while it was being verified.");
+        }
+
         private static List<UnixOwnedTreeEntry> ValidateOwnedDirectoryTree(SafeFd parent, string leaf, ulong expectedDevice, ulong expectedInode)
         {
             FileObservation root = Stat(parent, leaf);
@@ -1372,9 +1412,12 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             var frames = new List<UnixDirectoryWalkFrame>();
             try
             {
+                List<string> rootLeaves = EnumerateChildLeaves(rootDirectory, MaximumDirectoryTreeEntries - 1,
+                    "Owned directory tree exceeds the 100000-entry verification limit.");
+                int discoveredEntryCount = 1 + rootLeaves.Count;
                 frames.Add(new UnixDirectoryWalkFrame {
                     Directory = rootDirectory, ParentDirectory = parent, Leaf = leaf, Prefix = leaf + "/",
-                    Depth = 0, Observation = root, Leaves = EnumerateChildLeaves(rootDirectory), Index = 0, OwnsDirectory = true
+                    Depth = 0, Observation = root, Leaves = rootLeaves, Index = 0, OwnsDirectory = true
                 });
                 rootDirectory = null;
                 while (frames.Count != 0)
@@ -1382,7 +1425,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     UnixDirectoryWalkFrame frame = frames[frames.Count - 1];
                     if (frame.Index == frame.Leaves.Count)
                     {
-                        AssertSameLeaves(frame.Leaves, EnumerateChildLeaves(frame.Directory));
+                        AssertSameLeaves(frame.Leaves, EnumerateChildLeaves(frame.Directory, frame.Leaves.Count,
+                            "Directory contents changed while the tree was being verified."));
                         AssertSnapshot(Stat(frame.Directory, null), frame.Observation);
                         AssertSnapshot(Stat(frame.ParentDirectory, frame.Leaf), frame.Observation);
                         frames.RemoveAt(frames.Count - 1); frame.Directory.Dispose();
@@ -1391,8 +1435,6 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
 
                     string childLeaf = frame.Leaves[frame.Index++];
                     FileObservation named = Stat(frame.Directory, childLeaf);
-                    if (entries.Count == MaximumDirectoryTreeEntries)
-                        throw new IOException("Owned directory tree exceeds the 100000-entry verification limit.");
                     string relativePath = frame.Prefix + childLeaf;
                     if (named.Kind == "directory")
                     {
@@ -1403,9 +1445,13 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         entries.Add(new UnixOwnedTreeEntry { Path = relativePath, Observation = named });
                         try
                         {
+                            List<string> childLeaves = EnumerateChildLeaves(childDirectory,
+                                MaximumDirectoryTreeEntries - discoveredEntryCount,
+                                "Owned directory tree exceeds the 100000-entry verification limit.");
+                            discoveredEntryCount += childLeaves.Count;
                             frames.Add(new UnixDirectoryWalkFrame {
                                 Directory = childDirectory, ParentDirectory = frame.Directory, Leaf = childLeaf, Prefix = relativePath + "/",
-                                Depth = depth, Observation = named, Leaves = EnumerateChildLeaves(childDirectory), Index = 0, OwnsDirectory = true
+                                Depth = depth, Observation = named, Leaves = childLeaves, Index = 0, OwnsDirectory = true
                             });
                             childDirectory = null;
                         }
@@ -1413,12 +1459,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     }
                     else if (named.Kind == "file")
                     {
-                        if (named.LinkCount != 1)
-                            throw new IOException("Owned directory tree cleanup requires every regular file to have exactly one link before mutation.");
-                        using (SafeFd file = Open(frame.Directory, childLeaf, NonBlock, 0))
-                        {
-                            AssertSnapshot(Stat(file, null), named); AssertSnapshot(Stat(frame.Directory, childLeaf), named);
-                        }
+                        AssertOwnedRegularFileMetadata(named, named);
                         entries.Add(new UnixOwnedTreeEntry { Path = relativePath, Observation = named });
                     }
                     else if (IsSymbolicLink(named))
@@ -1444,7 +1485,9 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             {
                 if (!StringComparer.Ordinal.Equals(first[index].Path, second[index].Path))
                     throw new IOException("Owned directory tree changed between verification passes.");
-                AssertSnapshot(second[index].Observation, first[index].Observation);
+                if (first[index].Observation.Kind == "file")
+                    AssertOwnedRegularFileMetadata(second[index].Observation, first[index].Observation);
+                else AssertSnapshot(second[index].Observation, first[index].Observation);
             }
         }
 
@@ -1491,6 +1534,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     // first unlink. The deletion pass is iterative and reopens each
                     // recorded entry relative to verified directory descriptors.
                     List<UnixOwnedTreeEntry> first = ValidateOwnedDirectoryTree(parent.Fd, leaf, expectedDevice, expectedInode);
+                    RunMutationTestHook("owned-directory-tree-between-validation-passes");
                     List<UnixOwnedTreeEntry> entries = ValidateOwnedDirectoryTree(parent.Fd, leaf, expectedDevice, expectedInode);
                     AssertSameOwnedTree(first, entries);
                     var observations = new Dictionary<string, FileObservation>(StringComparer.Ordinal);
@@ -1509,16 +1553,13 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                                 using (SafeFd directory = Open(entryParent, entryLeaf, DirectoryFlags | NonBlock, 0))
                                 {
                                     AssertIdentityAndType(Stat(directory, null), entry.Observation);
-                                    if (EnumerateChildLeaves(directory).Count != 0)
-                                        throw new IOException("A directory entry appeared during owned-tree cleanup.");
+                                    EnumerateChildLeaves(directory, 0, "A directory entry appeared during owned-tree cleanup.");
                                 }
                                 Unlink(entryParent, entryLeaf, true);
                             }
                             else if (entry.Observation.Kind == "file")
                             {
-                                AssertSnapshot(named, entry.Observation);
-                                using (SafeFd file = Open(entryParent, entryLeaf, NonBlock, 0))
-                                    AssertSnapshot(Stat(file, null), entry.Observation);
+                                AssertOwnedRegularFileMetadata(named, entry.Observation);
                                 Unlink(entryParent, entryLeaf, false);
                             }
                             else if (IsSymbolicLink(entry.Observation))
