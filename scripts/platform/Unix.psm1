@@ -20,6 +20,17 @@ function New-UnixPlatformVerificationError {
         $Message)
 }
 
+function Resolve-UnixPlatformException {
+    param([Parameter(Mandatory=$true)][Exception]$Exception)
+    for($current=$Exception;$null-ne$current;$current=$current.InnerException){
+        if($current-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]-or
+            $current-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException]-or
+            $current-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]-or
+            $current-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException]){return$current}
+    }
+    return$Exception
+}
+
 function Assert-UnixPlatformTargetPath {
     param([Parameter(Mandatory=$true)] $ParentLease,[Parameter(Mandatory=$true)][string] $Leaf,[Parameter(Mandatory=$true)][string] $Capability,[switch] $AllowTransactionParent)
     $parentPath=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetVerifiedPath($ParentLease)
@@ -119,8 +130,9 @@ function Invoke-UnixPlatformDirectoryFlush {
     param($Lease,[string]$Operation,[string]$Point,[string]$Role)
     try{[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::FlushDirectory($Lease)}
     catch{
-        if($_.Exception-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]){throw $_.Exception}
-        throw (New-UnixPlatformVerificationError 'publication-durability' "$Operation $Point flush failed for the $Role directory: $($_.Exception.Message)")
+        $native=Resolve-UnixPlatformException $_.Exception
+        if($native-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]){throw $native}
+        throw (New-UnixPlatformVerificationError 'publication-durability' "$Operation $Point flush failed for the $Role directory: $($native.Message)")
     }
 }
 
@@ -131,8 +143,10 @@ function Open-UnixPlatformMutationDirectory {
         $device=ConvertFrom-UnixIdentityNumber $Identity.device 'ExpectedIdentity.device';$inode=ConvertFrom-UnixIdentityNumber $Identity.fileId 'ExpectedIdentity.fileId'
         [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenMutationDirectory($ParentLease,$Leaf,$device,$inode)
     }catch{
-        if($_.Exception-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]){throw}
-        throw (New-UnixPlatformVerificationError $Capability "The directory lease could not be opened and identity-verified: $($_.Exception.Message)")
+        $native=Resolve-UnixPlatformException $_.Exception
+        if($native-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]){throw $native}
+        if($native-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]){throw $native}
+        throw (New-UnixPlatformVerificationError $Capability "The directory lease could not be opened and identity-verified: $($native.Message)")
     }
 }
 
@@ -145,8 +159,10 @@ function Get-UnixPlatformDirectoryState {
         if($null-eq$state){return[pscustomobject][ordered]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null}}
         [pscustomobject][ordered]@{exists=$true;identity=(ConvertTo-UnixPlatformIdentity $state.Observation);inventorySha256=[string]$state.InventorySha256;entryCount=[int64]$state.EntryCount}
     }catch{
-        if($_.Exception-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]-and[string]$_.Exception.Capability-ceq'directory-publication'){throw $_.Exception}
-        throw (New-UnixPlatformVerificationError 'directory-publication' "Directory state could not be captured: $($_.Exception.Message)")
+        $native=Resolve-UnixPlatformException $_.Exception
+        if($native-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]){throw $native}
+        if($native-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]-and[string]$native.Capability-ceq'directory-publication'){throw $native}
+        throw (New-UnixPlatformVerificationError 'directory-publication' "Directory state could not be captured: $($native.Message)")
     }
 }
 
@@ -174,8 +190,10 @@ function Assert-UnixPlatformExpectedDirectoryState {
         $observed=[pscustomobject][ordered]@{exists=$true;identity=(ConvertTo-UnixPlatformIdentity $native.Observation);inventorySha256=[string]$native.InventorySha256;entryCount=[int64]$native.EntryCount}
         if(-not(Test-UnixPlatformDirectoryStateMatch $observed $ExpectedState)){throw[IO.IOException]::new('The source directory identity or complete-tree inventory differs from ExpectedState.')}
     }catch{
-        if($_.Exception-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]){throw}
-        throw (New-UnixPlatformVerificationError $Capability $_.Exception.Message)
+        $native=Resolve-UnixPlatformException $_.Exception
+        if($native-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]){throw $native}
+        if($native-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]){throw $native}
+        throw (New-UnixPlatformVerificationError $Capability $native.Message)
     }
 }
 
@@ -680,8 +698,8 @@ function Move-UnixPlatformOwnedDirectory {
         Invoke-UnixPlatformDirectoryFlush $TransactionLease 'directory-publication' 'preflight' 'transaction'
         try{[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::RenameDirectoryNoReplace($source,$destinationParent,$DestinationLeaf);$renamed=$true}
         catch{
-            $native=$_.Exception;if($native-is[Management.Automation.MethodInvocationException]-and$null-ne$native.InnerException){$native=$native.InnerException}
-            if($native-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException]-and[string]$native.CurrentState-ceq'renamed'){$renamed=$true;$renameFailure=$native}else{throw}
+            $native=Resolve-UnixPlatformException $_.Exception
+            if($native-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException]-and[string]$native.CurrentState-ceq'renamed'){$renamed=$true;$renameFailure=$native}else{throw $native}
         }
         $receipt=[pscustomobject][ordered]@{capability='directory-publication';sourceLeaf=$Leaf;destinationLeaf=$DestinationLeaf;direction=$Direction;identity=(ConvertTo-UnixPlatformIdentity $source.Observation)}
         if($null-ne$renameFailure){throw(New-UnixPlatformRecoveryError 'directory-publication' "Post-rename durability or complete-state verification failed; journal recovery is required. $($renameFailure.Message)" $receipt)}
@@ -698,14 +716,15 @@ function Move-UnixPlatformOwnedDirectory {
         }catch{throw(New-UnixPlatformRecoveryError 'directory-publication' "Post-rename durability or complete-state verification failed; journal recovery is required. $($_.Exception.Message)" $receipt)}
         return $receipt
     }catch{
+        $native=Resolve-UnixPlatformException $_.Exception
         if($renamed){
             if($null-eq$receipt){$receipt=[pscustomobject][ordered]@{capability='directory-publication';sourceLeaf=$Leaf;destinationLeaf=$DestinationLeaf;direction=$Direction;identity=$ExpectedIdentity}}
-            if($_.Exception-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]-and$null-ne$_.Exception.Data['Receipt']){throw}
-            throw(New-UnixPlatformRecoveryError 'directory-publication' "Post-rename durability or complete-state verification failed; journal recovery is required. $($_.Exception.Message)" $receipt)
+            if($native-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]-and$null-ne$native.Data['Receipt']){throw $native}
+            throw(New-UnixPlatformRecoveryError 'directory-publication' "Post-rename durability or complete-state verification failed; journal recovery is required. $($native.Message)" $receipt)
         }
-        if($_.Exception-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]-and[string]$_.Exception.Capability-ceq'directory-publication'){throw}
-        if($_.Exception-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]){throw $_.Exception}
-        throw(New-UnixPlatformVerificationError 'directory-publication' $_.Exception.Message)
+        if($native-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]-and[string]$native.Capability-ceq'directory-publication'){throw $native}
+        if($native-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]){throw $native}
+        throw(New-UnixPlatformVerificationError 'directory-publication' $native.Message)
     }finally{if($null-ne$source){$source.Dispose()}}
 }
 
@@ -734,8 +753,10 @@ function Remove-UnixPlatformOwnedDirectoryTree {
         try{Invoke-UnixPlatformDirectoryFlush $parentLease 'owned-directory-tree-removal' 'post-delete' 'parent'}catch{throw(New-UnixPlatformRecoveryError 'owned-file-removal' "Post-delete directory flush failed; manual recovery verification is required. $($_.Exception.Message)" $receipt)}
         return $receipt
     }catch{
-        if($_.Exception-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]-and[string]$_.Exception.Capability-ceq'owned-file-removal'){throw}
-        throw(New-UnixPlatformVerificationError 'owned-file-removal' $_.Exception.Message)
+        $native=Resolve-UnixPlatformException $_.Exception
+        if($native-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]){throw $native}
+        if($native-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]-and[string]$native.Capability-ceq'owned-file-removal'){throw $native}
+        throw(New-UnixPlatformVerificationError 'owned-file-removal' $native.Message)
     }
 }
 

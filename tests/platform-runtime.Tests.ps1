@@ -5014,6 +5014,42 @@ Describe 'Unix P7c durable publication and removal' {
         } finally {$parent.Dispose()}
     }
 
+    # Scenario: A Unix Skill tree contains 600 regular files distributed across nested directories.
+    # Purpose: Inventory ordinary trees beyond macOS's default descriptor limit without retaining one descriptor per entry.
+    It 'InterT867_inventories_more_than_256_unix_files_without_descriptor_exhaustion' {
+        $parent=New-P7cDirectory 'directory-many-entries'
+        try {
+            $tree=Join-Path $script:P7cRoot 'directory-many-entries/tree';[void][IO.Directory]::CreateDirectory($tree)
+            for($directoryIndex=0;$directoryIndex-lt6;$directoryIndex++){
+                $directory=Join-Path $tree ("nested-{0:d2}"-f$directoryIndex);[void][IO.Directory]::CreateDirectory($directory)
+                for($fileIndex=0;$fileIndex-lt100;$fileIndex++){
+                    [IO.File]::WriteAllText((Join-Path $directory ("file-{0:d3}.txt"-f$fileIndex)),"$directoryIndex/$fileIndex",[Text.UTF8Encoding]::new($false))
+                }
+            }
+            $state=Get-PlatformDirectoryState -ParentLease $parent -Leaf tree
+            $state.exists|Should Be $true;$state.entryCount|Should Be 606;$state.inventorySha256|Should Match '^[a-f0-9]{64}$'
+        } finally {$parent.Dispose()}
+    }
+
+    # Scenario: An owned Unix tree grows one directory deeper than the explicit traversal limit after its root identity is recorded.
+    # Purpose: Refuse inventory and removal before mutation, preserving every directory and file in the over-depth tree.
+    It 'InterT868_refuses_over_depth_unix_inventory_and_removal_without_deleting_entries' {
+        $txn=New-P7cTransaction
+        try {
+            $tree=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/deep-tree";[void][IO.Directory]::CreateDirectory($tree)
+            $rootState=Get-PlatformDirectoryState -ParentLease $txn.Lease -Leaf deep-tree
+            $deepest=$tree
+            for($depth=1;$depth-le65;$depth++){$deepest=Join-Path $deepest ("d{0:d2}"-f$depth);[void][IO.Directory]::CreateDirectory($deepest)}
+            $sentinel=Join-Path $deepest sentinel.txt;[IO.File]::WriteAllText($sentinel,'preserve')
+
+            $inventoryFailure=$null;try{Get-PlatformDirectoryState -ParentLease $txn.Lease -Leaf deep-tree|Out-Null}catch{$inventoryFailure=Get-P7cTypedPlatformException $_.Exception}
+            $inventoryFailure.GetType().Name|Should Be 'PlatformVerificationException';$inventoryFailure.Capability|Should Be 'directory-publication'
+            $removalFailure=$null;try{Remove-PlatformOwnedDirectoryTree -TransactionLease $txn.Lease -Leaf deep-tree -ExpectedIdentity $rootState.identity|Out-Null}catch{$removalFailure=Get-P7cTypedPlatformException $_.Exception}
+            $removalFailure.GetType().Name|Should Be 'PlatformVerificationException';$removalFailure.Capability|Should Be 'owned-file-removal'
+            Test-Path -LiteralPath $tree -PathType Container|Should Be $true;Test-Path -LiteralPath $sentinel -PathType Leaf|Should Be $true
+        } finally {$txn.Lease.Dispose()}
+    }
+
     # Scenario: A directory leaf or one of its descendants is a symlink, FIFO, or multiply-linked regular file.
     # Purpose: Fail closed with directory-publication evidence without following or accepting the unsafe entry.
     It 'InterT870_rejects_unsafe_unix_directory_inventory_entries' {
@@ -5090,6 +5126,20 @@ Describe 'Unix P7c durable publication and removal' {
         } finally {$field.SetValue($null,$null);$txn.Lease.Dispose();$parent.Dispose()}
     }
 
+    # Scenario: A typed capability exception crosses the PowerShell-to-.NET directory-flush test-hook boundary before rename.
+    # Purpose: Preserve capability-unavailable semantics instead of wrapping the typed cause as directory verification failure.
+    It 'InterT887_unwraps_typed_unix_directory_capability_failures' {
+        $parent=New-P7cDirectory 'directory-capability';$txn=New-P7cTransaction;$field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+        try {
+            $stagePath=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/stage";[void][IO.Directory]::CreateDirectory($stagePath);[IO.File]::WriteAllText((Join-Path $stagePath marker),'stable')
+            $state=Get-PlatformDirectoryState -ParentLease $txn.Lease -Leaf stage
+            $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'directory-flush-before-fsync'){throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]::new('directory-fsync: EINVAL',[SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem())}})
+            $caught=$null;try{Move-PlatformOwnedDirectory -ParentLease $parent -Leaf stage -TransactionLease $txn.Lease -DestinationLeaf runtime -ExpectedIdentity $state.identity -Direction FromTransaction -ExpectedState $state|Out-Null}catch{$caught=Get-P7cTypedPlatformException $_.Exception}
+            $caught.GetType().Name|Should Be 'PlatformCapabilityUnavailableException';$caught.Capability|Should Be 'directory-fsync: EINVAL'
+            Test-Path -LiteralPath $stagePath -PathType Container|Should Be $true;Test-Path -LiteralPath (Join-Path $script:P7cRoot 'directory-capability/runtime')|Should Be $false
+        } finally {$field.SetValue($null,$null);$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
     # Scenario: Owned-tree cleanup receives invalid boundaries or removes a nested transaction tree containing an outward symlink.
     # Purpose: Reject authority mismatches before mutation, then unlink only the owned tree while preserving the outside target.
     It 'InterT890_enforces_unix_owned_tree_boundaries_and_unlinks_symlinks_without_traversal' {
@@ -5110,6 +5160,21 @@ Describe 'Unix P7c durable publication and removal' {
             $receipt.capability|Should Be 'owned-file-removal';$receipt.removedEntryCount|Should Be 4
             Test-Path -LiteralPath $backup|Should Be $false;[IO.File]::ReadAllText($outside)|Should Be sentinel
         } finally {$ordinary.Dispose();$txn.Lease.Dispose();$rootLease.Dispose()}
+    }
+
+    # Scenario: An owned Unix transaction tree contains a FIFO after its root identity is recorded.
+    # Purpose: Validate the complete tree before removal and preserve every entry when an unsupported type is present.
+    It 'InterT892_rejects_unix_fifo_tree_removal_without_deleting_entries' {
+        $txn=New-P7cTransaction
+        try {
+            $tree=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/fifo-tree";[void][IO.Directory]::CreateDirectory($tree)
+            $sentinel=Join-Path $tree sentinel.txt;[IO.File]::WriteAllText($sentinel,'preserve')
+            $state=Get-PlatformDirectoryState -ParentLease $txn.Lease -Leaf fifo-tree
+            $fifo=Join-Path $tree pipe;$mkfifo=@(Get-Command mkfifo -CommandType Application -ErrorAction Stop)[0];& $mkfifo.Source $fifo;$LASTEXITCODE|Should Be 0
+            $caught=$null;try{Remove-PlatformOwnedDirectoryTree -TransactionLease $txn.Lease -Leaf fifo-tree -ExpectedIdentity $state.identity|Out-Null}catch{$caught=Get-P7cTypedPlatformException $_.Exception}
+            $caught.GetType().Name|Should Be 'PlatformVerificationException';$caught.Capability|Should Be 'owned-file-removal'
+            Test-Path -LiteralPath $tree -PathType Container|Should Be $true;Test-Path -LiteralPath $sentinel -PathType Leaf|Should Be $true;Test-Path -LiteralPath $fifo|Should Be $true
+        } finally {$txn.Lease.Dispose()}
     }
 
     # Scenario: The directory-publication probe runs on a Unix host with native no-replace rename and owned-tree cleanup.

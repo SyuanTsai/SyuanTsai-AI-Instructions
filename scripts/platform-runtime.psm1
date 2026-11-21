@@ -433,7 +433,7 @@ function Test-PlatformDirectoryPublication {
         sameFileSystem='not verified'
     }
     $rootLease=$null;$parentLease=$null;$transactionRootLease=$null;$transactionLease=$null;$stageLease=$null;$movedLease=$null;$occupiedLease=$null;$receipt=$null;$transactionIdentity=$null
-    $root=[IO.Path]::GetTempPath().TrimEnd('\','/')
+    $root=if($platform-eq'windows'){[IO.Path]::GetTempPath().TrimEnd('\','/')}elseif($platform-eq'macos'){'/private/tmp'}else{'/tmp'}
     $name='platform-directory-publication-probe-'+[Guid]::NewGuid().ToString('N')
     $path=Join-Path $root $name
     $transactionId=[Guid]::NewGuid().ToString('N')
