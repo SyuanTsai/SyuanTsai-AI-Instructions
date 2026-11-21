@@ -17,6 +17,46 @@ function Set-CleanupTestText {
     [System.IO.File]::WriteAllText($Path, "$Value`n", (New-Object System.Text.UTF8Encoding($false)))
 }
 
+function ConvertTo-CleanupTestDiagnosticText {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $text = [regex]::Replace($Text, '\x1B\[[0-?]*[ -/]*[@-~]', '')
+    $text = [regex]::Replace($text, '(?m)\r?\n[ \t]*\|[ \t]*', ' ')
+    return [regex]::Replace($text, '\s+', ' ').Trim()
+}
+
+function New-CleanupTestGitWrapper {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $ScriptBody
+    )
+
+    $scriptPath = Join-Path $Root 'git-wrapper.ps1'
+    Set-CleanupTestText -Path $scriptPath -Value @"
+param([Parameter(ValueFromRemainingArguments = `$true)][string[]] `$GitArguments)
+`$ErrorActionPreference = 'Stop'
+$ScriptBody
+"@
+    if ($IsWindows) {
+        $wrapperPath = Join-Path $Root 'git-wrapper.cmd'
+        Set-CleanupTestText -Path $wrapperPath -Value @"
+@echo off
+"$script:TestPowerShellExecutable" -NoProfile -ExecutionPolicy Bypass -File "$scriptPath" %*
+exit /b %errorlevel%
+"@
+        return $wrapperPath
+    }
+
+    $wrapperPath = Join-Path $Root 'git-wrapper'
+    Set-CleanupTestText -Path $wrapperPath -Value @"
+#!/bin/sh
+exec "$script:TestPowerShellExecutable" -NoProfile -ExecutionPolicy Bypass -File "$scriptPath" "`$@"
+"@
+    & chmod u+x -- $wrapperPath
+    if ($LASTEXITCODE -ne 0) { throw "chmod failed for cleanup test Git wrapper: $wrapperPath" }
+    return $wrapperPath
+}
+
 function New-PollutedTestRepository {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -198,7 +238,7 @@ Describe 'tracked AI instructions pollution cleanup' {
         }
 
         $result.ExitCode | Should Not Be 0
-        $result.Output | Should Match 'unset GIT_INDEX_FILE'
+        (ConvertTo-CleanupTestDiagnosticText -Text $result.Output) | Should Match 'unset GIT_INDEX_FILE'
         (Get-FileHash -LiteralPath $productIndexPath -Algorithm SHA256).Hash | Should Be $productIndexBefore
         (Get-FileHash -LiteralPath $alternateIndexPath -Algorithm SHA256).Hash | Should Be $alternateIndexBefore
         [System.IO.File]::ReadAllBytes($excludePath) | Should Be $excludeBefore
@@ -252,7 +292,7 @@ Describe 'tracked AI instructions pollution cleanup' {
         $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
 
         $result.ExitCode | Should Not Be 0
-        $result.Output | Should Match 'Managed Skill.*must preserve the flat'
+        (ConvertTo-CleanupTestDiagnosticText -Text $result.Output) | Should Match 'Managed Skill.*must preserve the flat'
         @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
         @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('ls-files','--','AGENTS.md')).Count | Should Be 1
     }
@@ -447,7 +487,9 @@ Describe 'tracked AI instructions pollution cleanup' {
 
     # Scenario: An external process already has the shared exclude file open for writing when cleanup reaches its exclude update.
     # Purpose: Stop before index mutation instead of using an unlocked read-modify-write sequence that can lose user rules.
-    It 'InterT79_fails_closed_when_the_shared_exclude_write_handle_is_unavailable' {
+    # Register only on the native host because FileShare write denial is a Windows locking scenario.
+    if ($IsWindows) {
+      It 'InterT79_fails_closed_when_the_shared_exclude_write_handle_is_unavailable' {
         $targetRoot = Join-Path $TestDrive 'locked-exclude'
         New-PollutedTestRepository -Path $targetRoot
         $excludePath = Join-Path $targetRoot '.git\info\exclude'
@@ -465,11 +507,14 @@ Describe 'tracked AI instructions pollution cleanup' {
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($excludePath)) | Should Be ([Convert]::ToBase64String($excludeBefore))
         @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
         Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') -PathType Leaf | Should Be $true
+      }
     }
 
     # Scenario: The shared Git info directory is a junction to a location outside the repository metadata.
     # Purpose: Stop before cleanup writes shared exclusions through a reparse-backed parent.
-    It 'InterT71_rejects_a_reparse_backed_shared_Git_info_directory' {
+    # Register only on the native host because directory junctions and reparse attributes are Windows filesystem semantics.
+    if ($IsWindows) {
+      It 'InterT71_rejects_a_reparse_backed_shared_Git_info_directory' {
         $targetRoot = Join-Path $TestDrive 'reparse-git-info'
         New-PollutedTestRepository -Path $targetRoot
         $gitInfoPath = Join-Path $targetRoot '.git\info'
@@ -485,6 +530,7 @@ Describe 'tracked AI instructions pollution cleanup' {
         $result.Output | Should Match '(?is)unsafe shared Git exclude mutation path.*non-reparse'
         [System.IO.File]::ReadAllBytes($outsideExcludePath) | Should Be $outsideBytesBefore
         @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+      }
     }
 
     # Scenario: A linked worktree manifest contains an unsupported schema-v2 property during authorized cleanup.
@@ -547,20 +593,18 @@ Describe 'tracked AI instructions pollution cleanup' {
         New-PollutedTestRepository -Path $targetRoot
         $wrapperRoot = Join-Path $TestDrive 'cleanup-locked-worktree-list-failure-wrapper'
         New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
-        $realGit = (Get-Command git.exe).Source
-        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $realGit = (Get-Command git -CommandType Application | Select-Object -First 1).Source.Replace("'","''")
         $firstListMarker = Join-Path $wrapperRoot 'first-list.marker'
-        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
-        $gitWrapper = @"
-@echo off
-echo %* | "$findString" /C:"worktree list --porcelain" >nul
-if errorlevel 1 goto forward
-if exist "$firstListMarker" exit /b 91
-type nul > "$firstListMarker"
-:forward
-"$realGit" %*
+        $escapedFirstListMarker = $firstListMarker.Replace("'","''")
+        $gitWrapperPath = New-CleanupTestGitWrapper -Root $wrapperRoot -ScriptBody @"
+`$query = `$GitArguments -join ' '
+if (`$query -like '*worktree list --porcelain*') {
+    if (Test-Path -LiteralPath '$escapedFirstListMarker') { exit 91 }
+    [IO.File]::WriteAllBytes('$escapedFirstListMarker', [byte[]] @())
+}
+& '$realGit' @GitArguments
+exit `$LASTEXITCODE
 "@
-        Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
         $indexPath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index') | Select-Object -First 1).Trim()
         if (-not [IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
         $excludePath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
@@ -589,25 +633,27 @@ type nul > "$firstListMarker"
         New-PollutedTestRepository -Path $targetRoot
         $wrapperRoot = Join-Path $TestDrive 'cleanup-shared-exclude-list-failure-wrapper'
         New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
-        $realGit = (Get-Command git.exe).Source
-        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $realGit = (Get-Command git -CommandType Application | Select-Object -First 1).Source.Replace("'","''")
         $markers = 1..3 | ForEach-Object { Join-Path $wrapperRoot "list-$_.marker" }
         $failureMarker = Join-Path $wrapperRoot 'shared-exclude-list-failed.marker'
-        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
-        $gitWrapper = @"
-@echo off
-echo %* | "$findString" /C:"worktree list --porcelain" >nul
-if errorlevel 1 goto forward
-if not exist "$($markers[0])" (type nul > "$($markers[0])" & goto forward)
-if not exist "$($markers[1])" (type nul > "$($markers[1])" & goto forward)
-if not exist "$($markers[2])" (type nul > "$($markers[2])" & goto forward)
-type nul > "$failureMarker"
-exit /b 91
-:forward
-"$realGit" %*
-exit /b %errorlevel%
+        $escapedMarkers = @($markers | ForEach-Object { $_.Replace("'","''") })
+        $escapedFailureMarker = $failureMarker.Replace("'","''")
+        $gitWrapperPath = New-CleanupTestGitWrapper -Root $wrapperRoot -ScriptBody @"
+`$query = `$GitArguments -join ' '
+if (`$query -like '*worktree list --porcelain*') {
+    foreach (`$marker in @('$($escapedMarkers[0])','$($escapedMarkers[1])','$($escapedMarkers[2])')) {
+        if (-not (Test-Path -LiteralPath `$marker)) {
+            [IO.File]::WriteAllBytes(`$marker, [byte[]] @())
+            & '$realGit' @GitArguments
+            exit `$LASTEXITCODE
+        }
+    }
+    [IO.File]::WriteAllBytes('$escapedFailureMarker', [byte[]] @())
+    exit 91
+}
+& '$realGit' @GitArguments
+exit `$LASTEXITCODE
 "@
-        Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
         $indexPath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index') | Select-Object -First 1).Trim()
         if (-not [IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
         $excludePath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
@@ -646,24 +692,24 @@ exit /b %errorlevel%
             Set-CleanupTestText -Path $v4ManifestPath -Value (($v4Manifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
             $wrapperRoot = Join-Path $TestDrive 'cleanup-locked-v4-publication-wrapper'
             New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
-            $realGit = (Get-Command git.exe).Source
-            $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+            $realGit = (Get-Command git -CommandType Application | Select-Object -First 1).Source.Replace("'","''")
             $firstListMarker = Join-Path $wrapperRoot 'first-list.marker'
-            $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
-            $gitWrapper = @"
-@echo off
-echo %* | "$findString" /C:"worktree list --porcelain" >nul
-if errorlevel 1 goto forward
-if not exist "$firstListMarker" (
-  type nul > "$firstListMarker"
-  goto forward
-)
-copy /y "$v4ManifestPath" "$linkedManifestPath" >nul
-if errorlevel 1 exit /b 92
-:forward
-"$realGit" %*
+            $escapedFirstListMarker = $firstListMarker.Replace("'","''")
+            $escapedV4ManifestPath = $v4ManifestPath.Replace("'","''")
+            $escapedLinkedManifestPath = $linkedManifestPath.Replace("'","''")
+            $gitWrapperPath = New-CleanupTestGitWrapper -Root $wrapperRoot -ScriptBody @"
+`$query = `$GitArguments -join ' '
+if (`$query -like '*worktree list --porcelain*') {
+    if (-not (Test-Path -LiteralPath '$escapedFirstListMarker')) {
+        [IO.File]::WriteAllBytes('$escapedFirstListMarker', [byte[]] @())
+    }
+    else {
+        [IO.File]::Copy('$escapedV4ManifestPath', '$escapedLinkedManifestPath', `$true)
+    }
+}
+& '$realGit' @GitArguments
+exit `$LASTEXITCODE
 "@
-            Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
             $indexPath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index') | Select-Object -First 1).Trim()
             if (-not [IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
             $excludePath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
@@ -831,7 +877,9 @@ if errorlevel 1 exit /b 92
 
     # Scenario: A managed manifest is reached through a directory junction after the polluted commit was created.
     # Purpose: Treat reparse-backed ownership evidence as unsafe and stop before touching the Git index.
-    It 'InterT74_rejects_a_reparse_backed_managed_manifest_path' {
+    # Register only on the native host because directory junctions and reparse attributes are Windows filesystem semantics.
+    if ($IsWindows) {
+      It 'InterT74_rejects_a_reparse_backed_managed_manifest_path' {
         $targetRoot = Join-Path $TestDrive 'reparse-manifest'
         New-PollutedTestRepository -Path $targetRoot
         $codexPath = Join-Path $targetRoot '.codex'
@@ -845,6 +893,7 @@ if errorlevel 1 exit /b 92
         $result.Output | Should Match 'reparse point'
         @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
         Test-Path -LiteralPath (Join-Path $externalCodexPath 'ai-instructions.manifest.json') -PathType Leaf | Should Be $true
+      }
     }
 
     # Scenario: Another Git process stages user bytes for a managed path after cleanup removes its original index entry and a later check fails.
@@ -858,27 +907,24 @@ if errorlevel 1 exit /b 92
         New-Item -ItemType Directory -Path $wrapperRoot | Out-Null
         $userBlobFile = Join-Path $wrapperRoot 'user-agent.txt'
         Set-CleanupTestText -Path $userBlobFile -Value '# Concurrent user staged Agent'
-        $realGit = (Get-Command git.exe).Source
-        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $realGit = (Get-Command git -CommandType Application | Select-Object -First 1).Source.Replace("'","''")
         $markerPath = Join-Path $wrapperRoot 'injected.marker'
-        $hashPath = Join-Path $wrapperRoot 'blob.txt'
-        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
-        $gitWrapper = @"
-@echo off
-echo %* | "$findString" /C:"diff --cached --name-status -- AGENTS.md" >nul
-if errorlevel 1 goto forward
-if exist "$markerPath" goto forward
-type nul > "$markerPath"
-"$realGit" -C "$targetRoot" hash-object -w "$userBlobFile" > "$hashPath"
-if errorlevel 1 exit /b 86
-set /p userblob=<"$hashPath"
-"$realGit" -C "$targetRoot" update-index --add --cacheinfo 100644,%userblob%,AGENTS.md
-if errorlevel 1 exit /b 87
-exit /b 88
-:forward
-"$realGit" %*
+        $escapedMarkerPath = $markerPath.Replace("'","''")
+        $escapedTargetRoot = $targetRoot.Replace("'","''")
+        $escapedUserBlobFile = $userBlobFile.Replace("'","''")
+        $gitWrapperPath = New-CleanupTestGitWrapper -Root $wrapperRoot -ScriptBody @"
+`$query = `$GitArguments -join ' '
+if (`$query -like '*diff --cached --name-status -- AGENTS.md*' -and -not (Test-Path -LiteralPath '$escapedMarkerPath')) {
+    [IO.File]::WriteAllBytes('$escapedMarkerPath', [byte[]] @())
+    `$userBlob = ((& '$realGit' -C '$escapedTargetRoot' hash-object -w '$escapedUserBlobFile') | Select-Object -First 1).Trim()
+    if (`$LASTEXITCODE -ne 0) { exit 86 }
+    & '$realGit' -C '$escapedTargetRoot' update-index --add --cacheinfo "100644,`$userBlob,AGENTS.md"
+    if (`$LASTEXITCODE -ne 0) { exit 87 }
+    exit 88
+}
+& '$realGit' @GitArguments
+exit `$LASTEXITCODE
 "@
-        Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
         $expectedBlob = (@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('hash-object',$userBlobFile)) -join '').Trim()
 
         $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
@@ -903,35 +949,36 @@ exit /b 88
         $userBlobFile = Join-Path $wrapperRoot 'user-agent.txt'
         Set-CleanupTestText -Path $userBlobFile -Value '# Rollback race user blob'
         $userBlob = ((@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('hash-object','-w',$userBlobFile)) -join '').Trim())
-        $realGit = (Get-Command git.exe).Source
-        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $realGit = (Get-Command git -CommandType Application | Select-Object -First 1).Source.Replace("'","''")
         $rollbackMarker = Join-Path $wrapperRoot 'rollback.marker'
         $attemptedMarker = Join-Path $wrapperRoot 'attempted.marker'
         $blockedMarker = Join-Path $wrapperRoot 'blocked.marker'
         $succeededMarker = Join-Path $wrapperRoot 'succeeded.marker'
-        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
-        $gitWrapper = @"
-@echo off
-if not exist "$rollbackMarker" goto inspect_failure
-echo %* | "$findString" /C:"ls-files --stage" >nul
-if errorlevel 1 goto forward
-if exist "$attemptedMarker" goto forward
-"$realGit" %*
-set forwardcode=%errorlevel%
-type nul > "$attemptedMarker"
-"$realGit" -C "$targetRoot" update-index --add --cacheinfo 100644,$userBlob,AGENTS.md >nul 2>&1
-if errorlevel 1 (type nul > "$blockedMarker") else (type nul > "$succeededMarker")
-exit /b %forwardcode%
-:inspect_failure
-echo %* | "$findString" /C:"diff --cached --name-status -- AGENTS.md" >nul
-if errorlevel 1 goto forward
-type nul > "$rollbackMarker"
-exit /b 88
-:forward
-"$realGit" %*
-exit /b %errorlevel%
+        $escapedRollbackMarker = $rollbackMarker.Replace("'","''")
+        $escapedAttemptedMarker = $attemptedMarker.Replace("'","''")
+        $escapedBlockedMarker = $blockedMarker.Replace("'","''")
+        $escapedSucceededMarker = $succeededMarker.Replace("'","''")
+        $escapedTargetRoot = $targetRoot.Replace("'","''")
+        $gitWrapperPath = New-CleanupTestGitWrapper -Root $wrapperRoot -ScriptBody @"
+`$query = `$GitArguments -join ' '
+if (-not (Test-Path -LiteralPath '$escapedRollbackMarker')) {
+    if (`$query -like '*diff --cached --name-status -- AGENTS.md*') {
+        [IO.File]::WriteAllBytes('$escapedRollbackMarker', [byte[]] @())
+        exit 88
+    }
+}
+elseif (`$query -like '*ls-files --stage*' -and -not (Test-Path -LiteralPath '$escapedAttemptedMarker')) {
+    & '$realGit' @GitArguments
+    `$forwardCode = `$LASTEXITCODE
+    [IO.File]::WriteAllBytes('$escapedAttemptedMarker', [byte[]] @())
+    & '$realGit' -C '$escapedTargetRoot' update-index --add --cacheinfo '100644,$userBlob,AGENTS.md' 2>`$null
+    if (`$LASTEXITCODE -ne 0) { [IO.File]::WriteAllBytes('$escapedBlockedMarker', [byte[]] @()) }
+    else { [IO.File]::WriteAllBytes('$escapedSucceededMarker', [byte[]] @()) }
+    exit `$forwardCode
+}
+& '$realGit' @GitArguments
+exit `$LASTEXITCODE
 "@
-        Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
 
         $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
 
@@ -954,39 +1001,33 @@ exit /b %errorlevel%
         New-Item -ItemType Directory -Path $wrapperRoot | Out-Null
         $userBlobFile = Join-Path $wrapperRoot 'user-agent.txt'
         Set-CleanupTestText -Path $userBlobFile -Value '# Last-moment concurrent staged Agent'
-        $realGit = (Get-Command git.exe).Source
-        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $realGit = (Get-Command git -CommandType Application | Select-Object -First 1).Source.Replace("'","''")
         $injectedMarker = Join-Path $wrapperRoot 'injected.marker'
-        $hashPath = Join-Path $wrapperRoot 'blob.txt'
-        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
-        $gitWrapper = @"
-@echo off
-echo %* | "$findString" /C:"rev-parse --git-path index" >nul
-if not errorlevel 1 goto inject_after_forward
-echo %* | "$findString" /C:"rm --cached" >nul
-if errorlevel 1 goto forward
-if exist "$injectedMarker" goto forward
-goto inject_before_forward
-:inject_after_forward
-"$realGit" %*
-if errorlevel 1 exit /b %errorlevel%
-if exist "$injectedMarker" exit /b 0
-:inject_before_forward
-"$realGit" -C "$targetRoot" hash-object -w "$userBlobFile" > "$hashPath"
-if errorlevel 1 exit /b 86
-set /p userblob=<"$hashPath"
-"$realGit" -C "$targetRoot" update-index --add --cacheinfo 100644,%userblob%,AGENTS.md
-if errorlevel 1 exit /b 87
-copy /Y "$userBlobFile" "$targetRoot\AGENTS.md" >nul
-if errorlevel 1 exit /b 88
-type nul > "$injectedMarker"
-echo %* | "$findString" /C:"rev-parse --git-path index" >nul
-if not errorlevel 1 exit /b 0
-:forward
-"$realGit" %*
-exit /b %errorlevel%
+        $escapedInjectedMarker = $injectedMarker.Replace("'","''")
+        $escapedTargetRoot = $targetRoot.Replace("'","''")
+        $escapedUserBlobFile = $userBlobFile.Replace("'","''")
+        $escapedAgentPath = (Join-Path $targetRoot 'AGENTS.md').Replace("'","''")
+        $gitWrapperPath = New-CleanupTestGitWrapper -Root $wrapperRoot -ScriptBody @"
+`$query = `$GitArguments -join ' '
+`$isIndexQuery = `$query -like '*rev-parse --git-path index*'
+`$injectBeforeForward = `$query -like '*rm --cached*' -and -not (Test-Path -LiteralPath '$escapedInjectedMarker')
+if (`$isIndexQuery) {
+    & '$realGit' @GitArguments
+    if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }
+    if (Test-Path -LiteralPath '$escapedInjectedMarker') { exit 0 }
+}
+if (`$isIndexQuery -or `$injectBeforeForward) {
+    `$userBlob = ((& '$realGit' -C '$escapedTargetRoot' hash-object -w '$escapedUserBlobFile') | Select-Object -First 1).Trim()
+    if (`$LASTEXITCODE -ne 0) { exit 86 }
+    & '$realGit' -C '$escapedTargetRoot' update-index --add --cacheinfo "100644,`$userBlob,AGENTS.md"
+    if (`$LASTEXITCODE -ne 0) { exit 87 }
+    [IO.File]::Copy('$escapedUserBlobFile', '$escapedAgentPath', `$true)
+    [IO.File]::WriteAllBytes('$escapedInjectedMarker', [byte[]] @())
+    if (`$isIndexQuery) { exit 0 }
+}
+& '$realGit' @GitArguments
+exit `$LASTEXITCODE
 "@
-        Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
         $expectedBlob = (@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('hash-object',$userBlobFile)) -join '').Trim()
 
         $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
@@ -1011,23 +1052,20 @@ exit /b %errorlevel%
         $indexHashBefore = (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash
         $wrapperRoot = Join-Path $TestDrive 'cleanup-concurrent-exclude-wrapper'
         New-Item -ItemType Directory -Path $wrapperRoot | Out-Null
-        $realGit = (Get-Command git.exe).Source
-        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $realGit = (Get-Command git -CommandType Application | Select-Object -First 1).Source.Replace("'","''")
         $injectedMarker = Join-Path $wrapperRoot 'injected.marker'
-        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
-        $gitWrapper = @"
-@echo off
-echo %* | "$findString" /C:"rev-parse --git-path index" >nul
-if errorlevel 1 goto forward
-if exist "$injectedMarker" goto forward
-type nul > "$injectedMarker"
-echo /concurrent-user-rule>>"$excludePath"
-exit /b 86
-:forward
-"$realGit" %*
-exit /b %errorlevel%
+        $escapedInjectedMarker = $injectedMarker.Replace("'","''")
+        $escapedExcludePath = $excludePath.Replace("'","''")
+        $gitWrapperPath = New-CleanupTestGitWrapper -Root $wrapperRoot -ScriptBody @"
+`$query = `$GitArguments -join ' '
+if (`$query -like '*rev-parse --git-path index*' -and -not (Test-Path -LiteralPath '$escapedInjectedMarker')) {
+    [IO.File]::WriteAllBytes('$escapedInjectedMarker', [byte[]] @())
+    [IO.File]::AppendAllText('$escapedExcludePath', "/concurrent-user-rule`n")
+    exit 86
+}
+& '$realGit' @GitArguments
+exit `$LASTEXITCODE
 "@
-        Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
 
         $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
 
@@ -1247,22 +1285,19 @@ exit /b %errorlevel%
             $excludeBefore=[IO.File]::ReadAllBytes($excludePath)
             $wrapperRoot=Join-Path $TestDrive 'cleanup-linked-Claude-failure-wrapper'
             New-Item -ItemType Directory -Path $wrapperRoot|Out-Null
-            $realGit=(Get-Command git.exe).Source
-            $findString=Join-Path $env:SystemRoot 'System32/findstr.exe'
-            $gitWrapperPath=Join-Path $wrapperRoot 'git.cmd'
+            $realGit=(Get-Command git -CommandType Application|Select-Object -First 1).Source.Replace("'","''")
             $appliedExcludePath=Join-Path $wrapperRoot 'exclude-after-mutation.bin'
-            $gitWrapper=@"
-@echo off
-echo %* | "$findString" /C:"diff --cached --name-status -- AGENTS.md" >nul
-if errorlevel 1 goto forward
-copy /b "$excludePath" "$appliedExcludePath" >nul
-if errorlevel 1 exit /b 87
-exit /b 88
-:forward
-"$realGit" %*
-exit /b %errorlevel%
+            $escapedExcludePath=$excludePath.Replace("'","''")
+            $escapedAppliedExcludePath=$appliedExcludePath.Replace("'","''")
+            $gitWrapperPath=New-CleanupTestGitWrapper -Root $wrapperRoot -ScriptBody @"
+`$query = `$GitArguments -join ' '
+if (`$query -like '*diff --cached --name-status -- AGENTS.md*') {
+    [IO.File]::Copy('$escapedExcludePath', '$escapedAppliedExcludePath', `$true)
+    exit 88
+}
+& '$realGit' @GitArguments
+exit `$LASTEXITCODE
 "@
-            Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
 
             $result=Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
 

@@ -78,17 +78,33 @@ function New-RolloutTestGitShim {
         [Parameter(Mandatory = $true)][ValidateSet('inside_worktree','symbolic_HEAD','origin')][string] $FailurePoint,
         [Parameter(Mandatory = $true)][int] $ExitCode
     )
-    $failureCommand = switch ($FailurePoint) {
-        'inside_worktree' { 'if /I "%~3 %~4"=="rev-parse --is-inside-work-tree" exit /b {0}' -f $ExitCode }
-        'symbolic_HEAD' { 'if /I "%~3 %~4 %~5 %~6"=="symbolic-ref -q --short HEAD" exit /b {0}' -f $ExitCode }
-        'origin' { 'if /I "%~3 %~4 %~5"=="remote get-url origin" exit /b {0}' -f $ExitCode }
-    }
-    Set-RolloutTestText -Path $Path -Value @"
+    if ($IsWindows) {
+        $failureCommand = switch ($FailurePoint) {
+            'inside_worktree' { 'if /I "%~3 %~4"=="rev-parse --is-inside-work-tree" exit /b {0}' -f $ExitCode }
+            'symbolic_HEAD' { 'if /I "%~3 %~4 %~5 %~6"=="symbolic-ref -q --short HEAD" exit /b {0}' -f $ExitCode }
+            'origin' { 'if /I "%~3 %~4 %~5"=="remote get-url origin" exit /b {0}' -f $ExitCode }
+        }
+        Set-RolloutTestText -Path $Path -Value @"
 @echo off
 $failureCommand
 git %*
 exit /b %ERRORLEVEL%
 "@
+        return
+    }
+
+    $failureCommand = switch ($FailurePoint) {
+        'inside_worktree' { 'if [ "$3 $4" = "rev-parse --is-inside-work-tree" ]; then exit {0}; fi' -f $ExitCode }
+        'symbolic_HEAD' { 'if [ "$3 $4 $5 $6" = "symbolic-ref -q --short HEAD" ]; then exit {0}; fi' -f $ExitCode }
+        'origin' { 'if [ "$3 $4 $5" = "remote get-url origin" ]; then exit {0}; fi' -f $ExitCode }
+    }
+    Set-RolloutTestText -Path $Path -Value @"
+#!/bin/sh
+$failureCommand
+exec git "`$@"
+"@
+    & chmod u+x -- $Path
+    if ($LASTEXITCODE -ne 0) { throw "chmod failed for rollout test Git shim: $Path" }
 }
 
 Describe 'AI instructions all-repository rollout' {
@@ -242,7 +258,9 @@ Describe 'AI instructions all-repository rollout' {
 
     # Scenario: Public repository discovery receives an undefined negative exit code from a Git identity query.
     # Purpose: Ensure discovery fails closed instead of reporting zero discovered repositories and zero failures.
-    It 'UnitT93_rethrows_discovery_<Case>_Git_exit_code_<ExitCodeLabel>' -TestCases @(
+    # Register only on the native host because negative and NTSTATUS native process exit codes are Windows semantics.
+    if ($IsWindows) {
+      It 'UnitT93_rethrows_discovery_<Case>_Git_exit_code_<ExitCodeLabel>' -TestCases @(
         foreach ($exitCase in @(
             @{ ExitCode=-1; ExitCodeLabel='minus_1' },
             @{ ExitCode=-1073741510; ExitCodeLabel='ntstatus_1073741510' }
@@ -264,6 +282,7 @@ Describe 'AI instructions all-repository rollout' {
 
         $failure | Should Not BeNullOrEmpty
         [string]$failure.Message | Should Match ([regex]::Escape([string]$ExitCode))
+      }
     }
 
     # Scenario: Public repository discovery finds a .git marker for which Git returns documented fatal exit code 128.
@@ -462,7 +481,9 @@ Describe 'AI instructions all-repository rollout' {
     # Given: Default discovery obtains ready fixed-drive roots from the operating system.
     # When: Those roots pass through rollout path canonicalization.
     # Then: Each value remains an absolute filesystem root instead of becoming drive-relative (for example, C:).
-    It 'InterT75_preserves_absolute_fixed_drive_roots' {
+    # Register only on the native host because fixed-drive enumeration is a Windows drive model.
+    if ($IsWindows) {
+      It 'InterT75_preserves_absolute_fixed_drive_roots' {
         $roots = @(Get-AiInstructionsFixedSearchRoots)
 
         $roots.Count | Should BeGreaterThan 0
@@ -470,6 +491,7 @@ Describe 'AI instructions all-repository rollout' {
             $expectedRoot = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath([string]$root))
             [string]$root | Should Be $expectedRoot
         }
+      }
     }
 
     # Given: A reserved Agent artifact remains tracked in HEAD but already has a staged index deletion.

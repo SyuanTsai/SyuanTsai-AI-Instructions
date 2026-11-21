@@ -648,6 +648,28 @@ function Assert-StandardValidationRegularFile {
     }
 }
 
+function Resolve-StandardValidationInternalUseToolPath {
+    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "INVALID|$Context file is missing: $Path"
+    }
+    $item = Get-Item -Force -LiteralPath $Path -ErrorAction Stop
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) {
+            throw "INVALID|$Context must be a regular non-reparse file: $Path"
+        }
+        try { $item = $item.ResolveLinkTarget($true) }
+        catch { throw "INVALID|$Context symbolic-link target could not be resolved: $Path. $($_.Exception.Message)" }
+        if ($null -eq $item) { throw "INVALID|$Context symbolic-link target could not be resolved: $Path" }
+    }
+    if ($item.PSIsContainer -or $item -isnot [System.IO.FileInfo] -or
+        ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "INVALID|$Context must resolve to a regular non-reparse file: $Path"
+    }
+    return [System.IO.Path]::GetFullPath($item.FullName)
+}
+
 function Assert-StandardValidationLauncherFileIdentity {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -6446,16 +6468,18 @@ function Resolve-StandardValidationInternalSkillUse {
         throw 'BLOCKED|Internal Skill package inventory/content drifted.'
     }
     $tools = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    $toolPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     foreach ($tool in $ToolInventory) {
         Assert-StandardValidationExactPropertySet -Object $tool -Expected @('id', 'version', 'path', 'sha256') -Context 'internal use frozen tool'
         $id = [string]$tool.id
         if ($tools.ContainsKey($id)) { throw 'BLOCKED|Duplicate internal use tool.' }
         Assert-StandardValidationSha256 -Value ([string]$tool.sha256) -Context 'internal use tool hash'
-        Assert-StandardValidationRegularFile -Path ([string]$tool.path) -Context 'internal use tool'
-        if ((Get-StandardValidationFileSha256 -Path ([string]$tool.path) -Context 'internal use tool') -cne [string]$tool.sha256) {
+        $resolvedToolPath = Resolve-StandardValidationInternalUseToolPath -Path ([string]$tool.path) -Context 'internal use tool'
+        if ((Get-StandardValidationFileSha256 -Path $resolvedToolPath -Context 'internal use tool') -cne [string]$tool.sha256) {
             throw 'BLOCKED|Internal use tool bytes drifted.'
         }
         $tools.Add($id, $tool)
+        $toolPaths.Add($id, $resolvedToolPath)
     }
     foreach ($requirement in $approval.requiredTools) {
         if (-not $tools.ContainsKey([string]$requirement.id)) { throw "BLOCKED|Required internal use tool is missing: $($requirement.id)" }
@@ -6479,8 +6503,9 @@ function Resolve-StandardValidationInternalSkillUse {
     }
     foreach ($requirement in $approval.requiredTools) {
         $tool = $tools[[string]$requirement.id]
-        Assert-StandardValidationRegularFile -Path ([string]$tool.path) -Context 'internal use final tool'
-        if ((Get-StandardValidationFileSha256 -Path ([string]$tool.path) -Context 'internal use final tool') -cne [string]$tool.sha256) {
+        $finalToolPath = Resolve-StandardValidationInternalUseToolPath -Path ([string]$tool.path) -Context 'internal use final tool'
+        if ($finalToolPath -cne $toolPaths[[string]$requirement.id] -or
+            (Get-StandardValidationFileSha256 -Path $finalToolPath -Context 'internal use final tool') -cne [string]$tool.sha256) {
             throw 'BLOCKED|Internal use tool changed during evaluation.'
         }
     }

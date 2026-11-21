@@ -178,6 +178,35 @@ Describe 'Internal Skill use approvals' {
         }
     }
 
+    # Register only on the native host because Unix package managers expose executable tools through symbolic links.
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+        # Scenario: A frozen tool path is a symbolic link to the reviewed regular executable file.
+        # Purpose: Bind approval to the final regular file bytes without rejecting ordinary Unix package-manager layouts.
+        It 'UnitT81_AcceptsAUnixToolSymlinkToTheReviewedRegularFile' {
+            $fixture = New-InternalUseFixture
+            $targetPath = [string]$fixture.tools[1].path
+            $linkPath = Join-Path (Split-Path -Parent $targetPath) 'git-link'
+            New-Item -ItemType SymbolicLink -Path $linkPath -Target $targetPath | Out-Null
+            $fixture.tools[1].path = $linkPath
+
+            (Invoke-InternalUseFixture $fixture).status | Should -Be 'approved'
+        }
+
+        # Scenario: A frozen tool path is a symbolic link whose final target is a directory.
+        # Purpose: Preserve the regular-file boundary after resolving an allowed Unix tool link.
+        It 'UnitT82_RejectsAUnixToolSymlinkToANonRegularTarget' {
+            $fixture = New-InternalUseFixture
+            $parent = Split-Path -Parent ([string]$fixture.tools[1].path)
+            $directoryPath = Join-Path $parent 'tool-directory'
+            New-Item -ItemType Directory -Path $directoryPath | Out-Null
+            $linkPath = Join-Path $parent 'git-directory-link'
+            New-Item -ItemType SymbolicLink -Path $linkPath -Target $directoryPath | Out-Null
+            $fixture.tools[1].path = $linkPath
+
+            { Invoke-InternalUseFixture $fixture } | Should -Throw '*regular non-reparse file*'
+        }
+    }
+
     # Scenario: Package bytes change only after the initial inventory, during final authority binding.
     # Purpose: Reject late replacement, additions and deletion rather than return a stale approval.
     It 'UnitT85_RejectsPackageDriftDuringApproval_<Change>' -TestCases @(

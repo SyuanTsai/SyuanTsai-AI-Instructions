@@ -263,7 +263,8 @@ function Invoke-AiInstructionBuilderProcess {
 
     $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BuilderPath,'-RepositoryRoot',$Root)
     if ($Check) { $arguments += '-Check' }
-    $output = & powershell.exe @arguments 2>&1 | Out-String
+    $powerShellExecutable = (Get-Process -Id $PID).Path
+    $output = & $powerShellExecutable @arguments 2>&1 | Out-String
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
 }
 
