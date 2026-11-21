@@ -5,7 +5,7 @@
     "install-ai-instructions-bootstrap.part1.Tests.ps1": 17,
     "install-ai-instructions-bootstrap.part2.Tests.ps1": 19,
     "install-ai-instructions-bootstrap.part3.Tests.ps1": 20,
-    "install-ai-instructions-bootstrap.part4.Tests.ps1": 4,
+    "install-ai-instructions-bootstrap.part4.Tests.ps1": 6,
     "bootstrap-ai-instructions.Tests.ps1": 26,
     "ai-instructions-writer-gate.part2.Tests.ps1": 25,
     "agent-environment-reconciler.Tests.ps1": 22,

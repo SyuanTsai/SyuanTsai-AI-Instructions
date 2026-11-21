@@ -2401,6 +2401,71 @@ Describe 'SYP-511 capability evidence reconciliation' {
         Test-Path -LiteralPath (Join-Path $userHome '.claude/skills/work-with-jira/SKILL.md')|Should Be $true
     }
 
+    # Scenario: A managed manifest contains the old ID when the fixture Catalog replaces it with a connector-gated active Skill and alias.
+    # Purpose: Carry installed identity through lifecycle replacement, publish the new Skill to both roots, and keep the converged state current.
+    It 'InterT45_reconciles_an_installed_removed_id_to_its_capability_gated_replacement' {
+        $requirement=[pscustomobject]@{kind='connector';id='datadog';state='configured'}
+        $fixture=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'syp511-replacement-fixture') -WithoutCopilot -CapabilityRequirement $requirement -PayloadText "---`nname: work-with-jira`ndescription: old projection test`n---`n`n# Fixture`n"
+        $runtimeRoot=[string]$fixture.RuntimeRoot
+        $userHome=Join-Path $TestDrive 'syp511-replacement-user'
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"configured"}]'
+        (Invoke-UserSkillsReconciliation -DesiredState $fixture -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE
+
+        $oldId='work-with-jira';$newId='work-with-jira-v2'
+        $catalogPath=Join-Path $runtimeRoot 'catalog/skills-catalog.json'
+        $catalog=Get-Content -Raw -Encoding UTF8 -LiteralPath $catalogPath|ConvertFrom-Json
+        $oldSkill=@($catalog.skills|Where-Object id -ceq $oldId)[0]
+        $newSkill=$oldSkill|ConvertTo-Json -Depth 20|ConvertFrom-Json
+        $newSkill.id=$newId
+        $newSkill.source.sourcePath="skills/$newId"
+        $newSkill.lifecycle=[pscustomobject][ordered]@{status='active';aliases=@($oldId)}
+        $oldSkill.profiles=@()
+        $oldSkill.lifecycle=[pscustomobject][ordered]@{status='removed';aliases=@();replacementId=$newId}
+        foreach($profile in @($catalog.profiles)){$profile.includes=@($profile.includes|ForEach-Object{if([string]$_-ceq$oldId){$newId}else{$_}})}
+        $catalog.skills=@($catalog.skills)+@($newSkill)
+        [byte[]]$catalogBytes=[Text.UTF8Encoding]::new($false).GetBytes(($catalog|ConvertTo-Json -Depth 20)+"`n")
+        [IO.File]::WriteAllBytes($catalogPath,$catalogBytes)
+
+        $payloadPath=Join-Path $TestDrive 'syp511-replacement-SKILL.md'
+        [IO.File]::WriteAllText($payloadPath,"---`nname: $newId`ndescription: replacement projection test`n---`n`n# Fixture`n",[Text.UTF8Encoding]::new($false))
+        $payloadSha=(Get-FileHash -Algorithm SHA256 -LiteralPath $payloadPath).Hash.ToLowerInvariant()
+        $archivePath=New-TestProjectionSourceArchive -PayloadPath $payloadPath -ArchivePath (Join-Path $TestDrive 'syp511-replacement.zip') -SkillId $newId
+        $lockPath=Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json'
+        $lock=Get-Content -Raw -Encoding UTF8 -LiteralPath $lockPath|ConvertFrom-Json
+        $lockSkill=@($lock.skills|Where-Object id -ceq $oldId)[0]
+        $lockSkill.id=$newId;$lockSkill.sourcePath="skills/$newId"
+        $contentBytes=[Text.UTF8Encoding]::new($false).GetBytes("skills/$newId/SKILL.md`t$payloadSha`n")
+        $algorithm=[Security.Cryptography.SHA256]::Create();try{$lockSkill.contentSha256=([BitConverter]::ToString($algorithm.ComputeHash($contentBytes))).Replace('-','').ToLowerInvariant()}finally{$algorithm.Dispose()}
+        $algorithm=[Security.Cryptography.SHA256]::Create();try{$lock.catalogSha256=([BitConverter]::ToString($algorithm.ComputeHash($catalogBytes))).Replace('-','').ToLowerInvariant()}finally{$algorithm.Dispose()}
+        $lock.sources[0].archiveSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        [IO.File]::WriteAllText($lockPath,(($lock|ConvertTo-Json -Depth 20)+"`n"),[Text.UTF8Encoding]::new($false))
+
+        $platformModule=Import-Module (Join-Path $runtimeRoot 'platform-runtime.psd1') -Force -PassThru
+        $receipt=&$platformModule {Get-PlatformCapabilities -Required @()}
+        $configuration=$fixture.GateContext.configuration
+        $bundle=New-TestAiInstructionsRuntimeBundleV3 -RuntimeRoot $runtimeRoot -Repository ([string]$fixture.Manifest.catalogRepository) -Commit ([string]$fixture.Manifest.catalogCommit) -Acquisition git-checkout -CapabilityReceipt $receipt
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"configured"}]'
+        $gate=Assert-UserProjectionRuntimeGate -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot -CapabilityReceipt $receipt
+        Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE
+        $arguments=@{RuntimeRoot=$runtimeRoot;Configuration=$configuration;CatalogRepository=[string]$bundle.repository;CatalogCommit=[string]$bundle.commit;GateContext=$gate;LocalArchiveOverrides=@{'agent-skills'=$archivePath};UserHome=$userHome}
+        $warnings=@()
+
+        $replacement=Get-UserSkillsDesiredState @arguments -WorkingRoot (Join-Path $TestDrive 'syp511-replacement-apply') -WarningVariable warnings
+
+        @($replacement.SkillIds)|Should Be @($newId)
+        ($warnings-join"`n")|Should Match 'connector:datadog'
+        (Invoke-UserSkillsReconciliation -DesiredState $replacement -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        foreach($root in @('.agents/skills','.claude/skills')){
+            Test-Path -LiteralPath (Join-Path $userHome "$root/$newId/SKILL.md") -PathType Leaf|Should Be $true
+            Test-Path -LiteralPath (Join-Path $userHome "$root/$oldId")|Should Be $false
+        }
+        $manifest=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json')|ConvertFrom-Json
+        @($manifest.files|ForEach-Object skillId|Select-Object -Unique)|Should Be @($newId)
+        $current=Get-UserSkillsDesiredState @arguments -WorkingRoot (Join-Path $TestDrive 'syp511-replacement-current') -WarningAction SilentlyContinue
+        (Invoke-UserSkillsReconciliation -DesiredState $current -UserHome $userHome -Mode VerifyOnly).outcome|Should Be 'current'
+    }
+
     # Scenario: Desired state observes an empty managed manifest, then another normal update installs the capability-gated Skill before the stale plan obtains its lock.
     # Purpose: Bind the observed empty set explicitly so the stale no-evidence plan returns concurrent and cannot remove the newly installed Skill.
     It 'InterT50_binds_an_empty_installed_set_across_desired_state_and_lock_acquisition' {

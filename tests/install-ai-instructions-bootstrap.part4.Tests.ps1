@@ -71,4 +71,45 @@ Describe 'SYP-511 installer capability evidence persistence' {
             (Get-InstallerFullTreeSnapshot -Root $codexHome)|Should Be $before
         }
     }
+
+    # Scenario: A fresh V2V4 installation receives configured evidence through the legacy environment variable.
+    # Purpose: Keep the environment declaration transient and accepted while preserving the config v4 contract without a persistence field.
+    It 'InterT50_accepts_transient_environment_evidence_for_a_fresh_v2v4_install' {
+        $configured='[{"kind":"connector","id":"datadog","state":"configured"}]'
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome -IsolatedUserHome $isolatedHome -WriterSchema V2V4 -CapabilityEvidenceEnvironment $configured|Out-Null
+
+        $configuration=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $codexHome 'ai-instructions-sync.json')|ConvertFrom-Json
+        [int]$configuration.schemaVersion|Should Be 4
+        $configuration.PSObject.Properties.Name|Should Not Contain 'capabilityEvidence'
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE=$configured
+        try {
+            $catalog=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $codexHome 'hooks/ai-instructions-runtime/catalog/skills-catalog.json')|ConvertFrom-Json
+            $selection=[pscustomobject]@{profiles=@('observability');includeSkills=@();excludeSkills=@()}
+            Import-Module (Join-Path $codexHome 'hooks/ai-instructions-runtime/skills-selection.psm1') -Force
+            @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection)|Should Contain 'investigate-datadog-logs'
+        }
+        finally { Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue }
+    }
+
+    # Scenario: An existing V2V4 installation runs Auto while configured evidence is supplied through the legacy environment variable.
+    # Purpose: Preserve the legacy Auto path as transient evidence and never upgrade the v4 configuration shape implicitly.
+    It 'InterT60_accepts_transient_environment_evidence_for_an_existing_v2v4_auto_install' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome -IsolatedUserHome $isolatedHome -WriterSchema V2V4|Out-Null
+        $configured='[{"kind":"connector","id":"datadog","state":"configured"}]'
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome -IsolatedUserHome $isolatedHome -WriterSchema Auto -CapabilityEvidenceEnvironment $configured|Out-Null
+
+        $configuration=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $codexHome 'ai-instructions-sync.json')|ConvertFrom-Json
+        [int]$configuration.schemaVersion|Should Be 4
+        $configuration.PSObject.Properties.Name|Should Not Contain 'capabilityEvidence'
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE=$configured
+        try {
+            $catalog=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $codexHome 'hooks/ai-instructions-runtime/catalog/skills-catalog.json')|ConvertFrom-Json
+            $selection=[pscustomobject]@{profiles=@('observability');includeSkills=@();excludeSkills=@()}
+            Import-Module (Join-Path $codexHome 'hooks/ai-instructions-runtime/skills-selection.psm1') -Force
+            @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection)|Should Contain 'investigate-datadog-logs'
+        }
+        finally { Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue }
+    }
 }

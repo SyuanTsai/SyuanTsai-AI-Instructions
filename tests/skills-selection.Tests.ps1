@@ -341,14 +341,18 @@ function New-SelectionCatalog {
         }
     }
 
-    # Scenario: Capability evidence is present but is not valid JSON.
-    # Purpose: Reject malformed evidence rather than silently weakening compatibility checks.
+    # Scenario: Capability evidence is malformed JSON or a valid top-level object instead of an array.
+    # Purpose: Reject malformed and wrong-shaped evidence rather than silently weakening compatibility checks.
     It 'UnitT96_rejects_invalid_capability_evidence_json' {
         $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='{invalid'
         $catalog=New-SelectionCatalog
         Assert-ThrowsMessage {
             Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@() })
         } 'not valid JSON'
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='{"kind":"connector","id":"datadog","state":"configured"}'
+        Assert-ThrowsMessage {
+            Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@() })
+        } 'must be a JSON array'
     }
 
     # Scenario: A profile-selected connector-gated Skill is present in the managed USER manifest, but no current evidence exists for its capability.
@@ -446,6 +450,82 @@ function New-SelectionCatalog {
             Assert-StringSequence -Actual $resolved -Expected @('skill-optional')
             ($warnings -join "`n") | Should Match 'connector:datadog'
             ($warnings -join "`n") | Should Match 'absent'
+        }
+    }
+
+    # Scenario: A managed manifest still records a removed Skill ID whose Catalog tombstone and active alias both point to a connector-gated replacement.
+    # Purpose: Preserve the active replacement as already installed when evidence is unknown, while retaining fresh-install filtering and explicit excludes.
+    It 'UnitT104_normalizes_installed_removed_ids_to_the_active_replacement' {
+        $catalog = [pscustomobject]@{
+            profiles=@([pscustomobject]@{ id='core'; default=$true; includes=@('new-skill'); excludes=@() })
+            skills=@(
+                (New-TestSkill -Id 'old-skill' -Status 'removed' -ReplacementId 'new-skill'),
+                (New-TestSkill -Id 'new-skill' -Aliases @('old-skill') -Compatibility (New-TestCompatibility -RequiredCapabilities @(
+                    [pscustomobject]@{ kind='connector'; id='datadog'; state='configured' }
+                )))
+            )
+        }
+        $selection = [pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@() }
+
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection).Count | Should Be 0
+        $warnings = @()
+        $resolved = @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -InstalledSkillIds @('old-skill') -WarningVariable warnings)
+
+        Assert-StringSequence -Actual $resolved -Expected @('new-skill')
+        ($warnings -join "`n") | Should Match 'new-skill'
+        ($warnings -join "`n") | Should Match 'connector:datadog'
+        $excluded = [pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@('old-skill') }
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection $excluded -InstalledSkillIds @('old-skill')).Count | Should Be 0
+    }
+
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and $null -ne (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+        # Scenario: Windows PowerShell 5.1 parses empty, single-record, and multi-record capability evidence arrays in a child process.
+        # Purpose: Keep the shared selection resolver usable by supported Desktop fan-out paths without changing array cardinality semantics.
+        It 'UnitT105_parses_capability_evidence_arrays_in_windows_powershell_5_1' {
+            $childPath = Join-Path $TestDrive 'skills-selection-windows-powershell-5-1.ps1'
+            $childScript = @'
+param([Parameter(Mandatory=$true)][string]$ModulePath)
+$ErrorActionPreference='Stop'
+Import-Module $ModulePath -Force
+function New-ChildSkill([string]$Id,[string]$Kind,[string]$CapabilityId) {
+    [pscustomobject]@{
+        id=$Id
+        compatibility=[pscustomobject]@{
+            platforms=@('any');shells=@()
+            requiredCapabilities=@([pscustomobject]@{kind=$Kind;id=$CapabilityId;state='configured'})
+            anyOfCapabilities=@()
+        }
+        dependencies=@()
+        lifecycle=[pscustomobject]@{status='active';aliases=@()}
+    }
+}
+$catalog=[pscustomobject]@{
+    profiles=@([pscustomobject]@{id='core';default=$true;includes=@('connector-skill','environment-skill');excludes=@()})
+    skills=@(
+        (New-ChildSkill 'connector-skill' 'connector' 'datadog'),
+        (New-ChildSkill 'environment-skill' 'environment' 'jira-cloud-api')
+    )
+}
+$selection=[pscustomobject]@{profiles=@('core');includeSkills=@();excludeSkills=@()}
+$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[]'
+$empty=@(Resolve-SkillsSelection -Catalog $catalog -Selection $selection)
+$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"configured"}]'
+$single=@(Resolve-SkillsSelection -Catalog $catalog -Selection $selection)
+$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"configured"},{"kind":"environment","id":"jira-cloud-api","state":"configured"}]'
+$multiple=@(Resolve-SkillsSelection -Catalog $catalog -Selection $selection)
+[pscustomobject]@{empty=$empty;single=$single;multiple=$multiple}|ConvertTo-Json -Depth 4 -Compress
+'@
+            [IO.File]::WriteAllText($childPath,$childScript,[Text.UTF8Encoding]::new($false))
+
+            $output = @(& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $childPath -ModulePath (Join-Path $script:RepositoryRoot 'scripts\skills-selection.psm1') 2>&1)
+            $exitCode = $LASTEXITCODE
+
+            if ($exitCode -ne 0) { throw "Windows PowerShell 5.1 child failed: $($output -join [Environment]::NewLine)" }
+            $exitCode | Should Be 0
+            $result = [string]$output[-1] | ConvertFrom-Json
+            @($result.empty).Count | Should Be 0
+            Assert-StringSequence -Actual @($result.single) -Expected @('connector-skill')
+            Assert-StringSequence -Actual @($result.multiple) -Expected @('connector-skill','environment-skill')
         }
     }
 

@@ -30,13 +30,12 @@ $capabilityEvidenceParameterSpecified = $PSBoundParameters.ContainsKey('Capabili
 if ($capabilityEvidenceParameterSpecified -and $ClearCapabilityEvidence) {
     throw '-CapabilityEvidence and -ClearCapabilityEvidence are mutually exclusive.'
 }
-$capabilityEvidenceDeclarationSpecified = $capabilityEvidenceParameterSpecified -or [bool]$ClearCapabilityEvidence
+$capabilityEvidencePersistenceSpecified = $capabilityEvidenceParameterSpecified -or [bool]$ClearCapabilityEvidence
+$capabilityEvidenceEnvironmentSpecified = -not [string]::IsNullOrWhiteSpace([string]$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE)
+$capabilityEvidenceDeclarationSpecified = $capabilityEvidencePersistenceSpecified -or $capabilityEvidenceEnvironmentSpecified
 $capabilityEvidenceJson = if ($capabilityEvidenceParameterSpecified) { $CapabilityEvidence }
     elseif ($ClearCapabilityEvidence) { '[]' }
-    elseif (-not [string]::IsNullOrWhiteSpace([string]$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE)) {
-        $capabilityEvidenceDeclarationSpecified = $true
-        [string]$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE
-    }
+    elseif ($capabilityEvidenceEnvironmentSpecified) { [string]$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE }
     else { $null }
 
 # BEGIN GENERATED BOOTSTRAP SECTION BASE64
@@ -868,7 +867,7 @@ $hooksPath = Join-Path $codexHomePath 'hooks.json'
 $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
 $installLockPath = Join-Path $codexHomePath 'ai-instructions-install.lock'
 
-if ($capabilityEvidenceDeclarationSpecified) {
+if ($capabilityEvidencePersistenceSpecified) {
     $preflightState = Get-InstallerExistingRuntimeState -ConfigurationPath $configurationPath -RuntimeDirectory $runtimeDirectory
     $preflightUsesV3V5 = $WriterSchema -ceq 'V3V5' -or ($WriterSchema -ceq 'Auto' -and [string]$preflightState.Generation -ceq 'v3v5')
     if (-not $preflightUsesV3V5) {
@@ -941,7 +940,7 @@ try {
         -RequestedWriterSchema $WriterSchema
     $selectedWriterSchema = [string]$lockedSelection.Schema
     $capabilityReceipt = $lockedSelection.CapabilityReceipt
-    if ($capabilityEvidenceDeclarationSpecified -and $selectedWriterSchema -cne 'v3v5') {
+    if ($capabilityEvidencePersistenceSpecified -and $selectedWriterSchema -cne 'v3v5') {
         throw 'Capability evidence persistence requires config v5; rerun with -WriterSchema V3V5.'
     }
     $runtimeLicenseArtifactPaths = if ($selectedWriterSchema -ceq 'v3v5') { $runtimeV3ArtifactPaths } else { $runtimeArtifactPaths }
@@ -979,7 +978,9 @@ try {
         ExistingConfiguration=$existingConfiguration;CatalogRepository=$catalogRepository;CatalogRef=$catalogRef
         AdditionalExcludedRepositoryUrls=$ExcludedRepositoryUrls;AdditionalExcludedRepositoryPaths=$ExcludedRepositoryPaths;Catalog=$catalogDocument
     }
-    if ($capabilityEvidenceDeclarationSpecified) { $configurationParameters.CapabilityEvidence = [object[]]$declaredCapabilityEvidence }
+    if ($selectedWriterSchema -ceq 'v3v5' -and $capabilityEvidenceDeclarationSpecified) {
+        $configurationParameters.CapabilityEvidence = [object[]]$declaredCapabilityEvidence
+    }
     $configuration = if ($selectedWriterSchema -ceq 'v3v5') {
         ConvertTo-AiInstructionsSyncConfigurationV5 @configurationParameters
     }

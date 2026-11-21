@@ -71,14 +71,18 @@ function Get-ExplicitCapabilityEvidence {
     $raw = [string]$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE
     $environmentEvidence = @()
     if (-not [string]::IsNullOrWhiteSpace($raw)) {
+        $trimmed = $raw.Trim()
+        if (-not $trimmed.StartsWith('[')) {
+            try { [void]($raw | ConvertFrom-Json -ErrorAction Stop) }
+            catch { throw "AI_INSTRUCTIONS_CAPABILITY_EVIDENCE is not valid JSON: $($_.Exception.Message)" }
+            throw 'AI_INSTRUCTIONS_CAPABILITY_EVIDENCE must be a JSON array.'
+        }
         try {
-            $parsed = $raw | ConvertFrom-Json -NoEnumerate
+            $converted = $raw | ConvertFrom-Json -ErrorAction Stop
+            $parsed = @($converted)
         }
         catch {
             throw "AI_INSTRUCTIONS_CAPABILITY_EVIDENCE is not valid JSON: $($_.Exception.Message)"
-        }
-        if ($parsed -isnot [System.Array]) {
-            throw 'AI_INSTRUCTIONS_CAPABILITY_EVIDENCE must be a JSON array.'
         }
         $environmentEvidence = @(Assert-CapabilityEvidenceItems -Evidence @($parsed) -Context 'AI_INSTRUCTIONS_CAPABILITY_EVIDENCE')
     }
@@ -470,7 +474,16 @@ function Resolve-SkillsSelection {
 
     $evidence = @(Get-ExplicitCapabilityEvidence -ConfiguredEvidence $CapabilityEvidence)
     $installed = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-    foreach ($installedSkillId in $InstalledSkillIds) { [void]$installed.Add([string]$installedSkillId) }
+    foreach ($installedSkillId in $InstalledSkillIds) {
+        $normalizedInstalledId = Resolve-ConfiguredSkillId -SkillId ([string]$installedSkillId) -SkillsById $skillsById -AliasesById $aliasesById
+        if ([string]::IsNullOrWhiteSpace($normalizedInstalledId) -or -not $skillsById.ContainsKey($normalizedInstalledId)) {
+            continue
+        }
+        if ([string]$skillsById[$normalizedInstalledId].lifecycle.status -eq 'removed') {
+            continue
+        }
+        [void]$installed.Add($normalizedInstalledId)
+    }
     $requestedProfiles = @($Selection.profiles)
     if ($requestedProfiles.Count -eq 0) {
         $requestedProfiles = @(
