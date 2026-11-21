@@ -4,7 +4,7 @@
   "commit": "89abcdef0123456789abcdef0123456789abcdef",
   "acquisition": "github-codeload",
   "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "inventorySha256": "b4a57448186caaf4699d84537042b8c7ef545f7c5218b9a56953d8f58b2dee60",
+  "inventorySha256": "21949e2d830596be0ddb01f6fecfa93610f0aea94d188b26486a3e9b8dd235a9",
   "inventory": [
     { "path": "Resolve-StandardValidationTool.ps1", "sha256": "e0ca981a95525f44ac482424b370d0a4982760edd4e706ee7312562daef4ccec" },
     { "path": "bootstrap-section.md", "sha256": "d021e5c3e30abe71f12924e240c4ec53a5e0361d110c99ea4ff18e56bfd06784" },
