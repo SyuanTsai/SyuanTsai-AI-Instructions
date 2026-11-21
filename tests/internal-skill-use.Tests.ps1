@@ -185,6 +185,34 @@ Describe 'Internal Skill use approvals' {
         }
     }
 
+    # Scenario: A resolved Unix tool or ancestor exposes ordinary, special, writable, or symbolic-link mode text.
+    # Purpose: Evaluate permissions from numeric bits, accept harmless special bits, and reject link mode before its 0777 bits are considered.
+    It 'UnitT79_ClassifiesTrustedUnixMode_<ModeLabel>' -TestCases @(
+        @{ ModeLabel='0755_file'; UnixMode='-rwxr-xr-x'; Mode=493; Expected='accepted' },
+        @{ ModeLabel='0777_link'; UnixMode='lrwxrwxrwx'; Mode=511; Expected='type-rejected' },
+        @{ ModeLabel='4555_setuid_file'; UnixMode='-rwsr-xr-x'; Mode=2541; Expected='accepted' },
+        @{ ModeLabel='1777_sticky_directory'; UnixMode='drwxrwxrwt'; Mode=1023; Expected='write-rejected' },
+        @{ ModeLabel='0775_group_writable_file'; UnixMode='-rwxrwxr-x'; Mode=509; Expected='write-rejected' },
+        @{ ModeLabel='0757_other_writable_file'; UnixMode='-rwxr-xrwx'; Mode=495; Expected='write-rejected' }
+    ) {
+        param($ModeLabel, $UnixMode, $Mode, $Expected)
+        $action = {
+            Assert-StandardValidationTrustedUnixMode -UnixMode $UnixMode -Mode ([uint32]$Mode) `
+                -ExpectedType $(if ($UnixMode[0] -ceq 'd') { 'd' } else { '-' }) -Path '/fixture/tool' -Context 'test tool'
+        }
+        switch ($Expected) {
+            'accepted' { $action | Should Not Throw }
+            'type-rejected' {
+                $message = try { & $action; $null } catch { $_.Exception.Message }
+                $message | Should Match 'type could not be verified'
+            }
+            'write-rejected' {
+                $message = try { & $action; $null } catch { $_.Exception.Message }
+                $message | Should Match 'group-write or other-write'
+            }
+        }
+    }
+
     # Scenario: A needed tool is absent, changed, too old or duplicated in the frozen consumer inventory.
     # Purpose: Keep dependency readiness bound to real file identities without downloading or executing them.
     It 'UnitT80_RejectsMissingChangedOldOrDuplicateTools' {
@@ -400,26 +428,49 @@ Describe 'Committed internal Skill approval integration' {
         $pins = @('scripts/Invoke-StandardValidation.ps1', 'docs/standards/internal-source-continuation.json', 'docs/standards/schemas/internal-source-continuation-v1.schema.json' | ForEach-Object {
             [pscustomobject]@{ path = $_; sha256 = (Get-FileHash -LiteralPath (Join-Path $root $_) -Algorithm SHA256).Hash.ToLowerInvariant() }
         })
-        $git = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
-        $gitVersion = [regex]::Match((& $git --version), '\d+\.\d+\.\d+').Value
-        $powerShellExecutable = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
-        $tools = @(
-            [pscustomobject]@{ id = 'powershell'; version = $PSVersionTable.PSVersion.ToString(); path = $powerShellExecutable; sha256 = (Get-FileHash -LiteralPath $powerShellExecutable -Algorithm SHA256).Hash.ToLowerInvariant() },
-            [pscustomobject]@{ id = 'git'; version = $gitVersion; path = $git; sha256 = (Get-FileHash -LiteralPath $git -Algorithm SHA256).Hash.ToLowerInvariant() }
-        )
-        $parameters = @{ SkillRoot = $skill; SourceRepository = 'https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git'; SourceRevision = 'f2a12c6338e9a76dc807c84329ffaae1aaf5bef4'; SkillId = 'review-bitbucket-pull-request'; Purpose = 'local-pr-review'; ExpectedAuthorityFiles = $pins; ToolInventory = $tools }
-        $before = (Get-FileHash -LiteralPath (Join-Path $root 'docs/standards/internal-source-continuation.json') -Algorithm SHA256).Hash
-        $decision = Resolve-StandardValidationInternalSkillUse @parameters
-        $decision.status | Should -Be 'approved'
-        $decision.approvalId | Should -Be 'atlassian-bitbucket-review-f2a12c6'
-        $decision.contentSha256 | Should -Be 'b373f844d8c0a268f39fc1e613704cb22d3ce05136109d55c52096a9b6322e5c'
-        $decision.reviewedSourceRevision | Should -Be $parameters.SourceRevision
-        $decision.retainedFindings[0].reportSha256 | Should -Be '55c41e494fe318fcb0365c1addc1dd359162c1798ac67e12b8155caa2c7b16d0'
-        $decision.retainedFindings[0].severity | Should -Be 'MEDIUM'
-        $decision.retainedFindings[0].reportRelation | Should -Be 'historical-context'
-        $decision.releaseEligible | Should -BeFalse
-        (Get-FileHash -LiteralPath (Join-Path $root 'docs/standards/internal-source-continuation.json') -Algorithm SHA256).Hash | Should -Be $before
-        [IO.File]::AppendAllText((Join-Path $skill 'SKILL.md'), 'unreviewed drift')
-        { Resolve-StandardValidationInternalSkillUse @parameters } | Should -Throw 'not registered'
+        $trustedToolRoot = $null
+        try {
+            $git = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+            $gitVersion = [regex]::Match((& $git --version), '\d+\.\d+\.\d+').Value
+            $powerShellExecutable = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+            if (-not $IsWindows) {
+                $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+                if ([string]::IsNullOrWhiteSpace($userProfile)) { throw 'A Unix user profile is required for trusted integration tools.' }
+                $trustedToolRoot = Join-Path $userProfile ('.internal-use-integration-' + [guid]::NewGuid().ToString('N'))
+                [void][IO.Directory]::CreateDirectory($trustedToolRoot)
+                [IO.File]::SetUnixFileMode($trustedToolRoot, [IO.UnixFileMode]448)
+                $powerShellCopy = Join-Path $trustedToolRoot 'pwsh'
+                $gitCopy = Join-Path $trustedToolRoot 'git'
+                Copy-Item -LiteralPath $powerShellExecutable -Destination $powerShellCopy
+                Copy-Item -LiteralPath $git -Destination $gitCopy
+                [IO.File]::SetUnixFileMode($powerShellCopy, [IO.UnixFileMode]320)
+                [IO.File]::SetUnixFileMode($gitCopy, [IO.UnixFileMode]320)
+                $powerShellExecutable = $powerShellCopy
+                $git = $gitCopy
+            }
+            $tools = @(
+                [pscustomobject]@{ id = 'powershell'; version = $PSVersionTable.PSVersion.ToString(); path = $powerShellExecutable; sha256 = (Get-FileHash -LiteralPath $powerShellExecutable -Algorithm SHA256).Hash.ToLowerInvariant() },
+                [pscustomobject]@{ id = 'git'; version = $gitVersion; path = $git; sha256 = (Get-FileHash -LiteralPath $git -Algorithm SHA256).Hash.ToLowerInvariant() }
+            )
+            $parameters = @{ SkillRoot = $skill; SourceRepository = 'https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git'; SourceRevision = 'f2a12c6338e9a76dc807c84329ffaae1aaf5bef4'; SkillId = 'review-bitbucket-pull-request'; Purpose = 'local-pr-review'; ExpectedAuthorityFiles = $pins; ToolInventory = $tools }
+            $before = (Get-FileHash -LiteralPath (Join-Path $root 'docs/standards/internal-source-continuation.json') -Algorithm SHA256).Hash
+            $decision = Resolve-StandardValidationInternalSkillUse @parameters
+            $decision.status | Should -Be 'approved'
+            $decision.approvalId | Should -Be 'atlassian-bitbucket-review-f2a12c6'
+            $decision.contentSha256 | Should -Be 'b373f844d8c0a268f39fc1e613704cb22d3ce05136109d55c52096a9b6322e5c'
+            $decision.reviewedSourceRevision | Should -Be $parameters.SourceRevision
+            $decision.retainedFindings[0].reportSha256 | Should -Be '55c41e494fe318fcb0365c1addc1dd359162c1798ac67e12b8155caa2c7b16d0'
+            $decision.retainedFindings[0].severity | Should -Be 'MEDIUM'
+            $decision.retainedFindings[0].reportRelation | Should -Be 'historical-context'
+            $decision.releaseEligible | Should -BeFalse
+            (Get-FileHash -LiteralPath (Join-Path $root 'docs/standards/internal-source-continuation.json') -Algorithm SHA256).Hash | Should -Be $before
+            [IO.File]::AppendAllText((Join-Path $skill 'SKILL.md'), 'unreviewed drift')
+            { Resolve-StandardValidationInternalSkillUse @parameters } | Should -Throw 'not registered'
+        }
+        finally {
+            if ($null -ne $trustedToolRoot -and (Test-Path -LiteralPath $trustedToolRoot)) {
+                Remove-Item -LiteralPath $trustedToolRoot -Recurse -Force
+            }
+        }
     }
 }

@@ -679,13 +679,32 @@ function Get-StandardValidationUnixOwnerUid {
     )
 
     $statPath = Get-StandardValidationUnixNativeToolPath -Name stat -Context $Context
-    $isMacOS = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)
-    $output = if ($isMacOS) { @(& $statPath -f '%u' $Path 2>$null) } else { @(& $statPath -c '%u' -- $Path 2>$null) }
+    $useBsdStatFormat = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)
+    $output = if ($useBsdStatFormat) { @(& $statPath -f '%u' $Path 2>$null) } else { @(& $statPath -c '%u' -- $Path 2>$null) }
     $value = ($output -join '').Trim()
     if ($LASTEXITCODE -ne 0 -or $value -cnotmatch '^[0-9]+$') {
         throw "INVALID|$Context could not determine the Unix owner id: $Path"
     }
     return [uint64]::Parse($value, [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Assert-StandardValidationTrustedUnixMode {
+    param(
+        [Parameter(Mandatory = $true)][string] $UnixMode,
+        [Parameter(Mandatory = $true)][uint32] $Mode,
+        [Parameter(Mandatory = $true)][ValidateSet('-','d')][string] $ExpectedType,
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($UnixMode.Length -eq 0 -or $UnixMode[0] -cne $ExpectedType) {
+        throw "INVALID|$Context trusted Unix path type could not be verified: $Path"
+    }
+    $groupWrite = [uint32][IO.UnixFileMode]::GroupWrite
+    $otherWrite = [uint32][IO.UnixFileMode]::OtherWrite
+    if (($Mode -band $groupWrite) -ne 0 -or ($Mode -band $otherWrite) -ne 0) {
+        throw "INVALID|$Context trusted Unix path must not grant group-write or other-write permission: $Path"
+    }
 }
 
 function Assert-StandardValidationTrustedUnixToolPath {
@@ -710,17 +729,15 @@ function Assert-StandardValidationTrustedUnixToolPath {
     while ($true) {
         try { $item = Get-Item -Force -LiteralPath $currentPath -ErrorAction Stop }
         catch { throw "INVALID|$Context trusted Unix path could not be inspected: $currentPath. $($_.Exception.Message)" }
-        $unixMode = [string]$item.UnixMode
         $expectedType = if ($isTarget) { '-' } else { 'd' }
+        $unixMode = [string]$item.UnixMode
         if ($unixMode.Length -eq 0 -or $unixMode[0] -cne $expectedType) {
             throw "INVALID|$Context trusted Unix path type could not be verified: $currentPath"
         }
         try { $mode = [IO.File]::GetUnixFileMode($currentPath) }
         catch { throw "INVALID|$Context Unix permissions could not be determined: $currentPath. $($_.Exception.Message)" }
-        $writeMask = [int][IO.UnixFileMode]::GroupWrite -bor [int][IO.UnixFileMode]::OtherWrite
-        if (([int]$mode -band $writeMask) -ne 0) {
-            throw "INVALID|$Context trusted Unix path must not grant group-write or other-write permission: $currentPath"
-        }
+        Assert-StandardValidationTrustedUnixMode -UnixMode $unixMode -Mode ([uint32]$mode) `
+            -ExpectedType $expectedType -Path $currentPath -Context $Context
         $ownerUid = Get-StandardValidationUnixOwnerUid -Path $currentPath -Context $Context
         if ($ownerUid -ne 0 -and $ownerUid -ne $currentUid) {
             throw "INVALID|$Context trusted Unix path must be owned by root or the current user: $currentPath"

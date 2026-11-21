@@ -16,6 +16,18 @@ function Set-RolloutTestText {
     [System.IO.File]::WriteAllText($Path,$Value,(New-Object System.Text.UTF8Encoding($false)))
 }
 
+function Set-RolloutTestUnixUserExecute {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $existingMode = [IO.File]::GetUnixFileMode($Path)
+    $requestedMode = [IO.UnixFileMode](([uint32]$existingMode) -bor ([uint32][IO.UnixFileMode]::UserExecute))
+    [IO.File]::SetUnixFileMode($Path, $requestedMode)
+    $verifiedMode = [IO.File]::GetUnixFileMode($Path)
+    if ((([uint32]$verifiedMode) -band ([uint32][IO.UnixFileMode]::UserExecute)) -eq 0) {
+        throw "User execute permission was not applied to rollout test Git shim: $Path"
+    }
+}
+
 function New-RolloutTestRepository {
     param([Parameter(Mandatory = $true)][string] $Path,[string] $Origin='https://example.com/team/product.git')
     New-Item -ItemType Directory -Force -Path $Path | Out-Null
@@ -104,8 +116,7 @@ exit /b %ERRORLEVEL%
 $failureCommand
 exec git "`$@"
 "@
-    & chmod u+x -- $Path
-    if ($LASTEXITCODE -ne 0) { throw "chmod failed for rollout test Git shim: $Path" }
+    Set-RolloutTestUnixUserExecute -Path $Path
 }
 
 Describe 'AI instructions all-repository rollout' {

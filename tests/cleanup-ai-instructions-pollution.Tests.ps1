@@ -26,6 +26,18 @@ function ConvertTo-CleanupTestDiagnosticText {
     return [regex]::Replace($text, '\s+', ' ').Trim()
 }
 
+function Set-CleanupTestUnixUserExecute {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $existingMode = [IO.File]::GetUnixFileMode($Path)
+    $requestedMode = [IO.UnixFileMode](([uint32]$existingMode) -bor ([uint32][IO.UnixFileMode]::UserExecute))
+    [IO.File]::SetUnixFileMode($Path, $requestedMode)
+    $verifiedMode = [IO.File]::GetUnixFileMode($Path)
+    if ((([uint32]$verifiedMode) -band ([uint32][IO.UnixFileMode]::UserExecute)) -eq 0) {
+        throw "User execute permission was not applied to cleanup test Git wrapper: $Path"
+    }
+}
+
 function New-CleanupTestGitWrapper {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
@@ -53,8 +65,7 @@ exit /b %errorlevel%
 #!/bin/sh
 exec "$script:TestPowerShellExecutable" -NoProfile -ExecutionPolicy Bypass -File "$scriptPath" "`$@"
 "@
-    & chmod u+x -- $wrapperPath
-    if ($LASTEXITCODE -ne 0) { throw "chmod failed for cleanup test Git wrapper: $wrapperPath" }
+    Set-CleanupTestUnixUserExecute -Path $wrapperPath
     return $wrapperPath
 }
 
@@ -474,6 +485,10 @@ Describe 'tracked AI instructions pollution cleanup' {
         New-PollutedTestRepository -Path $targetRoot
         $excludePath = (@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude')) -join '').Trim()
         if (-not [System.IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+        $indexPath = (@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index')) -join '').Trim()
+        if (-not [System.IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
+        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+        $indexHashBefore = (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash
         Remove-Item -LiteralPath $excludePath -Force
         New-Item -ItemType Directory -Path $excludePath | Out-Null
 
@@ -482,7 +497,7 @@ Describe 'tracked AI instructions pollution cleanup' {
         $result.ExitCode | Should Not Be 0
         $result.Output | Should Match 'unsafe shared Git exclude mutation path'
         Test-Path -LiteralPath $excludePath -PathType Container | Should Be $true
-        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+        (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash | Should Be $indexHashBefore
         Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') -PathType Leaf | Should Be $true
     }
 
@@ -1072,7 +1087,7 @@ exit `$LASTEXITCODE
 
         $result.ExitCode | Should Not Be 0
         Test-Path -LiteralPath $injectedMarker | Should Be $true
-        $result.Output | Should Match '(?is)rollback also failed.*shared Git exclude changed concurrently'
+        (ConvertTo-CleanupTestDiagnosticText -Text $result.Output) | Should Match '(?is)rollback also failed.*shared Git exclude changed concurrently'
         (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash | Should Be $indexHashBefore
         @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
         $excludeAfter = [System.IO.File]::ReadAllText($excludePath)
