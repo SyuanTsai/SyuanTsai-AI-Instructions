@@ -14,9 +14,6 @@ Describe 'AI instructions writer and reader gate' {
     }
     AfterAll {if(Test-Path -LiteralPath $script:ExternalRoot){Remove-Item -LiteralPath $script:ExternalRoot -Recurse -Force}}
 
-    # Scenario: Production explicitly requests V3V5 while the production Catalog remains v2.
-    # Purpose: Enforce D4 before Codex Home staging, lock, journal, or any other target mutation.
-
     # Scenario: A previously verified unchanged project Skill is edited immediately before a changed manifest would be published.
     # Purpose: Recompute its raw-byte SHA-256 inside the project transaction, refuse publication, and roll back every owned mutation.
     It 'InterT134_refuses_project_Skill_drift_rechecked_before_manifest_publication' {

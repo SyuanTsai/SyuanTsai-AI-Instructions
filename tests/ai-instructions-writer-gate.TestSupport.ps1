@@ -84,7 +84,7 @@ function New-P7eV3Candidate {
     Copy-Item -LiteralPath (Join-Path $Destination 'catalog\examples\skills-catalog-lock-v3.example.json') -Destination (Join-Path $Destination 'catalog\skills-catalog-lock.json') -Force
     $installerPath=Join-Path $Destination 'scripts\install-ai-instructions-bootstrap.ps1'
     $installer=[IO.File]::ReadAllText($installerPath)
-    $marker='$projectionRuntimeAvailable = $false # P7E_TEST_FIXTURE_MARKER: production remains unavailable until production pins are installed.'
+    $marker='$projectionRuntimeAvailable = Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion $catalogDocument.schemaVersion -CapabilityReceipt $capabilityReceipt # P7E_TEST_FIXTURE_MARKER: production requires Catalog v3 and a Windows capability receipt.'
     if(-not$installer.Contains($marker)){throw 'P7e test-only writer marker was not found.'}
     $installer=$installer.Replace($marker,'$projectionRuntimeAvailable = $true # P7E_TEST_FIXTURE_MARKER: isolated Catalog v3 test candidate only.')
     [IO.File]::WriteAllText($installerPath,$installer,[Text.UTF8Encoding]::new($false))

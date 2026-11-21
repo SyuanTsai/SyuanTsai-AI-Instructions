@@ -98,6 +98,7 @@ function New-TestProjectionDesiredState {
     param(
         [Parameter(Mandatory=$true)][string]$Root,
         [switch]$WithoutClaude,
+        [switch]$WithoutCopilot,
         [switch]$WithoutSkill,
         [string]$PayloadText="---`nname: work-with-jira`ndescription: projection test`n---`n"
     )
@@ -107,9 +108,12 @@ function New-TestProjectionDesiredState {
     }
     Copy-TestPlatformRuntimeClosure -Destination $runtimeRoot
     $catalog=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/skills-catalog-v3.example.json')|ConvertFrom-Json
-    $catalog.projections=@($catalog.projections)+@([pscustomobject][ordered]@{id='user-copilot';scope='user';root='.copilot/skills'})
+    if(-not$WithoutCopilot){
+        $catalog.projections=@($catalog.projections)+@([pscustomobject][ordered]@{id='user-copilot';scope='user';root='.copilot/skills'})
+    }
     $projectionDefinitions=@([pscustomobject]@{id='user-agents';root='.agents/skills'},[pscustomobject]@{id='user-claude';root='.claude/skills'},[pscustomobject]@{id='user-copilot';root='.copilot/skills'})
     if($WithoutClaude){$projectionDefinitions=@($projectionDefinitions|Where-Object id -ne 'user-claude')}
+    if($WithoutCopilot){$projectionDefinitions=@($projectionDefinitions|Where-Object id -ne 'user-copilot')}
     [string[]]$selectedProjectionIds=@($projectionDefinitions|ForEach-Object id)
     $projectionContractSha256=Get-SkillsCatalogProjectionContractSha256 -Projections $catalog.projections
     $stageRoot=Join-Path $Root 'work-with-jira';New-Item -ItemType Directory -Force -Path $stageRoot|Out-Null
@@ -1953,6 +1957,168 @@ finally{if($null-ne$lease){if($lease.PSObject.Properties['Stream']){$lease.Strea
         @($result.failed)[0]|Should Match 'managed manifest is not valid JSON'
         (Get-TestTreeSnapshot $caseHome)|Should Be $before
         Test-Path -LiteralPath (Join-Path $agentsRoot 'update-agent-environment.lock')|Should Be $false
+    }
+}
+
+Describe 'SYP-510 Windows production USER projections' {
+    # Scenario: The approved production projection pair is applied, verified, and applied again in an isolated USER home.
+    # Purpose: Prove exact cross-root file/hash parity, manifest binding, and byte-stable idempotence for user-agents plus user-claude.
+    It 'InterT10_reconciles_the_two_production_USER_projections_idempotently' {
+        $userHome=Join-Path $TestDrive 'syp510-production-pair-user'
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'syp510-production-pair-stage') -WithoutCopilot
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        $inventories=@()
+        foreach($root in @('.agents/skills','.claude/skills')){
+            $absolute=Join-Path $userHome $root
+            $inventories+=,@(Get-ChildItem -LiteralPath $absolute -File -Recurse|ForEach-Object{
+                $relative=$_.FullName.Substring([IO.Path]::GetFullPath($absolute).TrimEnd([char[]]@('\','/')).Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                "$relative`t$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())"
+            }|Sort-Object)
+        }
+        ($inventories[0]-join"`n")|Should Be ($inventories[1]-join"`n")
+        $manifestPath=Join-Path $userHome '.agents/catalog-skills.manifest.json'
+        $manifest=Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath|ConvertFrom-Json
+        [int]$manifest.schemaVersion|Should Be 3
+        (@($manifest.projections)-join',')|Should Be 'user-agents,user-claude'
+        [string]$manifest.lockSha256|Should Be ([string]$desired.Manifest.lockSha256)
+        $before=Get-TestTreeSnapshot $userHome
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'current'
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode VerifyOnly).outcome|Should Be 'current'
+        (Get-TestTreeSnapshot $userHome)|Should Be $before
+    }
+
+    # Scenario: The stable update-agent-environment entry reads config v5 and the production Catalog/Lock v3, then applies and verifies the selected USER projections.
+    # Purpose: Prove Apply and VerifyOnly preserve the installed v3/v5 projection selection through the public command surface without source acquisition.
+    It 'InterT15_preserves_the_production_v3v5_selection_through_the_stable_entry' {
+        $userHome=Join-Path $TestDrive 'syp510-entry-user'
+        $codexHome=Join-Path $TestDrive 'syp510-entry-codex'
+        $runtime=Join-Path $codexHome 'hooks/ai-instructions-runtime'
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'syp510-entry-stage') -WithoutCopilot -WithoutSkill
+        New-Item -ItemType Directory -Force -Path $runtime,(Join-Path $runtime 'catalog')|Out-Null
+        Copy-Item -Path (Join-Path $desired.RuntimeRoot '*') -Destination $runtime -Recurse -Force
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog.json') -Destination (Join-Path $runtime 'catalog/skills-catalog.json') -Force
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog-lock.json') -Destination (Join-Path $runtime 'catalog/skills-catalog-lock.json') -Force
+        Copy-Item -LiteralPath $script:ModulePath -Destination (Join-Path $runtime 'agent-environment-reconciler-core.ps1') -Force
+        $desired.CatalogBytes=[IO.File]::ReadAllBytes((Join-Path $runtime 'catalog/skills-catalog.json'))
+        $desired.LockBytes=[IO.File]::ReadAllBytes((Join-Path $runtime 'catalog/skills-catalog-lock.json'))
+        $desired.Catalog=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $runtime 'catalog/skills-catalog.json')|ConvertFrom-Json
+        $desired.Lock=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $runtime 'catalog/skills-catalog-lock.json')|ConvertFrom-Json
+        $excludedSkillIds=@($desired.Catalog.skills|Where-Object{[string]$_.lifecycle.status-ceq'active'}|ForEach-Object{[string]$_.id})
+        $desired.Manifest.catalogId=[string]$desired.Catalog.catalogId
+        $desired.Manifest.lockSha256=(Get-FileHash -LiteralPath (Join-Path $runtime 'catalog/skills-catalog-lock.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+        $desired.Manifest.projectionContractSha256=[string]$desired.Lock.projectionContractSha256
+        Assert-UserSkillsManagedManifestBinding -Manifest $desired.Manifest -CatalogBytes $desired.CatalogBytes -LockBytes $desired.LockBytes -ExpectedCatalogRepository $desired.Manifest.catalogRepository -ExpectedCatalogCommit $desired.Manifest.catalogCommit|Out-Null
+        $desired.RuntimeRoot=$runtime
+        $desiredPath=Join-Path $runtime 'syp510-desired.clixml'
+        $desired|Export-Clixml -LiteralPath $desiredPath
+        @'
+. (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.ps1')
+function Get-UserSkillsDesiredState {
+    param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot,[object]$GateContext)
+    $state=Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'syp510-desired.clixml')
+    $state.RuntimeRoot=$PSScriptRoot
+    $state.GateContext=$GateContext
+    $state.SkillIds=[string[]]@()
+    $state.Files=[object[]]@()
+    $state.Manifest.files=[object[]]@()
+    return $state
+}
+Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery,New-AgentEnvironmentInstallReadLeaseEvidence
+'@|Set-Content -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Encoding UTF8
+        $commit='0123456789abcdef0123456789abcdef01234567'
+        $configuration=[pscustomobject][ordered]@{
+            schemaVersion=5;excludedRepositoryUrls=@();excludedRepositoryPaths=@()
+            catalog=[pscustomobject][ordered]@{repository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git';ref=$commit;profiles=@();includeSkills=@();excludeSkills=$excludedSkillIds}
+            updates=[pscustomobject][ordered]@{mode='notify-only';channel='protected-branch';ref='main';minimumCheckIntervalMinutes=1440}
+            projections=[pscustomobject][ordered]@{user=@('user-agents','user-claude');project=@()}
+        }
+        [IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-sync.json'),($configuration|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-install.lock'),'',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $codexHome 'hooks/bootstrap-ai-instructions.ps1'),"param([switch]`$ValidateOnly)`nif(-not`$ValidateOnly){throw 'ValidateOnly required'}`n",[Text.UTF8Encoding]::new($false))
+        $platformModule=Import-Module (Join-Path $runtime 'platform-runtime.psd1') -Force -PassThru
+        $capabilityReceipt=& $platformModule {Get-PlatformCapabilities -Required @()}
+        $bundle=New-TestAiInstructionsRuntimeBundleV3 -RuntimeRoot $runtime -Repository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' -Commit $commit -Acquisition git-checkout -CapabilityReceipt $capabilityReceipt
+        [IO.File]::WriteAllText((Join-Path $runtime 'runtime-bundle.json'),($bundle|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
+        $configurationBytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $codexHome 'ai-instructions-sync.json')))
+        $entry=Join-Path $script:RepositoryRoot 'scripts/update-agent-environment.ps1'
+
+        $applyOutput=@(& $script:TestPowerShellExecutable -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $userHome -Apply -OutputFormat Json)
+        $applyExit=$LASTEXITCODE;$apply=$applyOutput[-1]|ConvertFrom-Json
+        if($applyExit-ne0){throw "stable entry Apply failed with exit $applyExit`: $($applyOutput-join ' | ')"}
+        $apply.outcome|Should Be 'applied'
+        $verifyOutput=@(& $script:TestPowerShellExecutable -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $userHome -VerifyOnly -OutputFormat Json)
+        $verifyExit=$LASTEXITCODE;$verify=$verifyOutput[-1]|ConvertFrom-Json
+        if($verifyExit-ne0){throw "stable entry VerifyOnly failed with exit $verifyExit`: $($verifyOutput-join ' | ')"}
+        $verify.outcome|Should Be 'current'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $codexHome 'ai-instructions-sync.json')))|Should Be $configurationBytes
+        $manifest=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json')|ConvertFrom-Json
+        (@($manifest.projections)-join ',')|Should Be 'user-agents,user-claude'
+        (Test-Path -LiteralPath (Join-Path $userHome '.claude/CLAUDE.md'))|Should Be $true
+    }
+
+    # Scenario: Claude has unrelated content plus either identical or different bytes at the selected managed path.
+    # Purpose: Preserve user-owned files, adopt identical bytes, and reject unmanaged collisions before either root, manifest, or CLAUDE.md changes.
+    It 'InterT20_preserves_user_content_and_rejects_only_different_same_name_bytes_before_mutation' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'syp510-collision-stage') -WithoutCopilot
+        $exactHome=Join-Path $TestDrive 'syp510-exact-user'
+        $personal=Join-Path $exactHome '.claude/skills/personal-skill/SKILL.md'
+        $extra=Join-Path $exactHome '.claude/skills/work-with-jira/personal-notes.txt'
+        New-Item -ItemType Directory -Force -Path (Split-Path $personal),(Split-Path $extra)|Out-Null
+        [IO.File]::WriteAllText($personal,'personal skill',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($extra,'personal notes',[Text.UTF8Encoding]::new($false))
+        $exact=@($desired.Files|Where-Object projectionId -ceq 'user-claude')[0]
+        [IO.File]::Copy([string]$exact.stagedPath,(Join-Path $exactHome $exact.targetPath))
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $exactHome -Mode Apply).outcome|Should Be 'applied'
+        [IO.File]::ReadAllText($personal)|Should Be 'personal skill'
+        [IO.File]::ReadAllText($extra)|Should Be 'personal notes'
+        (Get-FileHash -LiteralPath (Join-Path $exactHome $exact.targetPath) -Algorithm SHA256).Hash.ToLowerInvariant()|Should Be ([string]$exact.sha256)
+
+        $collisionHome=Join-Path $TestDrive 'syp510-collision-user'
+        $agentsSentinel=Join-Path $collisionHome '.agents/skills/personal/SKILL.md'
+        $conflict=Join-Path $collisionHome $exact.targetPath
+        $claudePath=Join-Path $collisionHome '.claude/CLAUDE.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path $agentsSentinel),(Split-Path $conflict)|Out-Null
+        [IO.File]::WriteAllText($agentsSentinel,'agents personal',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($conflict,'different unmanaged bytes',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($claudePath,'personal Claude instructions',[Text.UTF8Encoding]::new($false))
+        $beforeAgents=Get-TestTreeSnapshot (Join-Path $collisionHome '.agents/skills')
+        $beforeClaudeSkills=Get-TestTreeSnapshot (Join-Path $collisionHome '.claude/skills')
+        $beforeClaude=[Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))
+        Test-Path -LiteralPath (Join-Path $collisionHome '.agents/catalog-skills.manifest.json')|Should Be $false
+        $collision=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $collisionHome -Mode Apply
+        $collision.outcome|Should Be 'failed'
+        @($collision.failureDetails|Where-Object code -ceq 'unmanaged-collision').Count|Should BeGreaterThan 0
+        (Get-TestTreeSnapshot (Join-Path $collisionHome '.agents/skills'))|Should Be $beforeAgents
+        (Get-TestTreeSnapshot (Join-Path $collisionHome '.claude/skills'))|Should Be $beforeClaudeSkills
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be $beforeClaude
+        Test-Path -LiteralPath (Join-Path $collisionHome '.agents/catalog-skills.manifest.json')|Should Be $false
+    }
+
+    # Scenario: An update fails after both production projection roots have entered the USER publication transaction.
+    # Purpose: Restore both roots, the manifest, and CLAUDE.md to the previous generation as one rollback unit.
+    It 'InterT30_rolls_back_both_production_projection_roots_to_the_previous_generation' {
+        $userHome=Join-Path $TestDrive 'syp510-rollback-user'
+        $baseline=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'syp510-rollback-baseline') -WithoutCopilot
+        (Invoke-UserSkillsReconciliation -DesiredState $baseline -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        $before=Get-TestTreeSnapshot $userHome
+        $updated=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'syp510-rollback-updated') -WithoutCopilot -PayloadText "---`nname: work-with-jira`ndescription: updated projection test`n---`n"
+
+        $failed=Invoke-UserSkillsReconciliation -DesiredState $updated -UserHome $userHome -Mode Apply -FailureAfterMutationCount 2
+
+        $failed.outcome|Should Be 'failed'
+        $failed.rollbackState|Should Be 'completed'
+        (Get-TestTreeSnapshot $userHome)|Should Be $before
+    }
+
+    # Scenario: Catalog v3 is evaluated with Windows, Linux, and macOS capability receipts, while Catalog v2 is evaluated on Windows.
+    # Purpose: Keep production projection availability Windows-only and prevent a v2 Catalog from entering V3V5.
+    It 'UnitT40_enables_projection_runtime_only_for_Catalog_v3_on_Windows' {
+        (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 3 -CapabilityReceipt ([pscustomobject]@{os='windows'}))|Should Be $true
+        (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 3 -CapabilityReceipt ([pscustomobject]@{os='linux'}))|Should Be $false
+        (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 3 -CapabilityReceipt ([pscustomobject]@{os='macos'}))|Should Be $false
+        (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 2 -CapabilityReceipt ([pscustomobject]@{os='windows'}))|Should Be $false
     }
 }
 

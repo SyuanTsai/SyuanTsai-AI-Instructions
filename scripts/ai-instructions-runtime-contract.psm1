@@ -168,6 +168,17 @@ function Assert-AiInstructionsProjectionCapabilityReceipt {
     return $Receipt
 }
 
+function Test-AiInstructionsProjectionRuntimeAvailable {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object] $CatalogSchemaVersion,
+        [AllowNull()][object] $CapabilityReceipt
+    )
+    $catalogIsV3 = (($CatalogSchemaVersion -is [int]) -or ($CatalogSchemaVersion -is [long])) -and [int64]$CatalogSchemaVersion -eq 3
+    if (-not $catalogIsV3 -or -not (Test-AiInstructionsObjectHasProperty -Object $CapabilityReceipt -Name 'os')) { return $false }
+    return [string]$CapabilityReceipt.os -ceq 'windows'
+}
+
 function Select-AiInstructionsInstallWriterSchema {
     [CmdletBinding()]
     param(
@@ -3784,6 +3795,7 @@ Export-ModuleMember -Function @(
     'Get-AiInstructionsRuntimeInventorySha256V3',
     'New-AiInstructionsRuntimeBundleV2',
     'New-AiInstructionsRuntimeBundleV3',
+    'Test-AiInstructionsProjectionRuntimeAvailable',
     'Select-AiInstructionsInstallWriterSchema',
     'New-AiInstructionsInstallJournalV1',
     'New-AiInstructionsInstallJournalV2',

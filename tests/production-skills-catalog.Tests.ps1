@@ -146,7 +146,7 @@ Describe 'production Skills Catalog' {
             $expectedSourceBySkill.ContainsKey([string]$skill.id) | Should Be $true
             [string]$skill.source.sourceId | Should Be $expectedSourceBySkill[[string]$skill.id]
             [string]$skill.source.sourcePath | Should Be "skills/$($skill.id)"
-            [string]$skill.source.targetPath | Should Be ".agents/skills/$($skill.id)"
+            $null -eq $skill.source.PSObject.Properties['targetPath'] | Should Be $true
         }
 
         $removedFelo = @($script:catalog.skills | Where-Object { [string]$_.id -eq 'search-with-felo' })
@@ -341,21 +341,76 @@ Describe 'production Skills Catalog' {
         @($script:lock.skills | Where-Object { [string]$_.id -eq 'search-with-felo' }).Count | Should Be 0
     }
 
-    # Scenario: Production moves to canonical source packages while consumer targets stay separate.
-    # Purpose: Guard the complete v2 source/target cutover without dropping a Skill or its immutable lock entry.
-    It 'InterT31_binds_production_catalog_and_lock_to_canonical_schema_v2' {
-        $script:catalog.schemaVersion | Should Be 2
-        $script:lock.schemaVersion | Should Be 2
+    # Scenario: Production uses the projection-aware Catalog while preserving canonical source packages.
+    # Purpose: Guard the v3 cutover without dropping a Skill, changing a source package, or adding an unsupported projection.
+    It 'InterT31_binds_production_catalog_and_lock_to_the_two_USER_projections' {
+        $script:catalog.schemaVersion | Should Be 3
+        $script:lock.schemaVersion | Should Be 3
+        Assert-StringSequence -Actual @($script:catalog.projections.id) -Expected @('user-agents','user-claude')
+        Assert-StringSequence -Actual @($script:catalog.projections.scope) -Expected @('user','user')
+        Assert-StringSequence -Actual @($script:catalog.projections.root) -Expected @('.agents/skills','.claude/skills')
+        [string]$script:lock.projectionContractSha256 | Should Match '^[0-9a-f]{64}$'
         $active = @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' })
         $active.Count | Should Be 14
         foreach ($skill in $active) {
             [string]$skill.source.sourcePath | Should Be "skills/$($skill.id)"
-            [string]$skill.source.targetPath | Should Be ".agents/skills/$($skill.id)"
+            $null -eq $skill.source.PSObject.Properties['targetPath'] | Should Be $true
             $locked = @($script:lock.skills | Where-Object { $_.id -eq $skill.id })
             $locked.Count | Should Be 1
             [string]$locked[0].sourcePath | Should Be $skill.source.sourcePath
-            [string]$locked[0].targetPath | Should Be $skill.source.targetPath
+            $null -eq $locked[0].PSObject.Properties['targetPath'] | Should Be $true
         }
         @($script:catalog.skills | Where-Object { $null -ne $_.source.PSObject.Properties['path'] }).Count | Should Be 0
+    }
+
+    # Scenario: The projection-aware production Lock is compared with the immutable v2 Lock from the approved 34366ae baseline.
+    # Purpose: Prove that the v3 format migration changes neither source pins nor per-Skill content hashes.
+    It 'InterT32_preserves_every_v2_source_pin_and_content_hash_in_the_v3_lock' {
+        $baselineText = @(& git -C $repositoryRoot show '34366ae:catalog/skills-catalog-lock.json') -join "`n"
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($baselineText)) {
+            throw 'The approved 34366ae v2 Lock baseline is unavailable.'
+        }
+        $baseline = $baselineText | ConvertFrom-Json
+        [int]$baseline.schemaVersion | Should Be 2
+
+        @($script:lock.sources).Count | Should Be @($baseline.sources).Count
+        foreach ($expected in @($baseline.sources)) {
+            $actual = @($script:lock.sources | Where-Object { [string]$_.id -ceq [string]$expected.id })
+            $actual.Count | Should Be 1
+            foreach ($property in @('repository','requestedRef','requestedRefType','resolvedCommit','resolvedVersion','archiveSha256')) {
+                [string]$actual[0].$property | Should Be ([string]$expected.$property)
+            }
+        }
+
+        @($script:lock.skills).Count | Should Be @($baseline.skills).Count
+        foreach ($expected in @($baseline.skills)) {
+            $actual = @($script:lock.skills | Where-Object { [string]$_.id -ceq [string]$expected.id })
+            $actual.Count | Should Be 1
+            foreach ($property in @('sourceId','sourcePath','contentSha256')) {
+                [string]$actual[0].$property | Should Be ([string]$expected.$property)
+            }
+        }
+    }
+
+    # Scenario: The approved v2 Lock is converted to v3 locally, then the generated v3 Lock is checked again without source acquisition.
+    # Purpose: Keep the production Lock reproducible and make the ordinary -Check path independent of network access or pin re-resolution.
+    It 'InterT33_generates_and_checks_the_v3_lock_from_existing_immutable_pins_offline' {
+        $baselineText = @(& git -C $repositoryRoot show '34366ae:catalog/skills-catalog-lock.json') -join "`n"
+        $baselinePath = Join-Path $TestDrive 'skills-catalog-lock-v2.json'
+        $generatedPath = Join-Path $TestDrive 'skills-catalog-lock-v3.json'
+        [IO.File]::WriteAllText($baselinePath,$baselineText+"`n",[Text.UTF8Encoding]::new($false))
+        $generator = Join-Path $repositoryRoot 'scripts/update-skills-catalog-lock.ps1'
+        $engine = (Get-Process -Id $PID).Path
+
+        $generateOutput = @(& $engine -NoProfile -NonInteractive -File $generator `
+            -CatalogPath $catalogPath -SourcePinsPath $sourcePinsPath -OutputPath $generatedPath -BaseLockPath $baselinePath 2>&1)
+        $LASTEXITCODE | Should Be 0
+        ($generateOutput -join "`n") | Should Match 'existing immutable pins'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($generatedPath)) | Should Be ([Convert]::ToBase64String([IO.File]::ReadAllBytes($lockPath)))
+
+        $checkOutput = @(& $engine -NoProfile -NonInteractive -File $generator `
+            -CatalogPath $catalogPath -SourcePinsPath $sourcePinsPath -OutputPath $generatedPath -Check 2>&1)
+        $LASTEXITCODE | Should Be 0
+        ($checkOutput -join "`n") | Should Match 'Skills Catalog lock is current'
     }
 }

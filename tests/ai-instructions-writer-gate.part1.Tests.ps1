@@ -14,18 +14,33 @@ Describe 'AI instructions writer and reader gate' {
     }
     AfterAll {if(Test-Path -LiteralPath $script:ExternalRoot){Remove-Item -LiteralPath $script:ExternalRoot -Recurse -Force}}
 
-    # Scenario: Production explicitly requests V3V5 while the production Catalog remains v2.
-    # Purpose: Enforce D4 before Codex Home staging, lock, journal, or any other target mutation.
-    It 'InterT10_refuses_production_v3v5_without_any_target_mutation' {
-        $fixtureHome=Join-Path $script:ExternalRoot 'prod-v3';$before=Get-P7eTreeSnapshot $fixtureHome
+    # Scenario: Windows production explicitly opts in to V3V5 with the projection-aware production Catalog.
+    # Purpose: Enable the approved production writer, preserve it under Auto, and reject an explicit downgrade without mutation.
+    It 'InterT10_installs_production_v3v5_when_explicitly_requested_on_Windows' {
+        $fixtureHome=Join-Path $script:ExternalRoot 'prod-v3'
         $result=Invoke-P7eInstaller -SourceRoot $script:RepositoryRoot -CodexHome $fixtureHome -WriterSchema V3V5
-        $result.ExitCode|Should Not Be 0
-        (Get-AiInstructionsRefusalCode $result.Output)|Should Be projection-runtime-unavailable
+        $result.ExitCode|Should Be 0
+        (Get-Content -Raw -LiteralPath (Join-Path $fixtureHome 'hooks\ai-instructions-runtime\runtime-bundle.json')|ConvertFrom-Json).schemaVersion|Should Be 3
+        $configuration=Get-Content -Raw -LiteralPath (Join-Path $fixtureHome 'ai-instructions-sync.json')|ConvertFrom-Json
+        $configuration.schemaVersion|Should Be 5
+        (@($configuration.projections.user)-join ',')|Should Be 'user-agents,user-claude'
+
+        $auto=Invoke-P7eInstaller -SourceRoot $script:RepositoryRoot -CodexHome $fixtureHome -WriterSchema Auto
+        $auto.ExitCode|Should Be 0
+        (Get-Content -Raw -LiteralPath (Join-Path $fixtureHome 'hooks\ai-instructions-runtime\runtime-bundle.json')|ConvertFrom-Json).schemaVersion|Should Be 3
+        $configuration=Get-Content -Raw -LiteralPath (Join-Path $fixtureHome 'ai-instructions-sync.json')|ConvertFrom-Json
+        $configuration.schemaVersion|Should Be 5
+        (@($configuration.projections.user)-join ',')|Should Be 'user-agents,user-claude'
+
+        $before=Get-P7eTreeSnapshot $fixtureHome
+        $downgrade=Invoke-P7eInstaller -SourceRoot $script:RepositoryRoot -CodexHome $fixtureHome -WriterSchema V2V4
+        $downgrade.ExitCode|Should Not Be 0
+        (Get-AiInstructionsRefusalCode $downgrade.Output)|Should Be downgrade-refused
         (Get-P7eTreeSnapshot $fixtureHome)|Should Be $before
     }
 
     # Scenario: A fresh production install uses the default Auto writer.
-    # Purpose: Protect the v2/v4 default until production projection pins are available.
+    # Purpose: Preserve the v2/v4 default so the production projection generation remains an explicit opt-in.
     It 'InterT20_keeps_fresh_auto_on_v2v4' {
         $fixtureHome=Join-Path $script:ExternalRoot 'auto-v2'
         $result=Invoke-P7eInstaller -SourceRoot $script:RepositoryRoot -CodexHome $fixtureHome
