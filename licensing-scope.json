@@ -1802,6 +1802,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/fixtures/windows-git-owned-process-shim.cs",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/fixtures/consumer-transition-probe/base/scripts/Legacy.ps1",
       "license": "Apache-2.0"
     },
