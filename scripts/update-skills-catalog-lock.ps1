@@ -155,17 +155,18 @@ $pinsById = @{}
 foreach ($pin in @($pins.sources)) { $pinsById[[string]$pin.id] = $pin }
 
 if ([int64]$catalog.schemaVersion -eq 3) {
-    $conversionLockPath = if (-not [string]::IsNullOrWhiteSpace($BaseLockPath)) {
-        [System.IO.Path]::GetFullPath($BaseLockPath)
-    }
-    elseif (Test-Path -LiteralPath $OutputPath -PathType Leaf) {
-        [System.IO.Path]::GetFullPath($OutputPath)
-    }
-    else { $null }
+    $conversionLockPath = if (-not [string]::IsNullOrWhiteSpace($BaseLockPath)) { [System.IO.Path]::GetFullPath($BaseLockPath) } else { $null }
     if ($null -ne $conversionLockPath) {
+        $resolvedOutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+        $pathComparison = if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+            [System.StringComparison]::OrdinalIgnoreCase
+        }
+        else { [System.StringComparison]::Ordinal }
+        if ([string]::Equals($conversionLockPath,$resolvedOutputPath,$pathComparison)) {
+            throw 'Skills Catalog base Lock path must not equal the output path.'
+        }
         $lock = New-ProjectionLockFromExistingLock -Catalog $catalog -Pins $pins -ExistingLockPath $conversionLockPath
         $json = ($lock | ConvertTo-Json -Depth 20 -Compress) + "`n"
-        $resolvedOutputPath = [System.IO.Path]::GetFullPath($OutputPath)
         if ($Check) {
             if (-not (Test-Path -LiteralPath $resolvedOutputPath -PathType Leaf)) { throw "Skills Catalog lock does not exist: $resolvedOutputPath" }
             $existing = [System.IO.File]::ReadAllText($resolvedOutputPath).Replace("`r`n", "`n").Replace("`r", "`n")

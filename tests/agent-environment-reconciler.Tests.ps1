@@ -1961,6 +1961,68 @@ finally{if($null-ne$lease){if($lease.PSObject.Properties['Stream']){$lease.Strea
 }
 
 Describe 'SYP-510 Windows production USER projections' {
+    # Scenario: A legacy v2/v4 installation reads a projection-aware Catalog and Lock without a projection gate context.
+    # Purpose: Preserve the pre-projection single user-agents writer, USER manifest v2, and public Apply/VerifyOnly behavior.
+    It 'InterT05_keeps_Catalog_v3_on_the_legacy_single_USER_projection_without_a_gate_context' {
+        $fixture=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'syp510-legacy-catalog-v3') -WithoutCopilot -PayloadText "---`nname: work-with-jira`ndescription: projection test`n---`n`n# Fixture`n"
+        $archivePath=New-TestProjectionSourceArchive -PayloadPath ([string]$fixture.Files[0].stagedPath) -ArchivePath (Join-Path $TestDrive 'syp510-legacy-catalog-v3.zip')
+        $runtimeRoot=[string]$fixture.RuntimeRoot
+        $lockPath=Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json'
+        $lock=Get-Content -Raw -Encoding UTF8 -LiteralPath $lockPath|ConvertFrom-Json
+        @($lock.sources|Where-Object id -ceq 'agent-skills')[0].archiveSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        [IO.File]::WriteAllText($lockPath,(($lock|ConvertTo-Json -Depth 20)+"`n"),[Text.UTF8Encoding]::new($false))
+        $configuration=[pscustomobject][ordered]@{
+            schemaVersion=4;excludedRepositoryUrls=@();excludedRepositoryPaths=@()
+            catalog=[pscustomobject][ordered]@{
+                repository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
+                ref='0123456789abcdef0123456789abcdef01234567'
+                profiles=@();includeSkills=@('work-with-jira');excludeSkills=@('manage-task-handoff')
+            }
+            updates=[pscustomobject][ordered]@{mode='notify-only';channel='protected-branch';ref='main';minimumCheckIntervalMinutes=1440}
+        }
+
+        $desired=Get-UserSkillsDesiredState -RuntimeRoot $runtimeRoot -Configuration $configuration `
+            -CatalogRepository ([string]$configuration.catalog.repository) -CatalogCommit ([string]$configuration.catalog.ref) `
+            -WorkingRoot (Join-Path $TestDrive 'syp510-legacy-catalog-v3-work') -LocalArchiveOverrides @{'agent-skills'=$archivePath}
+
+        [int]$desired.Manifest.schemaVersion|Should Be 2
+        (@($desired.ProjectionIds)-join ',')|Should Be 'user-agents'
+        @($desired.Files|Where-Object{[string]$_.targetPath -notlike '.agents/skills/*'}).Count|Should Be 0
+        @($desired.Manifest.files|Where-Object{$null-ne$_.PSObject.Properties['projectionId']}).Count|Should Be 0
+        $null-eq$desired.GateContext|Should Be $true
+        $null-eq$desired.InstructionsArtifact|Should Be $true
+
+        $v2RuntimeRoot=Join-Path $TestDrive 'syp510-legacy-v2-runtime'
+        Copy-Item -LiteralPath $runtimeRoot -Destination $v2RuntimeRoot -Recurse
+        $v2CatalogPath=Join-Path $v2RuntimeRoot 'catalog/skills-catalog.json'
+        $v2LockPath=Join-Path $v2RuntimeRoot 'catalog/skills-catalog-lock.json'
+        $v2Catalog=Get-Content -Raw -Encoding UTF8 -LiteralPath $v2CatalogPath|ConvertFrom-Json
+        $v2Catalog.schemaVersion=2;$v2Catalog.PSObject.Properties.Remove('projections')
+        foreach($skill in @($v2Catalog.skills)){$skill.source|Add-Member -NotePropertyName targetPath -NotePropertyValue ".agents/skills/$([string]$skill.id)" -Force}
+        [IO.File]::WriteAllText($v2CatalogPath,(($v2Catalog|ConvertTo-Json -Depth 20)+"`n"),[Text.UTF8Encoding]::new($false))
+        $v2Lock=Get-Content -Raw -Encoding UTF8 -LiteralPath $v2LockPath|ConvertFrom-Json
+        $v2Lock.schemaVersion=2;$v2Lock.PSObject.Properties.Remove('projectionContractSha256')
+        $v2Lock.catalogSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $v2CatalogPath).Hash.ToLowerInvariant()
+        foreach($skill in @($v2Lock.skills)){$skill|Add-Member -NotePropertyName targetPath -NotePropertyValue ".agents/skills/$([string]$skill.id)" -Force}
+        [IO.File]::WriteAllText($v2LockPath,(($v2Lock|ConvertTo-Json -Depth 20)+"`n"),[Text.UTF8Encoding]::new($false))
+        $v2Desired=Get-UserSkillsDesiredState -RuntimeRoot $v2RuntimeRoot -Configuration $configuration `
+            -CatalogRepository ([string]$configuration.catalog.repository) -CatalogCommit ([string]$configuration.catalog.ref) `
+            -WorkingRoot (Join-Path $TestDrive 'syp510-legacy-v2-work') -LocalArchiveOverrides @{'agent-skills'=$archivePath}
+        (@($desired.Files|ForEach-Object{"$([string]$_.targetPath)`t$([string]$_.sha256)"}|Sort-Object)-join"`n")|Should Be (@($v2Desired.Files|ForEach-Object{"$([string]$_.targetPath)`t$([string]$_.sha256)"}|Sort-Object)-join"`n")
+
+        $userHome=Join-Path $TestDrive 'syp510-legacy-catalog-v3-user'
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode VerifyOnly).outcome|Should Be 'current'
+        foreach($entry in @($desired.Files)){
+            (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $userHome ([string]$entry.targetPath))).Hash.ToLowerInvariant()|Should Be ([string]$entry.sha256)
+        }
+        [int](Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json')|ConvertFrom-Json).schemaVersion|Should Be 2
+        Test-Path -LiteralPath (Join-Path $userHome '.claude')|Should Be $false
+        $v2UserHome=Join-Path $TestDrive 'syp510-legacy-v2-user'
+        (Invoke-UserSkillsReconciliation -DesiredState $v2Desired -UserHome $v2UserHome -Mode Apply).outcome|Should Be 'applied'
+        (Get-TestTreeSnapshot (Join-Path $userHome '.agents/skills'))|Should Be (Get-TestTreeSnapshot (Join-Path $v2UserHome '.agents/skills'))
+    }
+
     # Scenario: The approved production projection pair is applied, verified, and applied again in an isolated USER home.
     # Purpose: Prove exact cross-root file/hash parity, manifest binding, and byte-stable idempotence for user-agents plus user-claude.
     It 'InterT10_reconciles_the_two_production_USER_projections_idempotently' {

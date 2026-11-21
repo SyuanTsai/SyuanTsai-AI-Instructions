@@ -895,10 +895,18 @@ function Get-UserSkillsDesiredState {
     [byte[]]$lockBytes = [System.IO.File]::ReadAllBytes($lockPath)
     $catalog = Test-SkillsCatalogDocument -CatalogPath $catalogPath
     $lock = Test-SkillsCatalogLockDocument -CatalogPath $catalogPath -LockPath $lockPath
-    $projectionAware = [int64]$catalog.schemaVersion -eq 3
-    if ($projectionAware -ne ([int64]$lock.schemaVersion -eq 3)) { throw 'Catalog and Lock projection generations are mixed.' }
+    $catalogSupportsProjections = [int64]$catalog.schemaVersion -eq 3
+    if ($catalogSupportsProjections -ne ([int64]$lock.schemaVersion -eq 3)) { throw 'Catalog and Lock projection generations are mixed.' }
+    $projectionAware = $null -ne $GateContext
+    $configurationVersionProperty = $Configuration.PSObject.Properties['schemaVersion']
+    $configurationVersion = if ($null -eq $configurationVersionProperty) { 0 } else { [int64]$configurationVersionProperty.Value }
+    if ($configurationVersion -eq 5 -and -not $projectionAware) {
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'Projection-aware configuration requires a verified USER projection gate context.')
+    }
+    if ($projectionAware -and -not $catalogSupportsProjections) {
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'A verified USER projection gate context requires Catalog and Lock schemaVersion 3.')
+    }
     if ($projectionAware) {
-        if ($null -eq $GateContext) { throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'Projection-aware desired state requires a verified USER projection gate context.') }
         $GateContext=Assert-AgentEnvironmentProjectionGateContext -GateContext $GateContext -RuntimeRoot $RuntimeRoot
         if((Get-AgentEnvironmentObjectSha256 -Value $Configuration)-cne[string]$GateContext.configurationSha256){
             throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'Desired-state configuration does not match the verified USER projection gate context.')
@@ -1001,7 +1009,7 @@ function Get-UserSkillsDesiredState {
         [pscustomobject]$manifestEntry
     })
     $manifestData = [ordered]@{
-        schemaVersion = if ($projectionAware) { 3 } elseif ([int64]$catalog.schemaVersion -eq 2) { 2 } else { 1 }
+        schemaVersion = if ($projectionAware) { 3 } elseif ([int64]$catalog.schemaVersion -in @(2,3)) { 2 } else { 1 }
         catalogRepository = $CatalogRepository
         catalogCommit = $CatalogCommit
         catalogId = [string]$catalog.catalogId

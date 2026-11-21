@@ -39,14 +39,48 @@ Describe 'AI instructions writer and reader gate' {
         (Get-P7eTreeSnapshot $fixtureHome)|Should Be $before
     }
 
-    # Scenario: A fresh production install uses the default Auto writer.
-    # Purpose: Preserve the v2/v4 default so the production projection generation remains an explicit opt-in.
-    It 'InterT20_keeps_fresh_auto_on_v2v4' {
+    # Scenario: A fresh production Auto install applies and verifies legacy USER state before explicitly upgrading the same isolated home to V3V5.
+    # Purpose: Preserve the v2/v4 default with Catalog/Lock v3, then prove opt-in enables both managed USER projections through the public updater.
+    It 'InterT20_keeps_fresh_auto_on_v2v4_and_updates_USER_state_before_opt_in' {
         $fixtureHome=Join-Path $script:ExternalRoot 'auto-v2'
         $result=Invoke-P7eInstaller -SourceRoot $script:RepositoryRoot -CodexHome $fixtureHome
         $result.ExitCode|Should Be 0
         (Get-Content -Raw -LiteralPath (Join-Path $fixtureHome 'hooks\ai-instructions-runtime\runtime-bundle.json')|ConvertFrom-Json).schemaVersion|Should Be 2
-        (Get-Content -Raw -LiteralPath (Join-Path $fixtureHome 'ai-instructions-sync.json')|ConvertFrom-Json).schemaVersion|Should Be 4
+        $configurationPath=Join-Path $fixtureHome 'ai-instructions-sync.json'
+        $configuration=Get-Content -Raw -LiteralPath $configurationPath|ConvertFrom-Json
+        $configuration.schemaVersion|Should Be 4
+        $productionCatalog=Get-Content -Raw -LiteralPath (Join-Path $fixtureHome 'hooks\ai-instructions-runtime\catalog\skills-catalog.json')|ConvertFrom-Json
+        $configuration.catalog.profiles=@();$configuration.catalog.includeSkills=@();$configuration.catalog.excludeSkills=@($productionCatalog.skills|Where-Object{[string]$_.lifecycle.status-cne'removed'}|ForEach-Object{[string]$_.id})
+        [IO.File]::WriteAllText($configurationPath,(($configuration|ConvertTo-Json -Depth 30)+"`n"),[Text.UTF8Encoding]::new($false))
+        $userHome=Join-Path $script:ExternalRoot 'auto-v2-user'
+        $entry=Join-Path $script:RepositoryRoot 'scripts\update-agent-environment.ps1'
+
+        $applyOutput=@(& $script:PowerShellExecutable -NoProfile -NonInteractive -File $entry -CodexHome $fixtureHome -UserHome $userHome -Apply -OutputFormat Json)
+        $applyExit=$LASTEXITCODE;$apply=$applyOutput[-1]|ConvertFrom-Json
+        if($applyExit-ne0){throw "legacy public Apply failed with exit $applyExit`: $($applyOutput-join ' | ')"}
+        $apply.outcome|Should Be 'applied'
+        $verifyOutput=@(& $script:PowerShellExecutable -NoProfile -NonInteractive -File $entry -CodexHome $fixtureHome -UserHome $userHome -VerifyOnly -OutputFormat Json)
+        $verifyExit=$LASTEXITCODE;$verify=$verifyOutput[-1]|ConvertFrom-Json
+        if($verifyExit-ne0){throw "legacy public VerifyOnly failed with exit $verifyExit`: $($verifyOutput-join ' | ')"}
+        $verify.outcome|Should Be 'current'
+        $legacyManifest=Get-Content -Raw -LiteralPath (Join-Path $userHome '.agents\catalog-skills.manifest.json')|ConvertFrom-Json
+        [int]$legacyManifest.schemaVersion|Should Be 2
+        Test-Path -LiteralPath (Join-Path $userHome '.claude')|Should Be $false
+
+        $upgrade=Invoke-P7eInstaller -SourceRoot $script:RepositoryRoot -CodexHome $fixtureHome -WriterSchema V3V5
+        $upgrade.ExitCode|Should Be 0
+        $applyOutput=@(& $script:PowerShellExecutable -NoProfile -NonInteractive -File $entry -CodexHome $fixtureHome -UserHome $userHome -Apply -OutputFormat Json)
+        $applyExit=$LASTEXITCODE;$apply=$applyOutput[-1]|ConvertFrom-Json
+        if($applyExit-ne0){throw "projection public Apply failed with exit $applyExit`: $($applyOutput-join ' | ')"}
+        $apply.outcome|Should Be 'applied'
+        $verifyOutput=@(& $script:PowerShellExecutable -NoProfile -NonInteractive -File $entry -CodexHome $fixtureHome -UserHome $userHome -VerifyOnly -OutputFormat Json)
+        $verifyExit=$LASTEXITCODE;$verify=$verifyOutput[-1]|ConvertFrom-Json
+        if($verifyExit-ne0){throw "projection public VerifyOnly failed with exit $verifyExit`: $($verifyOutput-join ' | ')"}
+        $verify.outcome|Should Be 'current'
+        $projectionManifest=Get-Content -Raw -LiteralPath (Join-Path $userHome '.agents\catalog-skills.manifest.json')|ConvertFrom-Json
+        [int]$projectionManifest.schemaVersion|Should Be 3
+        (@($projectionManifest.projections)-join ',')|Should Be 'user-agents,user-claude'
+        Test-Path -LiteralPath (Join-Path $userHome '.claude\CLAUDE.md') -PathType Leaf|Should Be $true
     }
 
     # Scenario: The isolated Catalog v3 candidate writes v3/v5 and the stable launcher invokes its bound fan-out entry.

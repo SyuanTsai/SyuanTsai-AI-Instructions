@@ -26,6 +26,53 @@ Describe 'production Skills Catalog' {
                 }
             }
         }
+
+        function New-TestCatalogSourceArchive {
+            param(
+                [Parameter(Mandatory=$true)][string]$ArchivePath,
+                [Parameter(Mandatory=$true)][string[]]$SkillIds
+            )
+            Add-Type -AssemblyName System.IO.Compression
+            if(Test-Path -LiteralPath $ArchivePath){Remove-Item -LiteralPath $ArchivePath -Force}
+            $stream=[IO.File]::Open($ArchivePath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            try{
+                $archive=New-Object IO.Compression.ZipArchive($stream,[IO.Compression.ZipArchiveMode]::Create,$false)
+                try{
+                    foreach($skillId in @($SkillIds|Sort-Object)){
+                        $entry=$archive.CreateEntry("fixture-root/skills/$skillId/SKILL.md",[IO.Compression.CompressionLevel]::Optimal)
+                        $writer=New-Object IO.StreamWriter($entry.Open(),(New-Object Text.UTF8Encoding($false)))
+                        try{$writer.Write("---`nname: $skillId`ndescription: Offline lock fixture for $skillId.`n---`n`n# Fixture`n")}finally{$writer.Dispose()}
+                    }
+                }finally{$archive.Dispose()}
+            }finally{$stream.Dispose()}
+            return $ArchivePath
+        }
+
+        function New-TestCatalogLockInputs {
+            param([Parameter(Mandatory=$true)][string]$Root,[string[]]$SkillIds=@('work-with-jira'))
+            New-Item -ItemType Directory -Force -Path $Root|Out-Null
+            $catalog=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repositoryRoot 'catalog/examples/skills-catalog-v3.example.json')|ConvertFrom-Json
+            $catalog.skills=@($catalog.skills|Where-Object{[string]$_.id -cin $SkillIds})
+            $catalog.profiles[0].includes=@($SkillIds)
+            foreach($skillId in @($SkillIds)){
+                if(@($catalog.skills|Where-Object id -ceq $skillId).Count-eq0){
+                    $template=($catalog.skills[0]|ConvertTo-Json -Depth 20|ConvertFrom-Json)
+                    $template.id=$skillId;$template.group='fixture';$template.source.sourcePath="skills/$skillId";$template.profiles=@('core')
+                    $catalog.skills=@($catalog.skills)+@($template)
+                }
+            }
+            $catalogPath=Join-Path $Root 'catalog.json'
+            $pinsPath=Join-Path $Root 'pins.json'
+            $lockOutputPath=Join-Path $Root 'lock.json'
+            $archivePath=New-TestCatalogSourceArchive -ArchivePath (Join-Path $Root 'source.zip') -SkillIds $SkillIds
+            [IO.File]::WriteAllText($catalogPath,(($catalog|ConvertTo-Json -Depth 30)+"`n"),[Text.UTF8Encoding]::new($false))
+            $pins=[ordered]@{
+                schemaVersion=1;catalogId=[string]$catalog.catalogId
+                sources=@([ordered]@{id='agent-skills';requestedRef='v1.0.0';requestedRefType='tag';resolvedCommit='0123456789abcdef0123456789abcdef01234567';resolvedVersion='1.0.0'})
+            }
+            [IO.File]::WriteAllText($pinsPath,(($pins|ConvertTo-Json -Depth 10)+"`n"),[Text.UTF8Encoding]::new($false))
+            return [pscustomobject]@{CatalogPath=$catalogPath;PinsPath=$pinsPath;OutputPath=$lockOutputPath;ArchivePath=$archivePath}
+        }
     }
 
     # Scenario: The tracked production catalog defines the repositories available to installed consumers.
@@ -392,9 +439,9 @@ Describe 'production Skills Catalog' {
         }
     }
 
-    # Scenario: The approved v2 Lock is converted to v3 locally, then the generated v3 Lock is checked again without source acquisition.
-    # Purpose: Keep the production Lock reproducible and make the ordinary -Check path independent of network access or pin re-resolution.
-    It 'InterT33_generates_and_checks_the_v3_lock_from_existing_immutable_pins_offline' {
+    # Scenario: The approved v2 Lock is explicitly supplied as the conversion base for the production v3 Lock.
+    # Purpose: Keep the one-time offline production conversion reproducible without treating the output as its own authority.
+    It 'InterT33_generates_the_v3_lock_from_an_explicit_v2_base_with_identical_bytes' {
         $baselineText = @(& git -C $repositoryRoot show '34366ae:catalog/skills-catalog-lock.json') -join "`n"
         $baselinePath = Join-Path $TestDrive 'skills-catalog-lock-v2.json'
         $generatedPath = Join-Path $TestDrive 'skills-catalog-lock-v3.json'
@@ -407,10 +454,48 @@ Describe 'production Skills Catalog' {
         $LASTEXITCODE | Should Be 0
         ($generateOutput -join "`n") | Should Match 'existing immutable pins'
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($generatedPath)) | Should Be ([Convert]::ToBase64String([IO.File]::ReadAllBytes($lockPath)))
+    }
 
-        $checkOutput = @(& $engine -NoProfile -NonInteractive -File $generator `
-            -CatalogPath $catalogPath -SourcePinsPath $sourcePinsPath -OutputPath $generatedPath -Check 2>&1)
-        $LASTEXITCODE | Should Be 0
-        ($checkOutput -join "`n") | Should Match 'Skills Catalog lock is current'
+    # Scenario: A generated v3 Lock has a syntactically valid content hash changed before ordinary -Check uses a local immutable archive.
+    # Purpose: Recompute archive and Skill hashes so a checked Lock cannot validate itself.
+    It 'InterT34_rejects_a_tampered_64_hex_hash_during_ordinary_archive_check' {
+        $fixture=New-TestCatalogLockInputs -Root (Join-Path $TestDrive 'ordinary-check')
+        $generator=Join-Path $repositoryRoot 'scripts/update-skills-catalog-lock.ps1'
+        & $generator -CatalogPath $fixture.CatalogPath -SourcePinsPath $fixture.PinsPath -OutputPath $fixture.OutputPath -SourceArchivePaths @{'agent-skills'=$fixture.ArchivePath}|Out-Null
+        $candidate=Get-Content -Raw -Encoding UTF8 -LiteralPath $fixture.OutputPath|ConvertFrom-Json
+        $candidate.skills[0].contentSha256='f'*64
+        [IO.File]::WriteAllText($fixture.OutputPath,(($candidate|ConvertTo-Json -Depth 20 -Compress)+"`n"),[Text.UTF8Encoding]::new($false))
+
+        {& $generator -CatalogPath $fixture.CatalogPath -SourcePinsPath $fixture.PinsPath -OutputPath $fixture.OutputPath -SourceArchivePaths @{'agent-skills'=$fixture.ArchivePath} -Check|Out-Null}|Should Throw 'Skills Catalog lock is stale. Run scripts/update-skills-catalog-lock.ps1 and commit the result.'
+    }
+
+    # Scenario: The explicitly supplied conversion base resolves to the same file as the requested output.
+    # Purpose: Prevent conversion and Check from using the candidate output as a trust source.
+    It 'InterT35_rejects_an_explicit_conversion_base_that_equals_the_output' {
+        $fixture=New-TestCatalogLockInputs -Root (Join-Path $TestDrive 'same-base-output')
+        $generator=Join-Path $repositoryRoot 'scripts/update-skills-catalog-lock.ps1'
+        & $generator -CatalogPath $fixture.CatalogPath -SourcePinsPath $fixture.PinsPath -OutputPath $fixture.OutputPath -SourceArchivePaths @{'agent-skills'=$fixture.ArchivePath}|Out-Null
+
+        {& $generator -CatalogPath $fixture.CatalogPath -SourcePinsPath $fixture.PinsPath -OutputPath $fixture.OutputPath -BaseLockPath $fixture.OutputPath|Out-Null}|Should Throw 'Skills Catalog base Lock path must not equal the output path.'
+    }
+
+    # Scenario: An existing v3 Lock is followed by a source pin advance and a newly active Skill with a matching local archive.
+    # Purpose: Keep ordinary generation on the archive path instead of blocking valid maintenance in conversion checks.
+    It 'InterT36_recomputes_from_archives_when_a_pin_advances_and_a_Skill_is_added' {
+        $fixture=New-TestCatalogLockInputs -Root (Join-Path $TestDrive 'ordinary-maintenance')
+        $generator=Join-Path $repositoryRoot 'scripts/update-skills-catalog-lock.ps1'
+        & $generator -CatalogPath $fixture.CatalogPath -SourcePinsPath $fixture.PinsPath -OutputPath $fixture.OutputPath -SourceArchivePaths @{'agent-skills'=$fixture.ArchivePath}|Out-Null
+
+        $updated=New-TestCatalogLockInputs -Root (Join-Path $TestDrive 'ordinary-maintenance-updated') -SkillIds @('work-with-jira','new-fixture-skill')
+        Copy-Item -LiteralPath $updated.CatalogPath -Destination $fixture.CatalogPath -Force
+        $pins=Get-Content -Raw -Encoding UTF8 -LiteralPath $updated.PinsPath|ConvertFrom-Json
+        $pins.sources[0].resolvedCommit='89abcdef0123456789abcdef0123456789abcdef'
+        $pins.sources[0].resolvedVersion='1.1.0'
+        [IO.File]::WriteAllText($fixture.PinsPath,(($pins|ConvertTo-Json -Depth 10)+"`n"),[Text.UTF8Encoding]::new($false))
+
+        {& $generator -CatalogPath $fixture.CatalogPath -SourcePinsPath $fixture.PinsPath -OutputPath $fixture.OutputPath -SourceArchivePaths @{'agent-skills'=$updated.ArchivePath}|Out-Null}|Should Not Throw
+        $lock=Get-Content -Raw -Encoding UTF8 -LiteralPath $fixture.OutputPath|ConvertFrom-Json
+        [string]$lock.sources[0].resolvedCommit|Should Be '89abcdef0123456789abcdef0123456789abcdef'
+        (@($lock.skills.id|Sort-Object)-join ',')|Should Be 'new-fixture-skill,work-with-jira'
     }
 }
