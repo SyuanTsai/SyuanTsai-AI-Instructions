@@ -1762,10 +1762,6 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "scripts/consumer/Invoke-GateGitByteCapture.ps1",
-      "license": "Apache-2.0"
-    },
-    {
       "path": "scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1",
       "license": "Apache-2.0"
     },
@@ -1803,6 +1799,10 @@
     },
     {
       "path": "tests/consumer-source-gate.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/windows-git-owned-process-shim.cs",
       "license": "Apache-2.0"
     },
     {

@@ -97,7 +97,7 @@ function New-WindowsCoreShards {
     $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $ConfigurationPath | ConvertFrom-Json
     if ([int]$configuration.schemaVersion -ne 1) { throw 'Windows Core shard weights require schemaVersion 1.' }
     $partitionCount = [int]$configuration.partitionCount
-    if ($partitionCount -ne 8) { throw 'Windows Core must use exactly eight configured partitions.' }
+    if ($partitionCount -ne 12) { throw 'Windows Core must use exactly twelve configured partitions.' }
     $weights = @{}
     foreach ($property in @($configuration.weights.PSObject.Properties)) {
         $value = [double]$property.Value
@@ -158,7 +158,7 @@ function Assert-WindowsCoreMatrix {
     try { $matrix = $MatrixJson | ConvertFrom-Json -ErrorAction Stop }
     catch { throw "Windows Core matrix is invalid JSON: $($_.Exception.Message)" }
     $include = @($matrix.include)
-    if ($include.Count -eq 0 -or $include.Count -ne $ExpectedShards.Count -or $include.Count -gt 8) {
+    if ($include.Count -eq 0 -or $include.Count -ne $ExpectedShards.Count -or $include.Count -gt 12) {
         throw "Windows Core matrix must contain exactly $($ExpectedShards.Count) unique planned shards."
     }
     $ids = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -204,7 +204,7 @@ function Get-WindowsCorePlan {
     $plan = [pscustomobject][ordered]@{
         authorityTestFiles = $authority
         expectedSkippedTests = $expectedSkips
-        partitionCount = [int]8
+        partitionCount = [int]12
         runAttempt = [int]$WorkflowRunAttempt
         runId = [string]$WorkflowRunId
         selectedTestFiles = $selected

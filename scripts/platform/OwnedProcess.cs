@@ -158,7 +158,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             DateTimeOffset deadline, string isolationRequirement, object stdoutLease,
             object stderrLease, long outputLimitCharacters, string argumentZero, byte[] standardInputBytes, string captureProfile)
         {
-            if (captureProfile != "standard" && captureProfile != "semantic-bridge") throw new ArgumentException("Unknown capture profile.");
+            if (captureProfile != "standard" && captureProfile != "semantic-bridge" && captureProfile != "raw-stdout") throw new ArgumentException("Unknown capture profile.");
             if (captureProfile == "semantic-bridge" && standardInputBytes == null) throw new ArgumentException("The semantic-bridge capture profile requires explicit StandardInputBytes.");
             if (standardInputBytes != null && standardInputBytes.Length > 16777216)
                 throw new ArgumentException("StandardInputBytes exceeds the 16 MiB limit.");
@@ -186,8 +186,11 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             if (arguments == null) arguments = new string[0];
             foreach (string argument in arguments)
                 if (argument == null || argument.IndexOf('\0') >= 0) throw new ArgumentException("Arguments cannot contain nulls.");
-            var lease = new OwnedProcessLease(deadline, captureProfile == "semantic-bridge" ? 16777216 : outputLimitCharacters, captureProfile);
+            var lease = new OwnedProcessLease(deadline,
+                captureProfile == "semantic-bridge" ? 16777216 : captureProfile == "raw-stdout" ? Int32.MaxValue : outputLimitCharacters,
+                captureProfile);
             if (captureProfile == "semantic-bridge") lease.stderrLimit = 16384;
+            else if (captureProfile == "raw-stdout") lease.stderrLimit = outputLimitCharacters;
             try
             {
                 lease.outLease = (IDisposable)stdoutLease; lease.errLease = (IDisposable)stderrLease;
@@ -353,16 +356,18 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private Thread Reader(PipeStream source, FileStream destination)
         {
             PrepareCapture(source);
-            long streamLimit = Object.ReferenceEquals(source, stderr) ? stderrLimit : limit;
+            bool isStderr = Object.ReferenceEquals(source, stderr);
+            bool rawBytes = captureProfile == "raw-stdout" && !isStderr;
+            long streamLimit = isStderr ? stderrLimit : limit;
             var thread = new Thread(() =>
             {
                 try
                 {
                     byte[] buffer = new byte[8192];
-                    var encoding = new UTF8Encoding(false);
-                    Decoder decoder = encoding.GetDecoder();
-                    char[] characters = new char[encoding.GetMaxCharCount(buffer.Length)];
-                    byte[] encoded = new byte[encoding.GetMaxByteCount(characters.Length)];
+                    var encoding = rawBytes ? null : new UTF8Encoding(false);
+                    Decoder decoder = rawBytes ? null : encoding.GetDecoder();
+                    char[] characters = rawBytes ? null : new char[encoding.GetMaxCharCount(buffer.Length)];
+                    byte[] encoded = rawBytes ? null : new byte[encoding.GetMaxByteCount(characters.Length)];
                     long written = 0; // independent quota for this reader/stream
                     while (!captureCancelled.IsSet)
                     {
@@ -382,21 +387,37 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         { lock (outputGate) { if (captureFailure == null) captureFailure = "capture-deadline"; } return; }
                         int count = ReadAvailable(source, buffer);
                         if (count < 0) { captureCancelled.Wait(10); continue; }
-                        // Preserve decoder state across pipe chunks. Count UTF-16
-                        // characters, as bounded .NET text readers do, not UTF-8 bytes.
-                        int decoded = decoder.GetChars(buffer, 0, count, characters, 0, count == 0);
-                        lock (outputGate)
+                        if (rawBytes)
                         {
-                            if (captureClosed) return;
-                            int accepted = (int)Math.Min(decoded, streamLimit - written);
-                            // Keep a valid text prefix if the quota bisects a pair.
-                            if (accepted > 0 && Char.IsHighSurrogate(characters[accepted - 1])) accepted--;
-                            if (accepted > 0)
+                            lock (outputGate)
                             {
-                                int bytes = encoding.GetBytes(characters, 0, accepted, encoded, 0);
-                                destination.Write(encoded, 0, bytes); destination.Flush(); written += accepted;
+                                if (captureClosed) return;
+                                int accepted = (int)Math.Min(count, streamLimit - written);
+                                if (accepted > 0)
+                                {
+                                    destination.Write(buffer, 0, accepted); destination.Flush(); written += accepted;
+                                }
+                                if (accepted < count) { outputLimitStream = "stdout"; outputExceeded = true; return; }
                             }
-                            if (accepted < decoded) { outputLimitStream = Object.ReferenceEquals(source, stderr) ? "stderr" : "stdout"; outputExceeded = true; return; }
+                        }
+                        else
+                        {
+                            // Preserve decoder state across pipe chunks. Count UTF-16
+                            // characters, as bounded .NET text readers do, not UTF-8 bytes.
+                            int decoded = decoder.GetChars(buffer, 0, count, characters, 0, count == 0);
+                            lock (outputGate)
+                            {
+                                if (captureClosed) return;
+                                int accepted = (int)Math.Min(decoded, streamLimit - written);
+                                // Keep a valid text prefix if the quota bisects a pair.
+                                if (accepted > 0 && Char.IsHighSurrogate(characters[accepted - 1])) accepted--;
+                                if (accepted > 0)
+                                {
+                                    int bytes = encoding.GetBytes(characters, 0, accepted, encoded, 0);
+                                    destination.Write(encoded, 0, bytes); destination.Flush(); written += accepted;
+                                }
+                                if (accepted < decoded) { outputLimitStream = isStderr ? "stderr" : "stdout"; outputExceeded = true; return; }
+                            }
                         }
                         if (count == 0) { Interlocked.Increment(ref readersAtEof); return; }
                     }

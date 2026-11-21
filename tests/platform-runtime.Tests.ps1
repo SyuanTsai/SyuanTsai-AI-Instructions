@@ -172,7 +172,7 @@ Describe 'Platform owned processes P3' {
             if ($IsWindows) { $envMap.SystemRoot = $env:SystemRoot }
             $processOptions = @{ CaptureProfile = $CaptureProfile }
             if ($PSBoundParameters.ContainsKey('InputBytes')) { $processOptions.StandardInputBytes = $InputBytes }
-            if ($CaptureProfile -ceq 'standard') { $processOptions.OutputLimitBytes = $Limit }
+            if ($CaptureProfile -cne 'semantic-bridge') { $processOptions.OutputLimitBytes = $Limit }
             Start-PlatformOwnedProcess @processOptions -ExecutablePath $script:P3Shell -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Code))) -Environment $envMap -WorkingDirectoryLease $Fixture.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds($Seconds)) -IsolationRequirement cooperative -StdoutPath (Join-Path $Fixture.Path 'out') -StderrPath (Join-Path $Fixture.Path 'err')
         }
         function Invoke-P3BoundedDelete([scriptblock]$Action) {
@@ -202,6 +202,17 @@ Describe 'Platform owned processes P3' {
             $Receipt.CaptureReadersStopped | Should Be $true
             $Receipt.CaptureResourcesClosed | Should Be $true
         }
+    }
+
+    # Scenario: A caller supplies a capture profile that the runtime does not define.
+    # Purpose: Reject profile drift before creating capture files or starting a child process.
+    It 'UnitT04_rejects_an_unknown_capture_profile' {
+        $f = New-P3Fixture
+        try {
+            { Start-P3Fixture $f '[Console]::Write("must-not-run")' -CaptureProfile unknown } | Should Throw
+            [IO.File]::Exists((Join-Path $f.Path 'out')) | Should Be $false
+            [IO.File]::Exists((Join-Path $f.Path 'err')) | Should Be $false
+        } finally { Remove-P3Fixture $f $null }
     }
 
     # Scenario: A caller supplies bytes without using a filesystem payload.
@@ -418,12 +429,40 @@ Describe 'Platform owned processes P3' {
         } finally { Remove-P3Fixture $f $p }
     }
 
+    # Scenario: A child writes every byte value directly to stdout under the raw-stdout profile.
+    # Purpose: Preserve 0x00-0xFF exactly, including incomplete UTF-8 sequences and 0xFF, without decoder replacement.
+    It 'InterT19_preserves_every_raw_stdout_byte_exactly' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $expected = [byte[]](0..255)
+            $p = Start-P3Fixture $f '$b=[byte[]](0..255); $s=[Console]::OpenStandardOutput(); $s.Write($b,0,$b.Length); $s.Flush()' -CaptureProfile raw-stdout
+            $flags = [Reflection.BindingFlags]'Instance,NonPublic'
+            $p.GetType().GetField('limit',$flags).GetValue($p) | Should Be ([long][int]::MaxValue)
+            $p.GetType().GetField('stderrLimit',$flags).GetValue($p) | Should Be 1048576
+            Assert-P3Exited $p
+            Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $f.Path 'out'))) | Should Be ([Convert]::ToBase64String($expected))
+        } finally { Remove-P3Fixture $f $p }
+    }
+
     # Scenario: No caller polls or stops a sleeping process before its deadline.
     # Purpose: Enforce the execution deadline from a managed background supervisor.
     It 'InterT20_enforces_deadline_without_caller_polling' {
         $f = New-P3Fixture; $p = $null
         try {
             $p = Start-P3Fixture $f 'Start-Sleep 90' 2
+            $p.WaitForCleanup([TimeSpan]::FromSeconds(15)) | Should Be $true
+            Assert-P3Cleaned $p.Cleanup
+            $p.TerminationReason | Should Be 'deadline'
+        } finally { Remove-P3Fixture $f $p }
+    }
+
+    # Scenario: A raw-stdout child remains alive beyond its workload deadline without caller polling.
+    # Purpose: The binary capture profile must retain autonomous deadline enforcement and confirmed owned-process cleanup.
+    It 'InterT21_enforces_deadline_and_cleanup_for_raw_stdout' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $p = Start-P3Fixture $f 'Start-Sleep 90' 2 -CaptureProfile raw-stdout
             $p.WaitForCleanup([TimeSpan]::FromSeconds(15)) | Should Be $true
             Assert-P3Cleaned $p.Cleanup
             $p.TerminationReason | Should Be 'deadline'
@@ -483,6 +522,21 @@ Describe 'Platform owned processes P3' {
             $p.OutputLimitExceeded | Should Be $true
             Assert-P3Cleaned $p.Cleanup
             (Get-Item (Join-Path $f.Path 'err')).Length | Should BeLessThan 4097
+        } finally { Remove-P3Fixture $f $p }
+    }
+
+    # Scenario: stderr exceeds the caller's character quota while stdout uses raw byte capture.
+    # Purpose: raw-stdout changes only stdout; stderr must keep standard UTF-8 decoding, quota, termination, and cleanup behavior.
+    It 'InterT23_keeps_the_stderr_character_limit_under_raw_stdout' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $p = Start-P3Fixture $f 'while ($true) { [Console]::Error.Write((([string][char]0x754c) * 1024)) }' 20 4096 -CaptureProfile raw-stdout
+            $p.WaitForCleanup([TimeSpan]::FromSeconds(15)) | Should Be $true
+            $p.TerminationReason | Should Be 'output-limit'
+            $p.OutputLimitExceeded | Should Be $true
+            $p.OutputLimitStream | Should Be 'stderr'
+            Assert-P3Cleaned $p.Cleanup
+            [IO.File]::ReadAllText((Join-Path $f.Path 'err')).Length | Should Be 4096
         } finally { Remove-P3Fixture $f $p }
     }
 

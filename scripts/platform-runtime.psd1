@@ -71,7 +71,7 @@
                 @{ Path = 'platform/WindowsInstallerMutation.cs'; Sha256 = 'b88b4b09c7bb5c3e71b762ddc6ebe72007ed0cca99977ab7a7272529c3ff9218' },
                 @{ Path = 'platform/Unix.psm1'; Sha256 = 'c55944c9ece57c9ba62b78d1bd563271fc9f660508d3725ab5821d5444cb5fd5' },
                 @{ Path = 'platform/RuntimePreparation.psm1'; Sha256 = 'dc254c04e7e2caf280726e66f67434776bc7df12a210a38c80596e41344fd077' },
-                @{ Path = 'platform-runtime.psm1'; Sha256 = 'ad051b2794ce4dc10108404201735d02f7b032ed0e633c5f22f73c884fb10370' },
+                @{ Path = 'platform-runtime.psm1'; Sha256 = '67454146181339a534eb9f41f600ca742748b4d4388c7bb6168691750624fed2' },
                 @{ Path = 'installer-safe-mutation.psm1'; Sha256 = 'dc031edcc2f48968df83cd68ad52eacb7f7b05d3ca6a0cc622658cf6151c8293' },
                 @{ Path = 'WindowsDacl.psm1'; Sha256 = 'ffa1f85d94bb6bce9bf8353f8c7733bdbe59880a3d0d075191938cc28aebb5f6' },
                 @{ Path = 'platform/PlatformNative.cs'; Sha256 = 'f9da23bf3e6e3c8960b26d534e14873f6b4fc98b3d13f5b6cdfdd5f7716a4514' },
@@ -79,7 +79,7 @@
                 @{ Path = 'platform/Linux.psm1'; Sha256 = '52c261d577ee7b3946771d1112030996896fdd119e06ac3849e430a3d56fb38c' },
                 @{ Path = 'platform/MacOS.psm1'; Sha256 = '8f25edfbee5ab36b5e1c42eb55c6dbab44db0bc29896c180612b1248920c7c47' },
                 @{ Path = 'Resolve-StandardValidationTool.ps1'; Sha256 = 'e0ca981a95525f44ac482424b370d0a4982760edd4e706ee7312562daef4ccec' },
-                @{ Path = 'platform/OwnedProcess.cs'; Sha256 = '097061ad5902f896ff74b3f60b0ecaf63f3d58f357aed8fdbf80a8586564de58' },
+                @{ Path = 'platform/OwnedProcess.cs'; Sha256 = '0864e48bc149ffb5f64e43eae39e89b6a9b9e172f5cfa8c636c54815e4470c06' },
                 @{ Path = 'platform/UnixProcess.cs'; Sha256 = '125d2b3eecdad6a6c201d5f5d61a6efd0ad55ba93822c7b83a679a5397005db1' },
                 @{ Path = 'platform/WindowsProcess.cs'; Sha256 = '7b8a0cddd3b9809b861801fe1d6a618684e2ca6fa13f9334825c5c9da5b2d8d6' }
             )

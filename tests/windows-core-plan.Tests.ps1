@@ -246,7 +246,7 @@ function Get-AuthorityTestPaths {
     }
     Set-WindowsCoreTestText (Join-Path $Root 'tests/nested/child.Tests.ps1') "Describe 'child.Tests.ps1' {}`n"
     Set-WindowsCoreTestText (Join-Path $Root 'docs/standards/core-test-skip-inventory.json') ($skipInventory | ConvertTo-Json -Depth 8)
-    $weights = [ordered]@{ schemaVersion = 1; partitionCount = 8; weights = [ordered]@{ 'alpha.Tests.ps1' = 9; 'beta.Tests.ps1' = 4 } }
+    $weights = [ordered]@{ schemaVersion = 1; partitionCount = 12; weights = [ordered]@{ 'alpha.Tests.ps1' = 9; 'beta.Tests.ps1' = 4 } }
     Set-WindowsCoreTestText (Join-Path $Root 'tests/windows-core-shard-weights.json') ($weights | ConvertTo-Json -Depth 6)
     return [string[]]@($expected | Sort-Object -CaseSensitive)
 }
@@ -464,38 +464,35 @@ if ($IsWindows) {
         } finally { $env:GITHUB_EVENT_NAME = $previous }
     }
 
-    # Scenario: Reviewed CI minutes, including trust-anchor tools, are rounded into production weights and assigned through the real eight-partition LPT plan.
-    # Purpose: Lock the exact eight-shard LPT distribution and its reviewed maximum load.
+    # Scenario: Reviewed CI minutes are rounded into production weights and assigned through the real twelve-partition LPT plan.
+    # Purpose: Lock the exact twelve-shard LPT distribution and its reviewed maximum load.
     It 'UnitT35_uses_the_reviewed_CI_weights_and_exact_LPT_cap' {
         $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:WindowsCoreRepositoryRoot 'tests/windows-core-shard-weights.json') | ConvertFrom-Json
         $expectedWeights = [ordered]@{
             'install-ai-instructions-bootstrap.part1.Tests.ps1' = 17
-            'install-ai-instructions-bootstrap.part2.Tests.ps1' = 17
-            'install-ai-instructions-bootstrap.part3.Tests.ps1' = 16
-            'bootstrap-ai-instructions.Tests.ps1' = 14
-            'ai-instructions-writer-gate.part2.Tests.ps1' = 29
-            'agent-environment-reconciler.Tests.ps1' = 11
-            'ai-instructions-writer-gate.part1.Tests.ps1' = 20
-            'syp214-user-only.Tests.ps1' = 5
+            'install-ai-instructions-bootstrap.part2.Tests.ps1' = 19
+            'install-ai-instructions-bootstrap.part3.Tests.ps1' = 20
+            'bootstrap-ai-instructions.Tests.ps1' = 26
+            'ai-instructions-writer-gate.part2.Tests.ps1' = 25
+            'agent-environment-reconciler.Tests.ps1' = 17
+            'ai-instructions-writer-gate.part1.Tests.ps1' = 15
+            'syp214-user-only.Tests.ps1' = 10
             'platform-runtime.Tests.ps1' = 3
-            'update-ai-instructions.Tests.ps1' = 3
-            'ai-instructions-launcher-recovery.Tests.ps1' = 2
-            'cleanup-ai-instructions-pollution.Tests.ps1' = 2
+            'update-ai-instructions.Tests.ps1' = 2
+            'ai-instructions-launcher-recovery.Tests.ps1' = 3
+            'cleanup-ai-instructions-pollution.Tests.ps1' = 3
             'standard-validation-runner.Tests.ps1' = 2
-            'trust-anchor-tools.Tests.ps1' = 28
-            'consumer-bootstrap.Tests.ps1' = 10
-            'consumer-gate-workflow.Tests.ps1' = 3
-            'consumer-source-gate.Tests.ps1' = 19
-            'bootstrap-ai-instructions-multisource.Tests.ps1' = 1
-            'agent-artifact-remediation.Tests.ps1' = 1
-            'ai-instructions-writer-gate.part3.Tests.ps1' = 35
-            'ai-instructions-writer-gate.part4.Tests.ps1' = 17
-            'ai-instructions-writer-gate.part5.Tests.ps1' = 20
-            'ai-instructions-writer-gate.part6.Tests.ps1' = 18
-            'ai-instructions-writer-gate.part7.Tests.ps1' = 9
-            'ai-instructions-writer-gate.part8.Tests.ps1' = 21
-            'ai-instructions-writer-gate.part9.Tests.ps1' = 27
-            'static-approved-exceptions.Tests.ps1' = 1
+            'trust-anchor-tools.Tests.ps1' = 2
+            'consumer-bootstrap.Tests.ps1' = 4
+            'consumer-source-gate.Tests.ps1' = 17
+            'bootstrap-ai-instructions-multisource.Tests.ps1' = 2
+            'ai-instructions-writer-gate.part3.Tests.ps1' = 15
+            'ai-instructions-writer-gate.part4.Tests.ps1' = 12
+            'ai-instructions-writer-gate.part5.Tests.ps1' = 12
+            'ai-instructions-writer-gate.part6.Tests.ps1' = 13
+            'ai-instructions-writer-gate.part7.Tests.ps1' = 5
+            'ai-instructions-writer-gate.part8.Tests.ps1' = 18
+            'ai-instructions-writer-gate.part9.Tests.ps1' = 19
         }
         @($configuration.weights.PSObject.Properties).Count | Should Be $expectedWeights.Count
         foreach ($entry in $expectedWeights.GetEnumerator()) {
@@ -503,17 +500,21 @@ if ($IsWindows) {
         }
 
         $expectedShards = @(
-            @('ai-instructions-writer-gate.part3.Tests.ps1','consumer-bootstrap.Tests.ps1','skills-catalog-contract.Tests.ps1','source-merge-exception-draft.Tests.ps1','syp101-production-smoke-contract.Tests.ps1'),
-            @('agent-environment-reconciler.Tests.ps1','ai-instructions-runtime-contract.Tests.ps1','ai-instructions-writer-gate.part2.Tests.ps1','license-delivery.Tests.ps1','skills-catalog-source-host.Tests.ps1','standard-core-progress.Tests.ps1','third-party-skill-source.Tests.ps1','update-ai-instructions.Tests.ps1'),
-            @('bootstrap-ai-instructions.Tests.ps1','licensing-scope.Tests.ps1','skills-selection.Tests.ps1','standard-process-discovery.Tests.ps1','standard-validation-runner.Tests.ps1','third-party-source-envelope.Tests.ps1','trust-anchor-tools.Tests.ps1'),
-            @('ai-instructions-writer-gate.part9.Tests.ps1','bootstrap-ai-instructions-multisource-lock-arrays.Tests.ps1','install-ai-instructions-bootstrap.part3.Tests.ps1','production-skills-catalog.Tests.ps1','skills-source-acquisition.Tests.ps1','standard-semantic-bridge.Tests.ps1','windows-core-plan.Tests.ps1'),
-            @('ai-instructions-writer-gate.part8.Tests.ps1','bootstrap-ai-instructions-multisource.Tests.ps1','cleanup-ai-instructions-pollution.Tests.ps1','install-ai-instructions-bootstrap.part2.Tests.ps1','platform-runtime.Tests.ps1','routine-semantic-scan.Tests.ps1','skills-source-composition.Tests.ps1','standard-validation-resolver-hardening.Tests.ps1'),
-            @('ai-instructions-writer-gate.part1.Tests.ps1','ai-instructions-writer-gate.part4.Tests.ps1','ai-instructions-writer-gate.part7.Tests.ps1','standard-validation-skillspector-probe.Tests.ps1'),
-            @('agent-artifact-remediation.Tests.ps1','ai-instructions-writer-gate.part5.Tests.ps1','install-ai-instructions-bootstrap.part1.Tests.ps1','internal-skill-use.Tests.ps1','safe-zip.Tests.ps1','skills-source-retrieval.Tests.ps1','static-approved-exceptions.Tests.ps1','syp214-user-only.Tests.ps1'),
-            @('ai-instructions-contract.Tests.ps1','ai-instructions-launcher-recovery.Tests.ps1','ai-instructions-writer-gate.part6.Tests.ps1','consumer-gate-workflow.Tests.ps1','consumer-source-gate.Tests.ps1','invoke-ai-instructions-rollout.Tests.ps1','skill-tools-core-path-patch.Tests.ps1','skills-source-routing.Tests.ps1','static-parser-coverage.Tests.ps1')
+            @('bootstrap-ai-instructions.Tests.ps1'),
+            @('ai-instructions-writer-gate.part2.Tests.ps1','standard-process-discovery.Tests.ps1'),
+            @('ai-instructions-runtime-contract.Tests.ps1','install-ai-instructions-bootstrap.part3.Tests.ps1','licensing-scope.Tests.ps1','skills-selection.Tests.ps1','standard-semantic-bridge.Tests.ps1','standard-validation-runner.Tests.ps1'),
+            @('ai-instructions-writer-gate.part9.Tests.ps1','bootstrap-ai-instructions-multisource-lock-arrays.Tests.ps1','platform-runtime.Tests.ps1','production-skills-catalog.Tests.ps1','skills-source-acquisition.Tests.ps1','standard-validation-resolver-hardening.Tests.ps1'),
+            @('bootstrap-ai-instructions-multisource.Tests.ps1','install-ai-instructions-bootstrap.part2.Tests.ps1','routine-semantic-scan.Tests.ps1','skills-source-composition.Tests.ps1','standard-validation-skillspector-probe.Tests.ps1','update-ai-instructions.Tests.ps1'),
+            @('agent-artifact-remediation.Tests.ps1','ai-instructions-writer-gate.part8.Tests.ps1','cleanup-ai-instructions-pollution.Tests.ps1','consumer-gate-workflow.Tests.ps1','safe-zip.Tests.ps1','skills-source-retrieval.Tests.ps1','static-approved-exceptions.Tests.ps1'),
+            @('agent-environment-reconciler.Tests.ps1','ai-instructions-writer-gate.part7.Tests.ps1','internal-skill-use.Tests.ps1','skill-tools-core-path-patch.Tests.ps1','skills-source-routing.Tests.ps1','static-parser-coverage.Tests.ps1'),
+            @('ai-instructions-contract.Tests.ps1','consumer-bootstrap.Tests.ps1','consumer-source-gate.Tests.ps1','invoke-ai-instructions-rollout.Tests.ps1','skills-catalog-contract.Tests.ps1','source-merge-exception-draft.Tests.ps1','syp101-production-smoke-contract.Tests.ps1'),
+            @('ai-instructions-launcher-recovery.Tests.ps1','install-ai-instructions-bootstrap.part1.Tests.ps1','license-delivery.Tests.ps1','skills-catalog-source-host.Tests.ps1','standard-core-progress.Tests.ps1','third-party-skill-source.Tests.ps1','trust-anchor-tools.Tests.ps1'),
+            @('ai-instructions-writer-gate.part1.Tests.ps1','ai-instructions-writer-gate.part5.Tests.ps1'),
+            @('ai-instructions-writer-gate.part3.Tests.ps1','syp214-user-only.Tests.ps1','third-party-source-envelope.Tests.ps1'),
+            @('ai-instructions-writer-gate.part4.Tests.ps1','ai-instructions-writer-gate.part6.Tests.ps1','windows-core-plan.Tests.ps1')
         )
-        $expectedLoads = @(48,48,48,48,47,47,47,47)
-        $script:ActualPlan.Plan.shards.Count | Should Be 8
+        $expectedLoads = @(26,26,26,26,26,26,26,26,26,27,26,26)
+        $script:ActualPlan.Plan.shards.Count | Should Be 12
         for ($index = 0; $index -lt $expectedShards.Count; $index++) {
             $shard = $script:ActualPlan.Plan.shards[$index]
             $shard.id | Should Be ('{0:D2}' -f ($index + 1))
@@ -525,17 +526,28 @@ if ($IsWindows) {
             }
             $load | Should Be $expectedLoads[$index]
         }
-        ($expectedLoads | Measure-Object -Maximum).Maximum | Should Be 48
+        ($expectedLoads | Measure-Object -Maximum).Maximum | Should Be 27
     }
 
-    # Scenario: LPT receives more weighted files than partitions, including an unknown weight.
+    # Scenario: A shard configuration retains the retired eight-partition value.
+    # Purpose: Fail closed unless Windows Core uses the reviewed fixed twelve-partition contract.
+    It 'UnitT37_rejects_the_retired_eight_partition_configuration' {
+        $weightsPath = Join-Path $TestDrive 'retired-eight-weights.json'
+        $weights = [ordered]@{ schemaVersion=1; partitionCount=8; weights=[ordered]@{} }
+        Set-WindowsCoreTestText $weightsPath ($weights | ConvertTo-Json -Depth 6)
+
+        { New-WindowsCoreShards -SelectedTestFiles @('a.Tests.ps1') -ExpectedSkippedTests @() -ConfigurationPath $weightsPath } |
+            Should Throw 'exactly twelve configured partitions'
+    }
+
+    # Scenario: LPT receives more weighted files than twelve partitions, including an unknown weight.
     # Purpose: Lock deterministic load-first then ordinal tie-breaking and skip placement.
     It 'UnitT40_assigns_a_deterministic_complete_LPT_plan' {
         $weightsPath = Join-Path $TestDrive 'weights.json'
-        $weights = [ordered]@{ schemaVersion=1; partitionCount=8; weights=[ordered]@{} }
-        foreach ($item in @(@('a.Tests.ps1',9),@('b.Tests.ps1',8),@('c.Tests.ps1',7),@('d.Tests.ps1',6),@('e.Tests.ps1',5),@('f.Tests.ps1',4),@('g.Tests.ps1',3),@('h.Tests.ps1',2))) { $weights.weights[$item[0]]=$item[1] }
+        $weights = [ordered]@{ schemaVersion=1; partitionCount=12; weights=[ordered]@{} }
+        foreach ($item in @(@('a.Tests.ps1',13),@('b.Tests.ps1',12),@('c.Tests.ps1',11),@('d.Tests.ps1',10),@('e.Tests.ps1',9),@('f.Tests.ps1',8),@('g.Tests.ps1',7),@('h.Tests.ps1',6),@('i.Tests.ps1',5),@('j.Tests.ps1',4),@('k.Tests.ps1',3),@('l.Tests.ps1',2))) { $weights.weights[$item[0]]=$item[1] }
         Set-WindowsCoreTestText $weightsPath ($weights | ConvertTo-Json -Depth 6)
-        $files = @('a.Tests.ps1','b.Tests.ps1','c.Tests.ps1','d.Tests.ps1','e.Tests.ps1','f.Tests.ps1','g.Tests.ps1','h.Tests.ps1','unknown.Tests.ps1')
+        $files = @('a.Tests.ps1','b.Tests.ps1','c.Tests.ps1','d.Tests.ps1','e.Tests.ps1','f.Tests.ps1','g.Tests.ps1','h.Tests.ps1','i.Tests.ps1','j.Tests.ps1','k.Tests.ps1','l.Tests.ps1','unknown.Tests.ps1')
         $skips = @('a.Tests.ps1::UnitT05_reviewed_skip','unknown.Tests.ps1::UnitT10_reviewed_skip')
         $first = @(New-WindowsCoreShards -SelectedTestFiles $files -ExpectedSkippedTests $skips -ConfigurationPath $weightsPath)
         $second = @(New-WindowsCoreShards -SelectedTestFiles $files -ExpectedSkippedTests $skips -ConfigurationPath $weightsPath)
@@ -548,9 +560,13 @@ if ($IsWindows) {
             [pscustomobject]@{ id='05'; files=@('e.Tests.ps1') },
             [pscustomobject]@{ id='06'; files=@('f.Tests.ps1') },
             [pscustomobject]@{ id='07'; files=@('g.Tests.ps1') },
-            [pscustomobject]@{ id='08'; files=@('h.Tests.ps1','unknown.Tests.ps1') }
+            [pscustomobject]@{ id='08'; files=@('h.Tests.ps1') },
+            [pscustomobject]@{ id='09'; files=@('i.Tests.ps1') },
+            [pscustomobject]@{ id='10'; files=@('j.Tests.ps1') },
+            [pscustomobject]@{ id='11'; files=@('k.Tests.ps1') },
+            [pscustomobject]@{ id='12'; files=@('l.Tests.ps1','unknown.Tests.ps1') }
         )
-        $first.Count | Should Be 8
+        $first.Count | Should Be 12
         for ($index = 0; $index -lt $expectedShards.Count; $index++) {
             $first[$index].id | Should Be $expectedShards[$index].id
             (@($first[$index].files) -join ',') | Should Be (@($expectedShards[$index].files) -join ',')
@@ -588,10 +604,10 @@ if ($IsWindows) {
         { New-PesterShardPlan -AllTestPaths @($selectedPath) -IsolatedTestFileNames $runnerDefaults -BulkShardSize 1 } | Should Throw 'found 0'
     }
 
-    # Scenario: The production planner emits eight selected-file shards and each is handed to the real runner shard planner with workflow arguments.
+    # Scenario: The production planner emits twelve selected-file shards and each is handed to the real runner shard planner with workflow arguments.
     # Purpose: Prove every current repository shard remains an exact one-file-per-process plan when isolated defaults are explicitly empty.
     It 'UnitT47_accepts_every_actual_repository_shard_with_workflow_runner_arguments' {
-        @($script:ActualPlan.Plan.shards).Count | Should Be 8
+        @($script:ActualPlan.Plan.shards).Count | Should Be 12
         $actualTestPaths = @(Get-ChildItem -LiteralPath (Join-Path $script:WindowsCoreRepositoryRoot 'tests') -Filter '*.Tests.ps1' -File -Recurse)
         foreach ($workflowShard in @($script:ActualPlan.Plan.shards)) {
             $selectedPaths = [string[]]@(

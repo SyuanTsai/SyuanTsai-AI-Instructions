@@ -48,12 +48,33 @@ Describe 'Authority-owned consumer source gate' {
                 Write-Output -NoEnumerate ([byte[]]$memory.ToArray())
             }finally{$memory.Dispose();$process.Dispose()}
         }
+        function New-WindowsGitOwnedProcessShim([string]$Root,[ValidateSet('credential','hang')][string]$Mode,
+            [string]$ObservationPath,[string]$ShimPidPath,[string]$DescendantPidPath) {
+            $csc=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+            if(-not(Test-Path -LiteralPath $csc -PathType Leaf)){throw "Required Windows .NET Framework compiler is missing: $csc"}
+            [void][IO.Directory]::CreateDirectory($Root)
+            $shim=Join-Path $Root 'git.exe'
+            $source=Join-Path $script:RepositoryRoot 'tests/fixtures/windows-git-owned-process-shim.cs'
+            $compilerOutput=@(& $csc /nologo /target:exe "/out:$shim" $source 2>&1)
+            if($LASTEXITCODE-ne0-or-not(Test-Path -LiteralPath $shim -PathType Leaf)){
+                throw "Windows Git owned-process shim compilation failed: $($compilerOutput-join' ')"
+            }
+            [IO.File]::WriteAllText((Join-Path $Root 'mode.txt'),$Mode,[Text.UTF8Encoding]::new($false))
+            if($Mode-ceq'credential'){
+                $realGit=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+                [IO.File]::WriteAllText((Join-Path $Root 'real-git-path.txt'),$realGit,[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $Root 'observation-path.txt'),$ObservationPath,[Text.UTF8Encoding]::new($false))
+            }else{
+                [IO.File]::WriteAllText((Join-Path $Root 'shim-pid-path.txt'),$ShimPidPath,[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $Root 'descendant-pid-path.txt'),$DescendantPidPath,[Text.UTF8Encoding]::new($false))
+            }
+            $Root
+        }
         function New-GitCredentialPresenceShim([string]$Root,[string]$ObservationPath) {
             [void][IO.Directory]::CreateDirectory($Root)
             $realGit=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
             if($IsWindows){
-                $path=Join-Path $Root 'git.cmd'
-                $text="@echo off`r`nset s=0`r`nset g=0`r`nset h=0`r`nif defined STANDARD_VALIDATION_GITHUB_API_TOKEN set s=1`r`nif defined GITHUB_TOKEN set g=1`r`nif defined GH_TOKEN set h=1`r`n>>`"$ObservationPath`" echo %s%,%g%,%h%`r`nset args=%*`r`nset args=%args:{tree}=^^^^{tree}%`r`nset args=%args:{commit}=^^^^{commit}%`r`n`"$realGit`" %args%`r`nexit /b %errorlevel%`r`n"
+                return New-WindowsGitOwnedProcessShim $Root credential $ObservationPath $null $null
             }else{
                 $path=Join-Path $Root 'git';$log=$ObservationPath.Replace('"','\"');$git=$realGit.Replace('"','\"')
                 $text="#!/bin/sh`ns=0; g=0; h=0`n[ -n `"`${STANDARD_VALIDATION_GITHUB_API_TOKEN+x}`" ] && s=1`n[ -n `"`${GITHUB_TOKEN+x}`" ] && g=1`n[ -n `"`${GH_TOKEN+x}`" ] && h=1`nprintf '%s,%s,%s\n' `"`$s`" `"`$g`" `"`$h`" >> `"$log`"`nexec `"$git`" `"`$@`"`n"
@@ -1458,7 +1479,7 @@ Write-Output 'scripts/Legacy.ps1'
         $mutantLease=New-SourceFixtureLease 'resolver-home-token-mutant'
         try{
         $mutantRoot=$mutantLease.Root
-        foreach($relative in @(& git -C $script:RepositoryRoot ls-files)){
+        foreach($relative in @(& git -C $script:RepositoryRoot ls-files|Where-Object{Test-Path -LiteralPath (Join-Path $script:RepositoryRoot $_) -PathType Leaf})){
             $destination=Join-Path $mutantRoot $relative
             [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
             Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot $relative) -Destination $destination
@@ -1731,7 +1752,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|CONSUMER_GATE_PHASE_ENV_
         $mutantLease=New-SourceFixtureLease 'credential-authority-copy'
         try{
         $mutantRoot=$mutantLease.Root
-        foreach($relative in @(& git -C $script:RepositoryRoot ls-files)){
+        foreach($relative in @(& git -C $script:RepositoryRoot ls-files|Where-Object{Test-Path -LiteralPath (Join-Path $script:RepositoryRoot $_) -PathType Leaf})){
             $destination=Join-Path $mutantRoot $relative
             [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
             Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot $relative) -Destination $destination
@@ -1878,28 +1899,28 @@ scripts/consumer/ConsumerBootstrapSupervisor.psm1:241:31|$standardError=$null
 scripts/consumer/ConsumerBootstrapSupervisor.psm1:241:52|$sentinel=$null
 scripts/consumer/ConsumerBootstrapSupervisor.psm1:241:68|$Token=$null
 scripts/consumer/ConsumerBootstrapSupervisor.psm1:139:9|$Token=$null
-scripts/consumer/ConsumerGate.psm1:1121:13|$content=$null
-scripts/consumer/ConsumerGate.psm1:1124:9|$content=$null
-scripts/consumer/ConsumerGate.psm1:1124:24|$needle=$null
-scripts/consumer/ConsumerGate.psm1:1124:38|$Token=$null
+scripts/consumer/ConsumerGate.psm1:1120:13|$content=$null
+scripts/consumer/ConsumerGate.psm1:1123:9|$content=$null
+scripts/consumer/ConsumerGate.psm1:1123:24|$needle=$null
+scripts/consumer/ConsumerGate.psm1:1123:38|$Token=$null
 scripts/consumer/ConsumerGate.psm1:222:14|$headers.Remove('Authorization')
 scripts/consumer/ConsumerGate.psm1:223:5|$Token=$null
 scripts/consumer/ConsumerGate.psm1:224:5|[Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')
-scripts/consumer/ConsumerGate.psm1:1152:34|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:1152:53|$request=$null
-scripts/consumer/ConsumerGate.psm1:1153:35|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:1153:55|$response=$null
-scripts/consumer/ConsumerGate.psm1:1184:18|$stream.Dispose()
-scripts/consumer/ConsumerGate.psm1:1184:36|$memory.Dispose()
-scripts/consumer/ConsumerGate.psm1:1192:31|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:1192:73|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:1193:9|$bytes=$null
-scripts/consumer/ConsumerGate.psm1:1193:22|$buffer=$null
-scripts/consumer/ConsumerGate.psm1:1193:36|$response=$null
-scripts/consumer/ConsumerGate.psm1:1193:52|$request=$null
-scripts/consumer/ConsumerGate.psm1:1193:67|$stream=$null
-scripts/consumer/ConsumerGate.psm1:1193:81|$memory=$null
-scripts/consumer/ConsumerGate.psm1:1193:95|$Headers=$null
+scripts/consumer/ConsumerGate.psm1:1151:34|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:1151:53|$request=$null
+scripts/consumer/ConsumerGate.psm1:1152:35|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:1152:55|$response=$null
+scripts/consumer/ConsumerGate.psm1:1183:18|$stream.Dispose()
+scripts/consumer/ConsumerGate.psm1:1183:36|$memory.Dispose()
+scripts/consumer/ConsumerGate.psm1:1191:31|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:1191:73|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:1192:9|$bytes=$null
+scripts/consumer/ConsumerGate.psm1:1192:22|$buffer=$null
+scripts/consumer/ConsumerGate.psm1:1192:36|$response=$null
+scripts/consumer/ConsumerGate.psm1:1192:52|$request=$null
+scripts/consumer/ConsumerGate.psm1:1192:67|$stream=$null
+scripts/consumer/ConsumerGate.psm1:1192:81|$memory=$null
+scripts/consumer/ConsumerGate.psm1:1192:95|$Headers=$null
 scripts/consumer/ConsumerGate.psm1:407:95|[Environment]::SetEnvironmentVariable($name,$null,'Process')
 scripts/consumer/ConsumerGate.psm1:409:43|$Token=$null
 scripts/consumer/ConsumerGate.psm1:295:13|[void]$environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
@@ -1931,15 +1952,55 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
     It 'UnitT33_removes_credentials_from_every_consumer_git_launcher' {
         $sources=@(
             (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerGate.psm1')),
-            (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1')),
-            (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1'))
+            (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1'))
         )
         foreach($source in $sources){
             foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){$source|Should Match ([regex]::Escape("'$name'"))}
         }
         $sources[0]|Should Match 'SetEnvironmentVariable\(\$name,\$null,''Process''\)'
         $sources[1]|Should Match 'Environment\.Remove\(\$name\)'
-        $sources[2]|Should Match 'Environment\.Remove\(\$name\)'
+        foreach($source in $sources){
+            $source|Should Match '\$environment\.ContainsKey\(\$name\)'
+            $source|Should Match 'credential alias'
+        }
+        $gateModule=(Get-Command Invoke-GateOwnedGitCapture -CommandType Function -ErrorAction Stop).Module
+        $previousRuntime=$gateModule.SessionState.PSVariable.GetValue('GatePlatformRuntimeModule')
+        $previousCaptureRoot=$gateModule.SessionState.PSVariable.GetValue('GateGitCaptureRoot')
+        $previousRemaining=$gateModule.SessionState.PSVariable.GetValue('GateGitRemainingMilliseconds')
+        $captureRoot=Join-Path $TestDrive 'git-environment-capture';[void][IO.Directory]::CreateDirectory($captureRoot)
+        $global:Syp497GitEnvironment=$null;$global:Syp497GitCaptureProfile=$null
+        $fakeRuntime=[pscustomobject]@{ExportedCommands=@{
+                'Resolve-PlatformPhysicalPath'={param($Path)[IO.Path]::GetFullPath($Path)}
+                'Open-PlatformDirectory'={param($Root,[switch]$RootOnly)$directory=[pscustomobject]@{};$directory|Add-Member ScriptMethod Dispose {}; $directory}
+                'Start-PlatformOwnedProcess'={
+                    param($ExecutablePath,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$StdoutPath,$StderrPath,
+                        $OutputLimitCharacters,$ArgumentZero,$CaptureProfile)
+                    $global:Syp497GitEnvironment=[Collections.Generic.Dictionary[string,string]]::new($Environment)
+                    $global:Syp497GitCaptureProfile=$CaptureProfile
+                    [IO.File]::WriteAllBytes($StdoutPath,[Text.UTF8Encoding]::new($false).GetBytes("fixture`n"))
+                    [IO.File]::WriteAllBytes($StderrPath,[byte[]]::new(0))
+                    $lease=[pscustomobject]@{HasExited=$true;CaptureCompletedNaturally=$true;Cleanup=$null;TerminationReason=$null
+                        OutputLimitExceeded=$false;OutputLimitStream=$null;ExitCode=0;StartIdentity='fixture'}
+                    $lease|Add-Member ScriptMethod Dispose {}; $lease
+                }
+                'Stop-PlatformOwnedProcess'={param($Lease,$GracePeriod,$Deadline,$ExpectedStartIdentity)[pscustomobject]@{CleanedUp=$true;Uncertainty=$null}}
+            }}
+        try{
+            $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeModule',$fakeRuntime)
+            $gateModule.SessionState.PSVariable.Set('GateGitCaptureRoot',$captureRoot)
+            $gateModule.SessionState.PSVariable.Set('GateGitRemainingMilliseconds',[long]60000)
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,'git-token-sentinel','Process')}
+            $capture=Invoke-GateOwnedGitCapture $script:RepositoryRoot @('--version') -ByteExact
+            $capture.ExitCode|Should Be 0
+            $global:Syp497GitCaptureProfile|Should Be 'raw-stdout'
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){$global:Syp497GitEnvironment.ContainsKey($name)|Should Be $false}
+        }finally{
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
+            $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeModule',$previousRuntime)
+            $gateModule.SessionState.PSVariable.Set('GateGitCaptureRoot',$previousCaptureRoot)
+            $gateModule.SessionState.PSVariable.Set('GateGitRemainingMilliseconds',$previousRemaining)
+            $global:Syp497GitEnvironment=$null;$global:Syp497GitCaptureProfile=$null
+        }
         $fixture=Join-Path $script:RepositoryRoot 'tests/fixtures/Invoke-ConsumerGateCredentialFixture.ps1'
         $formalLease=New-SourceFixtureLease 'git-formal-prepare'
         try{
@@ -1951,15 +2012,33 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         $formalResult=($formalRecords-join[Environment]::NewLine)|ConvertFrom-Json -Depth 30
         $formalResult.exitCode|Should Be 0
         if($IsWindows){
-            $observedLease=New-SourceFixtureLease 'git-observed-prepare'
+            $productionObservation=Join-Path $TestDrive 'git-production-observation.txt'
+            $productionShim=New-GitCredentialPresenceShim (Join-Path $TestDrive 'git-production-shim') $productionObservation
+            $productionOldPath=$env:PATH
+            $closureModule=$null
             try{
-            $observedRecords=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $fixture `
-                -RepositoryRoot $script:RepositoryRoot -FixtureRoot $observedLease.Root -Outcome success `
-                -Sentinel 'git-formal-token-sentinel' -ObserveGitCredentialEnvironment 2>&1)
-            $LASTEXITCODE|Should Be 0
-            $observedResult=($observedRecords-join[Environment]::NewLine)|ConvertFrom-Json -Depth 30
-            $observations=@($observedResult.gitObservations)
-            }finally{Remove-SourceFixtureLease $observedLease}
+                $env:PATH=$productionShim+[IO.Path]::PathSeparator+$productionOldPath
+                foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){
+                    [Environment]::SetEnvironmentVariable($name,'git-production-token','Process')
+                }
+                [void](Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD'))
+                foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){
+                    [Environment]::SetEnvironmentVariable($name,'git-production-token','Process')
+                }
+                $closureModule=Import-Module (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1') -Force -PassThru
+                & $closureModule {
+                    param($AuthorityRoot,$RepositoryRoot)
+                    Initialize-ClosureGitCapture -AuthorityRoot $AuthorityRoot -GitCommandTimeoutSeconds 10 -GitReserveSeconds 20
+                    try{[void](Invoke-ClosureOwnedGitBytes -RepositoryRoot $RepositoryRoot -Arguments @('rev-parse','HEAD'))}
+                    finally{Complete-ClosureGitCapture}
+                } $script:RepositoryRoot $script:RepositoryRoot
+                $observations=@(Get-Content -LiteralPath $productionObservation)
+            }finally{
+                $env:PATH=$productionOldPath
+                foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){
+                    [Environment]::SetEnvironmentVariable($name,$null,'Process')
+                }
+            }
         }else{$observations=@($formalResult.gitObservations)}
         }finally{Remove-SourceFixtureLease $formalLease}
         @($observations).Count|Should BeGreaterThan 0
@@ -1978,8 +2057,6 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         @($credentialRemoval).Count|Should Be 1
         $mutantText=$moduleText.Remove($credentialRemoval[0].Extent.StartOffset,$credentialRemoval[0].Extent.EndOffset-$credentialRemoval[0].Extent.StartOffset)
         [IO.File]::WriteAllText($mutantPath,$mutantText,[Text.UTF8Encoding]::new($false))
-        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1') `
-            -Destination (Join-Path $TestDrive 'Invoke-GateGitByteCapture.ps1')
         $observation=Join-Path $TestDrive 'git-mutant-observation.txt'
         $shim=New-GitCredentialPresenceShim (Join-Path $TestDrive 'git-mutant-shim') $observation
         $oldPath=$env:PATH
@@ -2005,25 +2082,24 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
                     $node.GetCommandName()-ceq'New-GateChildEnvironment'-and
                     $node.Extent.Text-ceq"New-GateChildEnvironment `$null @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')"},$true))
         @($childEnvironment).Count|Should Be 1
+        $credentialGuard=@($ownedCapture.Body.FindAll({param($node)$node-is[Management.Automation.Language.ForEachStatementAst]-and
+                    $node.Extent.Text.Contains('STANDARD_VALIDATION_GITHUB_API_TOKEN',[StringComparison]::Ordinal)-and
+                    $node.Extent.Text.Contains('ContainsKey',[StringComparison]::Ordinal)-and
+                    $node.Extent.Text.Contains('credential alias',[StringComparison]::Ordinal)},$true))
+        @($credentialGuard).Count|Should Be 1
         $fullMutantText=$moduleText
-        foreach($mutation in @(
-                [pscustomobject]@{Start=$credentialRemoval[0].Extent.StartOffset;Length=$credentialRemoval[0].Extent.EndOffset-$credentialRemoval[0].Extent.StartOffset;Text=''},
-                [pscustomobject]@{Start=$childEnvironment[0].Extent.StartOffset;Length=$childEnvironment[0].Extent.EndOffset-$childEnvironment[0].Extent.StartOffset;Text='New-GateChildEnvironment $null'}
-            )|Sort-Object Start -Descending){
+        $fullMutations=@(
+            [pscustomobject]@{Start=$credentialRemoval[0].Extent.StartOffset;Length=$credentialRemoval[0].Extent.EndOffset-$credentialRemoval[0].Extent.StartOffset;Text=''},
+            [pscustomobject]@{Start=$childEnvironment[0].Extent.StartOffset;Length=$childEnvironment[0].Extent.EndOffset-$childEnvironment[0].Extent.StartOffset;Text='New-GateChildEnvironment $null'}
+        )
+        if($IsWindows){$fullMutations+=@(
+            [pscustomobject]@{Start=$credentialGuard[0].Extent.StartOffset;Length=$credentialGuard[0].Extent.EndOffset-$credentialGuard[0].Extent.StartOffset;Text=''}
+        )}
+        foreach($mutation in $fullMutations|Sort-Object Start -Descending){
             $fullMutantText=$fullMutantText.Remove($mutation.Start,$mutation.Length).Insert($mutation.Start,$mutation.Text)
         }
-        $helperText=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1')
-        $helperTokens=$null;$helperErrors=$null
-        $helperAst=[Management.Automation.Language.Parser]::ParseInput($helperText,[ref]$helperTokens,[ref]$helperErrors)
-        @($helperErrors).Count|Should Be 0
-        $helperCredentialRemoval=@($helperAst.FindAll({param($node)$node-is[Management.Automation.Language.ForEachStatementAst]-and
-                    $node.Extent.Text-ceq"foreach(`$name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[void]`$start.Environment.Remove(`$name)}"},$true))
-        @($helperCredentialRemoval).Count|Should Be 1
-        $fullHelperText=$helperText.Remove($helperCredentialRemoval[0].Extent.StartOffset,
-            $helperCredentialRemoval[0].Extent.EndOffset-$helperCredentialRemoval[0].Extent.StartOffset)
         $fullMutantPath=Join-Path $TestDrive 'ConsumerGate-git-full-inheritance-mutant.psm1'
         [IO.File]::WriteAllText($fullMutantPath,$fullMutantText,[Text.UTF8Encoding]::new($false))
-        [IO.File]::WriteAllText((Join-Path $TestDrive 'Invoke-GateGitByteCapture.ps1'),$fullHelperText,[Text.UTF8Encoding]::new($false))
         $fullObservation=Join-Path $TestDrive 'git-full-mutant-observation.txt'
         $fullShim=New-GitCredentialPresenceShim (Join-Path $TestDrive 'git-full-mutant-shim') $fullObservation
         try{
@@ -2031,15 +2107,18 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,'git-mutant-token','Process')}
             Import-Module $fullMutantPath -Force
             $hooks=Join-Path $TestDrive 'git-full-mutant-hooks';[void][IO.Directory]::CreateDirectory($hooks);Initialize-GateGitHooks $hooks $script:RepositoryRoot
-            [void](Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD'))
+            if($IsWindows){[void](Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD'))}
+            else{{Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD')}|Should Throw 'credential alias'}
         }finally{
             $env:PATH=$oldPath
             foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
             Restore-GateFixtureModule
         }
-        $fullMutantObservations=@(Get-Content -LiteralPath $fullObservation)
-        @($fullMutantObservations)|Should Be @('1,1,1')
-        {if(@($fullMutantObservations|Where-Object{$_-cne'0,0,0'}).Count-ne0){throw 'GIT_CREDENTIAL_ORACLE_FAILED'}}|Should Throw 'GIT_CREDENTIAL_ORACLE_FAILED'
+        if($IsWindows){
+            $fullMutantObservations=@(Get-Content -LiteralPath $fullObservation)
+            @($fullMutantObservations)|Should Be @('1,1,1')
+            {if(@($fullMutantObservations|Where-Object{$_-cne'0,0,0'}).Count-ne0){throw 'GIT_CREDENTIAL_ORACLE_FAILED'}}|Should Throw 'GIT_CREDENTIAL_ORACLE_FAILED'
+        }else{Test-Path -LiteralPath $fullObservation -PathType Leaf|Should Be $false}
     }
 
 
@@ -3304,6 +3383,8 @@ $values=[ordered]@{};foreach($name in $names){$values[$name]=[Environment]::GetE
                     $node.Name-ceq'Invoke-GateResolver'},$true))[0]
         $validatorAst=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
                     $node.Name-ceq'Invoke-GateValidation'},$true))[0]
+        $gitCaptureAst=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                    $node.Name-ceq'Invoke-GateOwnedGitCapture'},$true))[0]
         $gitBytesAst=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
                     $node.Name-ceq'Invoke-GateGitBytes'},$true))[0]
         $resolverAst.Extent.Text|Should Match ([regex]::Escape("'-AcquisitionTimeoutSeconds',([string]`$budget.resolverAcquisitionSeconds)"))
@@ -3325,12 +3406,17 @@ $values=[ordered]@{};foreach($name in $names){$values[$name]=[Environment]::GetE
         $closureText|Should Not Match '\[Diagnostics\.Process(?:StartInfo)?\]'
         $closureText|Should Not Match '\.WaitForExit\s*\('
         $moduleText|Should Match 'GitByteInvoker=\{[\s\S]+Invoke-GateGitBytes'
-        $byteHelper=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1')
-        $helperTokens=$null;$helperErrors=$null
-        [void][Management.Automation.Language.Parser]::ParseInput($byteHelper,[ref]$helperTokens,[ref]$helperErrors)
-        @($helperErrors).Count|Should Be 0
-        $byteHelper|Should Match '\[IO\.FileMode\]::CreateNew'
-        $byteHelper|Should Match 'StandardOutput\.BaseStream\.CopyToAsync'
+        $gitCaptureAst.Extent.Text|Should Match '-ExecutablePath\s+\$git'
+        $gitCaptureAst.Extent.Text|Should Match "CaptureProfile\s*=\s*'raw-stdout'"
+        $gitCaptureAst.Extent.Text|Should Not Match 'Invoke-GateGitByteCapture|Get-Process\s+-Id\s+\$PID|\.bytes'
+        $closureTokens=$null;$closureErrors=$null
+        $closureAst=[Management.Automation.Language.Parser]::ParseInput($closureText,[ref]$closureTokens,[ref]$closureErrors)
+        @($closureErrors).Count|Should Be 0
+        $closureCaptureAst=@($closureAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                    $node.Name-ceq'Invoke-ClosureOwnedGitBytes'},$true))[0]
+        $closureCaptureAst.Extent.Text|Should Match '-ExecutablePath\s+\$git'
+        $closureCaptureAst.Extent.Text|Should Match '-CaptureProfile\s+raw-stdout'
+        $closureCaptureAst.Extent.Text|Should Not Match 'Invoke-GateGitByteCapture|Get-Process\s+-Id\s+\$PID|\.bytes'
 
         $root=Join-Path $TestDrive 'resolver-owned-timeout'
         $authority=Join-Path $root 'authority';$install=Join-Path $root 'install';$source=Join-Path $root 'source-tools'
@@ -3411,18 +3497,18 @@ Start-Sleep -Seconds 30
         $shimRoot=Join-Path $root 'shim'
         [void][IO.Directory]::CreateDirectory($shimRoot)
         $childPidPath=Join-Path $root 'child.pid'
-        $childScript=Join-Path $root 'child.ps1'
-        [IO.File]::WriteAllText($childScript,"param([string]`$PidPath)`n[IO.File]::WriteAllText(`$PidPath,[string]`$PID,[Text.UTF8Encoding]::new(`$false))`nStart-Sleep -Seconds 30`n",[Text.UTF8Encoding]::new($false))
-        $shell=(Get-Process -Id $PID).Path
+        $shimPidPath=Join-Path $root 'shim.pid'
         if($IsWindows){
-            $shim=Join-Path $shimRoot 'git.cmd'
-            $text="@echo off`r`n`"$shell`" -NoProfile -NonInteractive -File `"$childScript`" `"$childPidPath`"`r`n"
+            [void](New-WindowsGitOwnedProcessShim $shimRoot hang $null $shimPidPath $childPidPath)
         }else{
+            $childScript=Join-Path $root 'child.ps1'
+            [IO.File]::WriteAllText($childScript,"param([string]`$PidPath)`n[IO.File]::WriteAllText(`$PidPath,[string]`$PID,[Text.UTF8Encoding]::new(`$false))`nStart-Sleep -Seconds 30`n",[Text.UTF8Encoding]::new($false))
+            $shell=(Get-Process -Id $PID).Path
             $shim=Join-Path $shimRoot 'git'
             $text="#!/bin/sh`n`"$shell`" -NoProfile -NonInteractive -File `"$childScript`" `"$childPidPath`"`n"
+            [IO.File]::WriteAllText($shim,$text,[Text.UTF8Encoding]::new($false))
+            [IO.File]::SetUnixFileMode($shim,[IO.UnixFileMode]::UserRead-bor[IO.UnixFileMode]::UserWrite-bor[IO.UnixFileMode]::UserExecute)
         }
-        [IO.File]::WriteAllText($shim,$text,[Text.UTF8Encoding]::new($false))
-        if(-not$IsWindows){[IO.File]::SetUnixFileMode($shim,[IO.UnixFileMode]::UserRead-bor[IO.UnixFileMode]::UserWrite-bor[IO.UnixFileMode]::UserExecute)}
         $manifest=Join-Path $root 'manifest.json'
         Write-FixtureJson $manifest ([ordered]@{repositories=@([ordered]@{id='fixture';inventoryTree=('b'*40);files=@()})})
         $oldPath=$env:PATH
@@ -3433,11 +3519,20 @@ Start-Sleep -Seconds 30
                 -GitCommandTimeoutSeconds 1 -GitReserveSeconds 2}
             $failure|Should Match 'Manifest closure Git command exceeded its bounded deadline'
             Test-Path -LiteralPath $childPidPath -PathType Leaf|Should Be $true
+            if($IsWindows){
+                $childPid=[int]([IO.File]::ReadAllText($childPidPath))
+                (Get-Process -Id $childPid -ErrorAction SilentlyContinue)|Should BeNullOrEmpty
+                Test-Path -LiteralPath $shimPidPath -PathType Leaf|Should Be $true
+                $shimPid=[int]([IO.File]::ReadAllText($shimPidPath))
+                (Get-Process -Id $shimPid -ErrorAction SilentlyContinue)|Should BeNullOrEmpty
+            }
         }finally{
             $env:PATH=$oldPath
-            if(Test-Path -LiteralPath $childPidPath -PathType Leaf){
-                $childPid=[int]([IO.File]::ReadAllText($childPidPath))
-                Get-Process -Id $childPid -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+            foreach($pidPath in @($childPidPath,$shimPidPath)){
+                if(Test-Path -LiteralPath $pidPath -PathType Leaf){
+                    $ownedPid=[int]([IO.File]::ReadAllText($pidPath))
+                    Get-Process -Id $ownedPid -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+                }
             }
         }
     }
@@ -3512,18 +3607,6 @@ Start-Sleep -Seconds 30
             {Invoke-ClosureGitBytes -RepositoryRoot $TestDrive -Arguments @('rev-parse','HEAD')}|Should Throw 'git exit status is unknown.'
         }
 
-        $helperText=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1')
-        $mutantText=$helperText.Replace('$exitCode=$process.ExitCode','$exitCode=$null')
-        $mutantText|Should Not BeExactly $helperText
-        $helper=Join-Path $root 'Invoke-GateGitByteCapture-null-exit.ps1'
-        [IO.File]::WriteAllText($helper,$mutantText,[Text.UTF8Encoding]::new($false))
-        $output=Join-Path $root 'helper-output.bin'
-        $payload=[Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes((@('--version')|ConvertTo-Json -Compress)))
-        $records=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $helper -GitPath `
-                (Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source -OutputPath $output `
-                -GitArgumentsBase64 $payload 2>&1)
-        $LASTEXITCODE|Should Not Be 0
-        ($records-join[Environment]::NewLine)|Should Match 'git exit status is unknown.'
         }finally{
             [Console]::SetOut($previousConsoleOut)
             [Console]::SetError($previousConsoleError)
