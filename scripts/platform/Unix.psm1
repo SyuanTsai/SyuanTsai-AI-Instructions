@@ -123,7 +123,7 @@ function Assert-UnixPlatformLeasePaths {
 
 function New-UnixPlatformRecoveryError {
     param([string]$Capability,[string]$Message,$Receipt)
-    $error=New-UnixPlatformVerificationError $Capability $Message;$error.Data['Receipt']=$Receipt;return $error
+    $recoveryError=New-UnixPlatformVerificationError $Capability $Message;$recoveryError.Data['Receipt']=$Receipt;return $recoveryError
 }
 
 function Invoke-UnixPlatformDirectoryFlush {
@@ -139,7 +139,7 @@ function Invoke-UnixPlatformDirectoryFlush {
 function Open-UnixPlatformMutationDirectory {
     param($ParentLease,[string]$Leaf,$Identity,[string]$Capability)
     try{
-        if($null-eq$Identity-or[string]$Identity.kind-cne'unix-device-inode'){throw[ArgumentException]::new('An expected Unix directory identity is required.')}
+        if($null-eq$Identity-or[string]$Identity.kind-cne'unix-device-inode'){throw [ArgumentException]::new('An expected Unix directory identity is required.')}
         $device=ConvertFrom-UnixIdentityNumber $Identity.device 'ExpectedIdentity.device';$inode=ConvertFrom-UnixIdentityNumber $Identity.fileId 'ExpectedIdentity.fileId'
         [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenMutationDirectory($ParentLease,$Leaf,$device,$inode)
     }catch{
@@ -156,7 +156,7 @@ function Get-UnixPlatformDirectoryState {
     try{
         [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
         $state=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::TryGetDirectoryState($ParentLease,$Leaf)
-        if($null-eq$state){return[pscustomobject][ordered]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null}}
+        if($null-eq$state){return [pscustomobject][ordered]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null}}
         [pscustomobject][ordered]@{exists=$true;identity=(ConvertTo-UnixPlatformIdentity $state.Observation);inventorySha256=[string]$state.InventorySha256;entryCount=[int64]$state.EntryCount}
     }catch{
         $native=Resolve-UnixPlatformException $_.Exception
@@ -180,15 +180,15 @@ function Assert-UnixPlatformExpectedDirectoryState {
     if($null-eq$ExpectedState){return}
     try{
         $required=@('exists','identity','inventorySha256','entryCount')
-        if($ExpectedState-is[array]-or@($ExpectedState.PSObject.Properties).Count-ne$required.Count){throw[ArgumentException]::new('ExpectedState must be an exact directory state.')}
-        foreach($name in $required){if($null-eq$ExpectedState.PSObject.Properties[$name]){throw[ArgumentException]::new("ExpectedState is missing $name.")}}
-        if($ExpectedState.exists-isnot[bool]-or-not[bool]$ExpectedState.exists){throw[ArgumentException]::new('ExpectedState.exists must be true for a moved source directory.')}
-        if($ExpectedState.inventorySha256-isnot[string]-or[string]$ExpectedState.inventorySha256-cnotmatch'^[0-9a-f]{64}$'){throw[ArgumentException]::new('ExpectedState.inventorySha256 must be a lowercase SHA-256 value.')}
-        if(($ExpectedState.entryCount-isnot[int]-and$ExpectedState.entryCount-isnot[long])-or[int64]$ExpectedState.entryCount-lt0){throw[ArgumentException]::new('ExpectedState.entryCount must be a non-negative integer.')}
-        if(-not(Test-UnixPlatformIdentityMatch $ExpectedState.identity $ExpectedIdentity)){throw[ArgumentException]::new('ExpectedState.identity does not match ExpectedIdentity.')}
+        if($ExpectedState-is[array]-or@($ExpectedState.PSObject.Properties).Count-ne$required.Count){throw [ArgumentException]::new('ExpectedState must be an exact directory state.')}
+        foreach($name in $required){if($null-eq$ExpectedState.PSObject.Properties[$name]){throw [ArgumentException]::new("ExpectedState is missing $name.")}}
+        if($ExpectedState.exists-isnot[bool]-or-not[bool]$ExpectedState.exists){throw [ArgumentException]::new('ExpectedState.exists must be true for a moved source directory.')}
+        if($ExpectedState.inventorySha256-isnot[string]-or[string]$ExpectedState.inventorySha256-cnotmatch'^[0-9a-f]{64}$'){throw [ArgumentException]::new('ExpectedState.inventorySha256 must be a lowercase SHA-256 value.')}
+        if(($ExpectedState.entryCount-isnot[int]-and$ExpectedState.entryCount-isnot[long])-or[int64]$ExpectedState.entryCount-lt0){throw [ArgumentException]::new('ExpectedState.entryCount must be a non-negative integer.')}
+        if(-not(Test-UnixPlatformIdentityMatch $ExpectedState.identity $ExpectedIdentity)){throw [ArgumentException]::new('ExpectedState.identity does not match ExpectedIdentity.')}
         $native=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetDirectoryState($Lease)
         $observed=[pscustomobject][ordered]@{exists=$true;identity=(ConvertTo-UnixPlatformIdentity $native.Observation);inventorySha256=[string]$native.InventorySha256;entryCount=[int64]$native.EntryCount}
-        if(-not(Test-UnixPlatformDirectoryStateMatch $observed $ExpectedState)){throw[IO.IOException]::new('The source directory identity or complete-tree inventory differs from ExpectedState.')}
+        if(-not(Test-UnixPlatformDirectoryStateMatch $observed $ExpectedState)){throw [IO.IOException]::new('The source directory identity or complete-tree inventory differs from ExpectedState.')}
     }catch{
         $native=Resolve-UnixPlatformException $_.Exception
         if($native-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]){throw $native}
@@ -637,39 +637,39 @@ function Assert-UnixPlatformDirectoryJournalOperation {
     if($null-eq$Journal){return}
     try{
         $required=@('sequence','kind','method','targetRelativePath','stageLeaf','backupLeaf','quarantineLeaf','original','backupIdentity','applied','permissions','state')
-        if($Journal-is[array]-or@($Journal.PSObject.Properties).Count-ne$required.Count){throw[ArgumentException]::new('must be one validated journal v1 operation')}
-        foreach($name in $required){if($null-eq$Journal.PSObject.Properties[$name]){throw[ArgumentException]::new("is missing $name")}}
-        if([string]$Journal.kind-cnotin@('swap-directory','create-directory')){throw[ArgumentException]::new('kind must be swap-directory or create-directory')}
-        if([string]$Journal.method-cne'stage-rename'){throw[ArgumentException]::new('method must be stage-rename')}
+        if($Journal-is[array]-or@($Journal.PSObject.Properties).Count-ne$required.Count){throw [ArgumentException]::new('must be one validated journal v1 operation')}
+        foreach($name in $required){if($null-eq$Journal.PSObject.Properties[$name]){throw [ArgumentException]::new("is missing $name")}}
+        if([string]$Journal.kind-cnotin@('swap-directory','create-directory')){throw [ArgumentException]::new('kind must be swap-directory or create-directory')}
+        if([string]$Journal.method-cne'stage-rename'){throw [ArgumentException]::new('method must be stage-rename')}
         $targetLeaf=if($Direction-ceq'ToTransaction'){$Leaf}else{$DestinationLeaf}
         $segments=@(([string]$Journal.targetRelativePath).Split('/'))
-        if($segments.Count-lt1-or@($segments|Where-Object{[string]::IsNullOrWhiteSpace($_)}).Count-gt0){throw[ArgumentException]::new('targetRelativePath is invalid')}
+        if($segments.Count-lt1-or@($segments|Where-Object{[string]::IsNullOrWhiteSpace($_)}).Count-gt0){throw [ArgumentException]::new('targetRelativePath is invalid')}
         foreach($segment in $segments){[void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($segment)}
-        if(-not[StringComparer]::Ordinal.Equals($segments[-1],$targetLeaf)){throw[ArgumentException]::new('targetRelativePath leaf does not match the target leaf')}
+        if(-not[StringComparer]::Ordinal.Equals($segments[-1],$targetLeaf)){throw [ArgumentException]::new('targetRelativePath leaf does not match the target leaf')}
         $parentPath=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetVerifiedPath($ParentLease)
         $parentRelative=[IO.Path]::GetRelativePath([string]$TransactionContext.rootPath,$parentPath).Replace('\','/')
         if($parentRelative-eq'.'){$parentRelative=''}
-        if([IO.Path]::IsPathRooted($parentRelative)-or$parentRelative-eq'..'-or$parentRelative.StartsWith('../',[StringComparison]::Ordinal)){throw[ArgumentException]::new('ParentLease is outside the transaction root')}
+        if([IO.Path]::IsPathRooted($parentRelative)-or$parentRelative-eq'..'-or$parentRelative.StartsWith('../',[StringComparison]::Ordinal)){throw [ArgumentException]::new('ParentLease is outside the transaction root')}
         $expectedTarget=if([string]::IsNullOrEmpty($parentRelative)){$targetLeaf}else{$parentRelative+'/'+$targetLeaf}
-        if(-not[StringComparer]::Ordinal.Equals([string]$Journal.targetRelativePath,$expectedTarget)){throw[ArgumentException]::new('targetRelativePath parent does not match ParentLease')}
-        if($null-eq$ExpectedState){throw[ArgumentException]::new('ExpectedState is required when Journal is supplied')}
+        if(-not[StringComparer]::Ordinal.Equals([string]$Journal.targetRelativePath,$expectedTarget)){throw [ArgumentException]::new('targetRelativePath parent does not match ParentLease')}
+        if($null-eq$ExpectedState){throw [ArgumentException]::new('ExpectedState is required when Journal is supplied')}
         $journalIdentity=$null;$journalState=$null
         if($Direction-ceq'ToTransaction'){
             if($null-ne$Journal.backupLeaf-and[StringComparer]::Ordinal.Equals([string]$Journal.backupLeaf,$DestinationLeaf)){
-                if([string]$Journal.kind-cne'swap-directory'-or-not[bool]$Journal.original.exists){throw[ArgumentException]::new('backupLeaf is incompatible with the directory operation')}
+                if([string]$Journal.kind-cne'swap-directory'-or-not[bool]$Journal.original.exists){throw [ArgumentException]::new('backupLeaf is incompatible with the directory operation')}
                 $journalIdentity=$Journal.original.identity;$journalState=$Journal.original
             }elseif($null-ne$Journal.quarantineLeaf-and[StringComparer]::Ordinal.Equals([string]$Journal.quarantineLeaf,$DestinationLeaf)){
                 $journalIdentity=$Journal.applied.identity;$journalState=$Journal.applied
-            }else{throw[ArgumentException]::new('DestinationLeaf must match backupLeaf or quarantineLeaf')}
+            }else{throw [ArgumentException]::new('DestinationLeaf must match backupLeaf or quarantineLeaf')}
         }else{
             if($null-ne$Journal.stageLeaf-and[StringComparer]::Ordinal.Equals([string]$Journal.stageLeaf,$Leaf)){$journalIdentity=$Journal.applied.identity;$journalState=$Journal.applied}
             elseif($null-ne$Journal.backupLeaf-and[StringComparer]::Ordinal.Equals([string]$Journal.backupLeaf,$Leaf)){
-                if([string]$Journal.kind-cne'swap-directory'){throw[ArgumentException]::new('backupLeaf is incompatible with create-directory')}
+                if([string]$Journal.kind-cne'swap-directory'){throw [ArgumentException]::new('backupLeaf is incompatible with create-directory')}
                 $journalIdentity=$Journal.backupIdentity;$journalState=$Journal.original
-            }else{throw[ArgumentException]::new('Leaf must match stageLeaf or backupLeaf')}
+            }else{throw [ArgumentException]::new('Leaf must match stageLeaf or backupLeaf')}
         }
-        if(-not(Test-UnixPlatformIdentityMatch $journalIdentity $ExpectedIdentity)){throw[ArgumentException]::new('ExpectedIdentity does not match the journal identity for this rename')}
-        if(-not(Test-UnixPlatformDirectoryStateMatch $journalState $ExpectedState)){throw[ArgumentException]::new('ExpectedState does not match the journal directory state for this rename')}
+        if(-not(Test-UnixPlatformIdentityMatch $journalIdentity $ExpectedIdentity)){throw [ArgumentException]::new('ExpectedIdentity does not match the journal identity for this rename')}
+        if(-not(Test-UnixPlatformDirectoryStateMatch $journalState $ExpectedState)){throw [ArgumentException]::new('ExpectedState does not match the journal directory state for this rename')}
     }catch{throw(New-UnixPlatformVerificationError 'directory-publication' "Journal operation mismatch: $($_.Exception.Message)")}
 }
 

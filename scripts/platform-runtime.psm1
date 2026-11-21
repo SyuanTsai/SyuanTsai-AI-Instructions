@@ -692,10 +692,10 @@ function Get-PlatformCapabilities {
         if ([string]::IsNullOrWhiteSpace($name)) {
             throw [ArgumentException]::new('Required capability names cannot be empty.','Required')
         }
-        $matches = @($capabilities | Where-Object {
+        $matchingCapabilities = @($capabilities | Where-Object {
             [StringComparer]::Ordinal.Equals([string]$_.name,[string]$name)
         })
-        if ($matches.Count -ne 1 -or $matches[0].status -cne 'available') {
+        if ($matchingCapabilities.Count -ne 1 -or $matchingCapabilities[0].status -cne 'available') {
             throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]::new($name,$platform)
         }
     }

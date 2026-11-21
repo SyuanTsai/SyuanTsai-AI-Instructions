@@ -2582,21 +2582,100 @@ Describe 'Platform runtime contract' {
         [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::IsTransactionStoreTarget('C:\root\.AI-INSTRUCTIONS-TXN\0123456789abcdef0123456789abcdef','target') | Should Be $true
     }
 
-    # Scenario: Every Unix PowerShell adapter is parsed on a Windows test host.
-    # Purpose: Reject language keywords glued to variable tokens before Unix-only execution can hide the command-name defect.
-    It 'UnitT28_rejects_language_keywords_glued_to_variables_in_unix_adapters' {
-        foreach($adapter in @('Unix','Linux','MacOS')) {
-            $path = Join-Path $script:RepositoryRoot "scripts/platform/$adapter.psm1"
+    # Scenario: Every PowerShell file changed by the platform-runtime branch is parsed on every test host.
+    # Purpose: Reject any language keyword glued to a following token before host-specific execution can hide the command-name defect.
+    It 'UnitT28_rejects_language_keywords_glued_to_following_tokens_in_changed_powershell_files' {
+        $keywords = @('return','throw','exit','break','continue','if','elseif','else','foreach','for','while','do','switch','try','catch','finally','trap','function','param','begin','process','end','data','using')
+        $changedPowerShellFiles = @(
+            'scripts/Invoke-PesterShardProcess.ps1'
+            'scripts/Invoke-StandardValidation.ps1'
+            'scripts/StandardSemanticBridge.psm1'
+            'scripts/install-ai-instructions-bootstrap.ps1'
+            'scripts/platform-runtime.psm1'
+            'scripts/platform/Linux.psm1'
+            'scripts/platform/MacOS.psm1'
+            'scripts/platform/Unix.psm1'
+            'tests/platform-runtime.Tests.ps1'
+        )
+        foreach($relativePath in $changedPowerShellFiles) {
+            $path = Join-Path $script:RepositoryRoot $relativePath
             $tokens = $null
             $errors = $null
             $ast = [Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors)
             @($errors).Count | Should Be 0
             $gluedCommands = @($ast.FindAll({param($node)
                 $node -is [Management.Automation.Language.CommandAst] -and
-                $node.GetCommandName() -match '^(return|throw|exit|break|continue)\$'
+                $node.CommandElements.Count -gt 0 -and
+                $node.CommandElements[0] -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                @($keywords | Where-Object {
+                    $node.CommandElements[0].Value.Length -gt $_.Length -and
+                    $node.CommandElements[0].Value.StartsWith($_,[StringComparison]::Ordinal)
+                }).Count -gt 0
             },$true))
             $gluedCommands.Count | Should Be 0
         }
+    }
+
+    # Scenario: An ambient command uses the exact name produced by a glued Unix throw expression.
+    # Purpose: Ensure invalid ExpectedState input still raises the typed validation failure without invoking the ambient command.
+    It 'UnitT281_rejects_invalid_unix_expected_state_despite_an_ambient_glued_throw_command' {
+        $unixPath = Join-Path $script:RepositoryRoot 'scripts/platform/Unix.psm1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($unixPath,[ref]$tokens,[ref]$errors)
+        @($errors).Count | Should Be 0
+        $functionNames = @('New-UnixPlatformVerificationError','Resolve-UnixPlatformException','Test-UnixPlatformIdentityMatch','Assert-UnixPlatformExpectedDirectoryState')
+        $functions = foreach($functionName in $functionNames) {
+            $ast.Find({param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $functionName
+            },$true).Extent.Text
+        }
+        $module = New-Module -ScriptBlock ([scriptblock]::Create("$($functions -join "`n")`nExport-ModuleMember -Function Assert-UnixPlatformExpectedDirectoryState"))
+        $ambientCommand = 'Function:\global:throw[ArgumentException]::new'
+        $script:AmbientGluedThrowInvocations = 0
+        Set-Item -LiteralPath $ambientCommand -Value { $script:AmbientGluedThrowInvocations++ } -Force
+        try {
+            $invalid = [pscustomobject][ordered]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null}
+            $caught = $null
+            try { & $module.ExportedCommands['Assert-UnixPlatformExpectedDirectoryState'] $null $invalid $null 'directory-publication' }
+            catch { $caught = $_.Exception }
+            $caught | Should Not BeNullOrEmpty
+            $caught.GetType().Name | Should Be 'PlatformVerificationException'
+            $caught.Capability | Should Be 'directory-publication'
+            $caught.Message | Should Match 'ExpectedState\.exists must be true'
+            $script:AmbientGluedThrowInvocations | Should Be 0
+        }
+        finally {
+            Remove-Item -LiteralPath $ambientCommand -Force -ErrorAction SilentlyContinue
+            Remove-Variable AmbientGluedThrowInvocations -Scope Script -ErrorAction SilentlyContinue
+            $module | Remove-Module -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Scenario: The Unix directory-state native probe reports that the requested directory is absent.
+    # Purpose: Preserve the exact cross-platform absent-state property names, order, and false existence value on every host.
+    It 'UnitT282_returns_the_exact_absent_unix_directory_state_shape' {
+        $unixPath = Join-Path $script:RepositoryRoot 'scripts/platform/Unix.psm1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($unixPath,[ref]$tokens,[ref]$errors)
+        @($errors).Count | Should Be 0
+        $directoryStateFunction = $ast.Find({param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-UnixPlatformDirectoryState'
+        },$true)
+        $absentBranch = @($directoryStateFunction.Body.FindAll({param($node)
+            $node -is [Management.Automation.Language.IfStatementAst] -and $node.Extent.Text -match '^if\(\$null-eq\$state\)'
+        },$true))[0]
+        $module = New-Module -ScriptBlock ([scriptblock]::Create("function Get-AbsentUnixDirectoryState { `$state=`$null; $($absentBranch.Extent.Text) }`nExport-ModuleMember -Function Get-AbsentUnixDirectoryState"))
+        try {
+            $state = & $module.ExportedCommands['Get-AbsentUnixDirectoryState']
+            $state.exists | Should Be $false
+            (@($state.PSObject.Properties.Name) -join ',') | Should Be 'exists,identity,inventorySha256,entryCount'
+            $state.identity | Should BeNullOrEmpty
+            $state.inventorySha256 | Should BeNullOrEmpty
+            $state.entryCount | Should BeNullOrEmpty
+        }
+        finally { $module | Remove-Module -Force -ErrorAction SilentlyContinue }
     }
 
     # Scenario: A generic exception wraps a typed Unix platform verification exception on any test host.
