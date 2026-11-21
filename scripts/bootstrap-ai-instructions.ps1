@@ -40,15 +40,11 @@ $script:repoManifestV4DowngradeMessage =
 
 $bootstrapPlatformRuntimeRoot = [System.IO.Path]::GetFullPath($RuntimeRoot)
 $bootstrapPlatformRuntimePath = Join-Path $bootstrapPlatformRuntimeRoot 'platform-runtime.psd1'
+Import-Module (Join-Path $PSScriptRoot 'repo-shared-skills-migration.psm1') -Force
 try {
-    $bootstrapPlatformRuntimeModule = @(
-        Import-Module $bootstrapPlatformRuntimePath -Force -PassThru -ErrorAction Stop |
-            Where-Object { [IO.Path]::GetFullPath([string]$_.Path) -ceq $bootstrapPlatformRuntimePath }
-    )
-    if ($bootstrapPlatformRuntimeModule.Count -ne 1) {
-        throw 'AI instructions bootstrap platform runtime import did not return exactly one module from its verified manifest path.'
-    }
-    $bootstrapPlatformRuntimeModule = $bootstrapPlatformRuntimeModule[0]
+    $bootstrapPlatformRuntimeImport = @(Import-Module $bootstrapPlatformRuntimePath -Force -PassThru -ErrorAction Stop)
+    $bootstrapPlatformRuntimeModule = Resolve-RepoSharedSkillsPlatformRuntimeModule `
+        -ImportedModules $bootstrapPlatformRuntimeImport -RuntimeRoot $bootstrapPlatformRuntimeRoot
     & $bootstrapPlatformRuntimeModule.ExportedCommands['Assert-PlatformRuntimeInventory'] `
         -Root $bootstrapPlatformRuntimeRoot -ManifestPath $bootstrapPlatformRuntimePath | Out-Null
 }
@@ -64,7 +60,6 @@ Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ai-instructions-runtime-contract.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'agent-artifact-remediation.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'license-delivery.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'repo-shared-skills-migration.psm1') -Force
 Set-RepoSharedSkillsPlatformRuntime -Module $bootstrapPlatformRuntimeModule
 Import-Module (Join-Path $PSScriptRoot 'skills-selection.psm1') -Force
 

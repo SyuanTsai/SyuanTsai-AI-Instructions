@@ -92,6 +92,34 @@ function Get-CanonicalRepositoryRoot {
 
 $script:RepoSharedSkillsPlatformRuntimeModule = $null
 
+function Resolve-RepoSharedSkillsPlatformRuntimeModule {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][object[]]$ImportedModules,
+        [Parameter(Mandatory=$true)][string]$RuntimeRoot
+    )
+
+    $modules = @($ImportedModules)
+    if ($modules.Count -ne 1 -or $modules[0] -isnot [Management.Automation.PSModuleInfo]) {
+        throw 'AI instructions bootstrap platform runtime import did not return exactly one module.'
+    }
+
+    $module = $modules[0]
+    $expectedRoot = [IO.Path]::GetFullPath($RuntimeRoot).TrimEnd([char[]]@('\','/'))
+    $expectedPath = [IO.Path]::GetFullPath((Join-Path $expectedRoot 'platform-runtime.psm1')).TrimEnd([char[]]@('\','/'))
+    $actualRoot = [IO.Path]::GetFullPath([string]$module.ModuleBase).TrimEnd([char[]]@('\','/'))
+    $actualPath = [IO.Path]::GetFullPath([string]$module.Path).TrimEnd([char[]]@('\','/'))
+    $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+
+    if (-not [string]::Equals($actualRoot,$expectedRoot,$comparison)) {
+        throw 'AI instructions bootstrap platform runtime module was not loaded from the verified runtime root.'
+    }
+    if (-not [string]::Equals($actualPath,$expectedPath,$comparison)) {
+        throw 'AI instructions bootstrap platform runtime module path does not match the verified RootModule path.'
+    }
+    return $module
+}
+
 function Set-RepoSharedSkillsPlatformRuntime {
     [CmdletBinding()]
     param([Parameter(Mandatory=$true)][object]$Module)
@@ -393,4 +421,4 @@ function Assert-RepoSharedSkillsMigrationEvidence {
     }
 }
 
-Export-ModuleMember -Function Get-RepoSharedSkillsMigrationPlan, Assert-RepoSharedSkillsMigrationEvidence, Get-RepoSkillMigrationGitState, Get-UserSharedSkillsReadiness, Assert-RepoAndUserRootsDistinct, Set-RepoSharedSkillsPlatformRuntime
+Export-ModuleMember -Function Get-RepoSharedSkillsMigrationPlan, Assert-RepoSharedSkillsMigrationEvidence, Get-RepoSkillMigrationGitState, Get-UserSharedSkillsReadiness, Assert-RepoAndUserRootsDistinct, Resolve-RepoSharedSkillsPlatformRuntimeModule, Set-RepoSharedSkillsPlatformRuntime

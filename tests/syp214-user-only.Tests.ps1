@@ -1245,49 +1245,52 @@ Describe 'SYP214 whole-Skill migration evidence' {
         (& $migrationModule { $script:RepoSharedSkillsPlatformRuntimeModule }) | Should Be $secondModule
     }
 
-    # Scenario: Bootstrap imports the caller-selected platform runtime before loading the migration module.
-    # Purpose: Prove bootstrap injects that exact captured module before any migration root guard or plan executes.
-    It 'InterT44_injects_the_caller_verified_platform_runtime_into_migration' {
+    # Scenario: Bootstrap-style manifest imports return one module repeatedly, including a Windows root spelling variant, while another directory supplies a lookalike module.
+    # Purpose: Accept only the exact platform runtime RootModule closure and keep bootstrap wiring ahead of migration use.
+    It 'InterT44_captures_only_the_verified_manifest_import_for_migration' {
+        $runtimeRoot=Join-Path $script:RepositoryRoot 'scripts'
+        $runtimePath=Join-Path $runtimeRoot 'platform-runtime.psd1'
+
+        $firstImport=@(Import-Module $runtimePath -Force -PassThru -ErrorAction Stop)
+        $firstCapture=Resolve-RepoSharedSkillsPlatformRuntimeModule -ImportedModules $firstImport -RuntimeRoot $runtimeRoot
+        $firstImport.Count | Should Be 1
+        $firstCapture | Should Be $firstImport[0]
+
+        $secondImport=@(Import-Module $runtimePath -Force -PassThru -ErrorAction Stop)
+        $secondCapture=Resolve-RepoSharedSkillsPlatformRuntimeModule -ImportedModules $secondImport -RuntimeRoot $runtimeRoot
+        $secondImport.Count | Should Be 1
+        $secondCapture | Should Be $secondImport[0]
+
+        if ($IsWindows) {
+            $caseVariantRoot=if([char]::IsUpper($runtimeRoot[0])){$runtimeRoot.Substring(0,1).ToLowerInvariant()+$runtimeRoot.Substring(1)}else{$runtimeRoot.Substring(0,1).ToUpperInvariant()+$runtimeRoot.Substring(1)}
+            (Resolve-RepoSharedSkillsPlatformRuntimeModule -ImportedModules $secondImport -RuntimeRoot $caseVariantRoot) |
+                Should Be $secondImport[0]
+        }
+
+        $foreignRoot=Join-Path $TestDrive 'foreign-runtime'
+        New-Item -ItemType Directory -Path $foreignRoot | Out-Null
+        Set-TestText -Path (Join-Path $foreignRoot 'platform-runtime.psm1') -Value 'function Get-ForeignRuntime { $true }; Export-ModuleMember -Function Get-ForeignRuntime'
+        $foreignImport=@(Import-Module (Join-Path $foreignRoot 'platform-runtime.psm1') -Force -PassThru -ErrorAction Stop)
+        { Resolve-RepoSharedSkillsPlatformRuntimeModule -ImportedModules $foreignImport -RuntimeRoot $runtimeRoot } |
+            Should Throw 'verified runtime root'
+
         $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
         $tokens=$null
         $parseErrors=$null
         $ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$parseErrors)
         @($parseErrors).Count | Should Be 0
         $commands=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst]},$true))
-        $runtimeImports=@($commands | Where-Object {
-            $_.GetCommandName() -ceq 'Import-Module' -and $_.Extent.Text -match '\$bootstrapPlatformRuntimePath'
-        })
-        $migrationImports=@($commands | Where-Object {
-            $_.GetCommandName() -ceq 'Import-Module' -and $_.Extent.Text -match 'repo-shared-skills-migration\.psm1'
-        })
+        $runtimeCaptures=@($commands | Where-Object { $_.GetCommandName() -ceq 'Resolve-RepoSharedSkillsPlatformRuntimeModule' })
         $runtimeSetters=@($commands | Where-Object { $_.GetCommandName() -ceq 'Set-RepoSharedSkillsPlatformRuntime' })
-        $runtimeVerifiers=@($commands | Where-Object {
-            $_.Extent.Text -match '\$bootstrapPlatformRuntimeModule\.ExportedCommands\[''Assert-PlatformRuntimeInventory''\]'
-        })
         $migrationGuards=@($commands | Where-Object {
             $_.GetCommandName() -in @('Assert-RepoAndUserRootsDistinct','Get-RepoSharedSkillsMigrationPlan')
         } | Sort-Object { $_.Extent.StartOffset })
 
-        $runtimeImports.Count | Should Be 1
-        $runtimeImports[0].Extent.Text | Should Match '(?i)-PassThru'
-        $runtimeImportAssignment=$runtimeImports[0]
-        while($null -ne $runtimeImportAssignment -and $runtimeImportAssignment -isnot [Management.Automation.Language.AssignmentStatementAst]){
-            $runtimeImportAssignment=$runtimeImportAssignment.Parent
-        }
-        $runtimeImportAssignment | Should Not BeNullOrEmpty
-        $runtimeImportAssignment.Left.Extent.Text | Should Be '$bootstrapPlatformRuntimeModule'
-        $runtimeImportAssignment.Right.Extent.Text | Should Match '(?i)Where-Object'
-        $runtimeImportAssignment.Right.Extent.Text | Should Match '\$_\.Path'
-        $runtimeImportAssignment.Right.Extent.Text | Should Match '\$bootstrapPlatformRuntimePath'
-        $runtimeVerifiers.Count | Should Be 1
-        $migrationImports.Count | Should Be 1
+        $runtimeCaptures.Count | Should Be 1
         $runtimeSetters.Count | Should Be 1
         $runtimeSetters[0].Extent.Text | Should Match '(?i)-Module\s+\$bootstrapPlatformRuntimeModule'
         $migrationGuards.Count | Should BeGreaterThan 0
-        $runtimeImports[0].Extent.StartOffset | Should BeLessThan $migrationImports[0].Extent.StartOffset
-        $runtimeImports[0].Extent.EndOffset | Should BeLessThan $runtimeVerifiers[0].Extent.StartOffset
-        $runtimeVerifiers[0].Extent.EndOffset | Should BeLessThan $migrationImports[0].Extent.StartOffset
-        $migrationImports[0].Extent.EndOffset | Should BeLessThan $runtimeSetters[0].Extent.StartOffset
+        $runtimeCaptures[0].Extent.EndOffset | Should BeLessThan $runtimeSetters[0].Extent.StartOffset
         $runtimeSetters[0].Extent.EndOffset | Should BeLessThan $migrationGuards[0].Extent.StartOffset
     }
 
