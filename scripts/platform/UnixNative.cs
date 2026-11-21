@@ -64,6 +64,13 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         public UnixFlushReceipt Flush { get; internal set; }
     }
 
+    public sealed class UnixDirectoryState
+    {
+        public FileObservation Observation { get; internal set; }
+        public string InventorySha256 { get; internal set; }
+        public long EntryCount { get; internal set; }
+    }
+
     internal sealed class SafeFd : SafeHandle
     {
         internal SafeFd(int fd) : base(new IntPtr(-1), true) { SetHandle(new IntPtr(fd)); }
@@ -229,6 +236,11 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             [DllImport("libc", SetLastError = true)] internal static extern int linkat(SafeFd fd, string name, SafeFd other, string link, int flags);
             [DllImport("libc", SetLastError = true)] internal static extern int symlinkat(string target, SafeFd fd, string name);
             [DllImport("libc", SetLastError = true)] internal static extern int fcntl(SafeFd fd, int command);
+            [DllImport("libc", SetLastError = true)] internal static extern int dup(SafeFd fd);
+            [DllImport("libc", SetLastError = true)] internal static extern IntPtr fdopendir(int fd);
+            [DllImport("libc", SetLastError = true)] internal static extern IntPtr readdir(IntPtr directory);
+            [DllImport("libc", SetLastError = true)] internal static extern int closedir(IntPtr directory);
+            [DllImport("libc", EntryPoint = "__errno_location")] internal static extern IntPtr errno_location();
             [DllImport("libc", SetLastError = true)] internal static extern uint geteuid();
             [DllImport("libc", SetLastError = true)] internal static extern IntPtr gnu_get_libc_version();
         }
@@ -270,6 +282,12 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             [DllImport(Lib, SetLastError = true)] internal static extern int symlinkat(string target, SafeFd fd, string name);
             // Only F_GETFD is used; it does not consume a variadic third argument.
             [DllImport(Lib, SetLastError = true)] internal static extern int fcntl(SafeFd fd, int command);
+            [DllImport(Lib, SetLastError = true)] internal static extern int dup(SafeFd fd);
+            [DllImport(Lib, SetLastError = true)] internal static extern IntPtr fdopendir(int fd);
+            [DllImport(Lib, SetLastError = true)] internal static extern IntPtr readdir(IntPtr directory);
+            [DllImport(Lib, EntryPoint = "readdir$INODE64", SetLastError = true)] internal static extern IntPtr readdir64(IntPtr directory);
+            [DllImport(Lib, SetLastError = true)] internal static extern int closedir(IntPtr directory);
+            [DllImport(Lib, EntryPoint = "__error")] internal static extern IntPtr errno_location();
             [DllImport(Lib, SetLastError = true)] internal static extern uint geteuid();
         }
 
@@ -417,6 +435,62 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private static void Chmod(SafeFd fd, uint mode) { Check(Mac ? Darwin.fchmod(fd, mode) : Linux.fchmod(fd, mode), "fchmod"); }
         private static void Unlink(SafeFd fd, string leaf, bool directory)
         { Check(Mac ? Darwin.unlinkat(fd, leaf, directory ? AtRemoveDirectory : 0) : Linux.unlinkat(fd, leaf, directory ? AtRemoveDirectory : 0), "unlinkat-probe-cleanup"); }
+        private static List<string> EnumerateChildLeaves(SafeFd directory)
+        {
+            int duplicate;
+            using (SafeFd fresh = Open(directory, ".", DirectoryFlags, 0))
+            {
+                duplicate = Mac ? Darwin.dup(fresh) : Linux.dup(fresh);
+                Check(duplicate, "dup-directory-enumeration");
+            }
+            IntPtr stream = IntPtr.Zero;
+            try
+            {
+                stream = Mac ? Darwin.fdopendir(duplicate) : Linux.fdopendir(duplicate);
+                if (stream == IntPtr.Zero)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    Close(duplicate); duplicate = -1;
+                    throw Errno("fdopendir", error);
+                }
+                duplicate = -1; // fdopendir owns the descriptor.
+                var leaves = new List<string>();
+                var unique = new HashSet<string>(StringComparer.Ordinal);
+                var strictUtf8 = new UTF8Encoding(false, true);
+                while (true)
+                {
+                    IntPtr errno = Mac ? Darwin.errno_location() : Linux.errno_location();
+                    Marshal.WriteInt32(errno, 0);
+                    IntPtr entry = Mac ? (X64 ? Darwin.readdir64(stream) : Darwin.readdir(stream)) : Linux.readdir(stream);
+                    if (entry == IntPtr.Zero)
+                    {
+                        int error = Marshal.ReadInt32(errno);
+                        if (error != 0) throw Errno("readdir", error);
+                        break;
+                    }
+                    int nameOffset = Mac ? 21 : 19;
+                    int recordLength = (ushort)Marshal.ReadInt16(entry, 16);
+                    if (recordLength <= nameOffset) throw new IOException("Directory enumeration returned an invalid dirent record.");
+                    int capacity = recordLength - nameOffset, length = 0;
+                    while (length < capacity && Marshal.ReadByte(entry, nameOffset + length) != 0) length++;
+                    if (length == capacity) throw new IOException("Directory enumeration returned an unterminated name.");
+                    byte[] nameBytes = new byte[length];
+                    if (length != 0) Marshal.Copy(IntPtr.Add(entry, nameOffset), nameBytes, 0, length);
+                    string leaf = strictUtf8.GetString(nameBytes);
+                    if (leaf == "." || leaf == "..") continue;
+                    PlatformPaths.Leaf(leaf);
+                    if (!unique.Add(leaf)) throw new IOException("Directory enumeration returned a duplicate name.");
+                    leaves.Add(leaf);
+                }
+                leaves.Sort(StringComparer.Ordinal);
+                return leaves;
+            }
+            finally
+            {
+                if (stream != IntPtr.Zero) Check(Mac ? Darwin.closedir(stream) : Linux.closedir(stream), "closedir");
+                else if (duplicate >= 0) Close(duplicate);
+            }
+        }
         private static void UnlinkOwnedProbeDirectory(SafeFd parent, string leaf, SafeFd directory, string context)
         {
             FileObservation held = Stat(directory, null);
@@ -707,6 +781,144 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 return value;
             }
         }
+
+        private sealed class UnixDirectoryInventoryEntry
+        {
+            internal string Path;
+            internal string Sha256;
+        }
+
+        private static UnixLease OpenRelativeDirectory(UnixLease parent, string leaf)
+        {
+            PlatformPaths.Leaf(leaf);
+            lock (parent.Sync)
+            {
+                parent.Check(); AssertIdentity(parent, parent.Observation, false);
+                if (parent.Observation.Kind != "directory") throw new ArgumentException("A directory lease is required.");
+                SafeFd duplicate = Open(parent.Fd, ".", DirectoryFlags, 0), directory = null;
+                try
+                {
+                    directory = Open(duplicate, leaf, DirectoryFlags | NonBlock, 0);
+                    FileObservation value = Stat(directory, null);
+                    if (value.Kind != "directory") throw new IOException("A non-symlink directory is required.");
+                    PlatformPaths.Same(value, Stat(duplicate, leaf));
+                    UnixLease result = new UnixLease(directory, duplicate, leaf, Path.Combine(parent.Path, leaf), value);
+                    directory = null; duplicate = null; return result;
+                }
+                finally { if (directory != null) directory.Dispose(); if (duplicate != null) duplicate.Dispose(); }
+            }
+        }
+
+        private static UnixLease OpenRelativeInventoryEntry(UnixLease parent, string leaf, FileObservation named)
+        {
+            PlatformPaths.Leaf(leaf);
+            if (named.Kind != "directory" && named.Kind != "file")
+                throw new IOException("Directory inventory contains a symlink or non-regular entry.");
+            SafeFd duplicate = Open(parent.Fd, ".", DirectoryFlags, 0), entry = null;
+            try
+            {
+                entry = Open(duplicate, leaf, named.Kind == "directory" ? DirectoryFlags | NonBlock : NonBlock, 0);
+                FileObservation value = Stat(entry, null);
+                PlatformPaths.Same(value, named); PlatformPaths.Same(value, Stat(duplicate, leaf));
+                if (value.Kind == "file" && value.LinkCount != 1)
+                    throw new IOException("Directory inventory contains a multiply-linked file.");
+                AssertNoExtendedMetadata(entry, value);
+                UnixLease result = new UnixLease(entry, duplicate, leaf, Path.Combine(parent.Path, leaf), value);
+                entry = null; duplicate = null; return result;
+            }
+            finally { if (entry != null) entry.Dispose(); if (duplicate != null) duplicate.Dispose(); }
+        }
+
+        private static void CollectDirectoryInventory(UnixLease directory, string prefix,
+            List<UnixDirectoryInventoryEntry> inventory, List<UnixLease> retained)
+        {
+            FileObservation directoryObservation = AssertIdentity(directory, directory.Observation, false);
+            if (directoryObservation.Kind != "directory") throw new IOException("A non-symlink directory is required.");
+            AssertNoExtendedMetadata(directory.Fd, directoryObservation);
+            List<string> before = EnumerateChildLeaves(directory.Fd);
+            foreach (string leaf in before)
+            {
+                FileObservation named = Stat(directory.Fd, leaf);
+                UnixLease entry = OpenRelativeInventoryEntry(directory, leaf, named);
+                retained.Add(entry);
+                string relativePath = prefix + leaf;
+                if (named.Kind == "directory")
+                {
+                    inventory.Add(new UnixDirectoryInventoryEntry {
+                        Path = relativePath + "/",
+                        Sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    });
+                    CollectDirectoryInventory(entry, relativePath + "/", inventory, retained);
+                }
+                else
+                {
+                    inventory.Add(new UnixDirectoryInventoryEntry { Path = relativePath, Sha256 = Hash(entry.Fd, entry.Observation) });
+                }
+            }
+            List<string> after = EnumerateChildLeaves(directory.Fd);
+            if (before.Count != after.Count) throw new IOException("Directory contents changed while inventory was being captured.");
+            for (int index = 0; index < before.Count; index++)
+                if (!StringComparer.Ordinal.Equals(before[index], after[index]))
+                    throw new IOException("Directory contents changed while inventory was being captured.");
+        }
+
+        private static UnixDirectoryState ComputeDirectoryState(UnixLease directory)
+        {
+            var inventory = new List<UnixDirectoryInventoryEntry>();
+            var retained = new List<UnixLease>();
+            try
+            {
+                FileObservation root = AssertIdentity(directory, directory.Observation, false);
+                if (root.Kind != "directory") throw new IOException("A non-symlink directory is required.");
+                CollectDirectoryInventory(directory, String.Empty, inventory, retained);
+                inventory.Sort(delegate(UnixDirectoryInventoryEntry first, UnixDirectoryInventoryEntry second) {
+                    return StringComparer.Ordinal.Compare(first.Path, second.Path);
+                });
+                var canonical = new StringBuilder();
+                foreach (UnixDirectoryInventoryEntry entry in inventory)
+                    canonical.Append(entry.Path).Append('\t').Append(entry.Sha256).Append('\n');
+                byte[] bytes = new UTF8Encoding(false).GetBytes(canonical.ToString());
+                using (var sha = SHA256.Create())
+                    return new UnixDirectoryState {
+                        Observation = root,
+                        InventorySha256 = BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant(),
+                        EntryCount = inventory.Count
+                    };
+            }
+            finally { for (int index = retained.Count - 1; index >= 0; index--) retained[index].Dispose(); }
+        }
+
+        public static UnixDirectoryState GetDirectoryState(UnixLease directory)
+        {
+            lock (directory.Sync) { directory.Check(); return ComputeDirectoryState(directory); }
+        }
+
+        public static UnixDirectoryState TryGetDirectoryState(UnixLease parent, string leaf)
+        {
+            PlatformPaths.Leaf(leaf);
+            UnixLease directory = null;
+            try
+            {
+                try { directory = OpenRelativeDirectory(parent, leaf); }
+                catch (PlatformErrnoException ex) { if (ex.Errno == 2) return null; throw; }
+                return ComputeDirectoryState(directory);
+            }
+            finally { if (directory != null) directory.Dispose(); }
+        }
+
+        public static UnixLease OpenMutationDirectory(UnixLease parent, string leaf, ulong expectedDevice, ulong expectedInode)
+        {
+            UnixLease directory = OpenRelativeDirectory(parent, leaf);
+            try
+            {
+                FileObservation value = AssertIdentity(directory, directory.Observation, false);
+                if (value.Device != expectedDevice || value.Inode != expectedInode)
+                    throw new IOException("The directory identity differs from ExpectedIdentity.");
+                return directory;
+            }
+            catch { directory.Dispose(); throw; }
+        }
+
         public static string GetVerifiedPath(UnixLease lease)
         {
             lock (lease.Sync)
@@ -957,6 +1169,136 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             if (error == 22 || (!Mac && (error == 38 || error == 95)) || (Mac && (error == 45 || error == 78 || error == 102)))
                 throw new PlatformCapabilityUnavailableException("publication-noreplace: " + ErrnoName(error), PlatformNative.GetOperatingSystem());
             throw Errno(operation, error);
+        }
+
+        public static void PreflightDirectoryPublication(UnixLease parent, UnixLease transaction, string sourceLeaf, string destinationLeaf)
+        {
+            PlatformPaths.Leaf(sourceLeaf); PlatformPaths.Leaf(destinationLeaf);
+            lock (parent.Sync)
+            lock (transaction.Sync)
+            {
+                parent.Check(); transaction.Check();
+                AssertIdentity(parent, parent.Observation, false); AssertIdentity(transaction, transaction.Observation, false);
+                DestinationFilesystemPreflight(parent, transaction, sourceLeaf, destinationLeaf);
+            }
+        }
+
+        public static void RenameDirectoryNoReplace(UnixLease source, UnixLease destinationParent, string destinationLeaf)
+        {
+            PlatformPaths.Leaf(destinationLeaf);
+            lock (source.Sync)
+            lock (destinationParent.Sync)
+            {
+                source.Check(); destinationParent.Check();
+                if (source.Parent == null || String.IsNullOrEmpty(source.Leaf)) throw new ArgumentException("A parent-bound source directory lease is required.");
+                FileObservation sourceValue = AssertIdentity(source, source.Observation, false);
+                if (sourceValue.Kind != "directory") throw new IOException("A non-symlink source directory is required.");
+                FileObservation destinationValue = AssertIdentity(destinationParent, destinationParent.Observation, false);
+                if (destinationValue.Kind != "directory") throw new ArgumentException("A destination directory lease is required.");
+                if (sourceValue.Device != destinationValue.Device)
+                    throw new PlatformCapabilityUnavailableException("same-filesystem-rename: EXDEV", PlatformNative.GetOperatingSystem());
+                SafeFd newParent = Open(destinationParent.Fd, ".", DirectoryFlags, 0);
+                SafeFd oldParent = source.Parent;
+                string oldLeaf = source.Leaf;
+                string newPath = Path.Combine(destinationParent.Path, destinationLeaf);
+                bool renamed = false;
+                try
+                {
+                    PlatformPaths.Same(sourceValue, Stat(oldParent, oldLeaf));
+                    RenameNoReplace(oldParent, oldLeaf, destinationParent.Fd, destinationLeaf, "rename-directory-noreplace");
+                    renamed = true;
+                    source.Parent = newParent; newParent = null;
+                    source.Leaf = destinationLeaf; source.Path = newPath;
+                    Sync(oldParent, true, "fsync-directory-rename-source-parent");
+                    Sync(destinationParent.Fd, true, "fsync-directory-rename-destination-parent");
+                    oldParent.Dispose(); oldParent = null;
+                    RunMutationTestHook("directory-publication-after-rename");
+                }
+                catch (Exception failure)
+                {
+                    if (renamed)
+                        throw new PlatformMutationException("directory-publication", PlatformNative.GetOperatingSystem(), "renamed", failure.Message, null);
+                    throw;
+                }
+                finally { if (newParent != null) newParent.Dispose(); if (oldParent != null && !Object.ReferenceEquals(oldParent, source.Parent)) oldParent.Dispose(); }
+            }
+        }
+
+        public static void FlushDirectory(UnixLease directory)
+        {
+            lock (directory.Sync)
+            {
+                directory.Check();
+                FileObservation value = AssertIdentity(directory, directory.Observation, false);
+                if (value.Kind != "directory") throw new ArgumentException("A directory lease is required.");
+                RunMutationTestHook("directory-flush-before-fsync");
+                Sync(directory.Fd, true, "fsync-directory");
+            }
+        }
+
+        private static void DeleteOwnedEntry(UnixLease parent, string leaf, bool verifyExpectedIdentity,
+            ulong expectedDevice, ulong expectedInode, ref int removedEntryCount, ref string remainingPath, string relativePath)
+        {
+            PlatformPaths.Leaf(leaf); remainingPath = relativePath;
+            FileObservation named = Stat(parent.Fd, leaf);
+            if (verifyExpectedIdentity && (named.Kind != "directory" || named.Device != expectedDevice || named.Inode != expectedInode))
+                throw new IOException("The owned-tree root identity differs from ExpectedIdentity.");
+            if (named.Kind == "directory")
+            {
+                UnixLease directory = OpenRelativeDirectory(parent, leaf);
+                try
+                {
+                    FileObservation opened = AssertIdentity(directory, directory.Observation, false);
+                    PlatformPaths.Same(opened, named);
+                    List<string> children = EnumerateChildLeaves(directory.Fd);
+                    foreach (string child in children)
+                        DeleteOwnedEntry(directory, child, false, 0, 0, ref removedEntryCount, ref remainingPath, relativePath + "/" + child);
+                    if (EnumerateChildLeaves(directory.Fd).Count != 0)
+                        throw new IOException("A directory entry appeared during owned-tree cleanup.");
+                    PlatformPaths.Same(AssertIdentity(directory, opened, false), Stat(parent.Fd, leaf));
+                    Unlink(parent.Fd, leaf, true); removedEntryCount++;
+                }
+                finally { directory.Dispose(); }
+                return;
+            }
+            if (named.Kind == "file" && named.LinkCount != 1)
+                throw new IOException("Owned directory tree cleanup requires every regular file to have exactly one link before mutation.");
+            FileObservation revalidated = Stat(parent.Fd, leaf);
+            PlatformPaths.Same(revalidated, named);
+            if (revalidated.Kind == "file" && revalidated.LinkCount != 1)
+                throw new IOException("Owned directory tree cleanup requires every regular file to have exactly one link before mutation.");
+            Unlink(parent.Fd, leaf, false); removedEntryCount++;
+        }
+
+        public static int DeleteOwnedDirectoryTree(UnixLease parent, string leaf, ulong expectedDevice, ulong expectedInode)
+        {
+            PlatformPaths.Leaf(leaf);
+            lock (parent.Sync)
+            {
+                parent.Check();
+                FileObservation parentValue = AssertIdentity(parent, parent.Observation, false);
+                if (parentValue.Kind != "directory") throw new ArgumentException("A directory lease is required.");
+                int removedEntryCount = 0; string remainingPath = leaf;
+                try
+                {
+                    // Opening and identity-verifying the owned root occurs before the first unlink.
+                    using (UnixLease root = OpenRelativeDirectory(parent, leaf))
+                    {
+                        FileObservation rootValue = AssertIdentity(root, root.Observation, false);
+                        if (rootValue.Device != expectedDevice || rootValue.Inode != expectedInode)
+                            throw new IOException("The owned-tree root identity differs from ExpectedIdentity.");
+                    }
+                    DeleteOwnedEntry(parent, leaf, true, expectedDevice, expectedInode, ref removedEntryCount, ref remainingPath, leaf);
+                    Sync(parent.Fd, true, "fsync-owned-directory-tree-parent");
+                    return removedEntryCount;
+                }
+                catch (Exception failure)
+                {
+                    throw new IOException(String.Format(
+                        "Owned directory tree cleanup stopped after deleting {0} entries; remaining path '{1}'. {2}",
+                        removedEntryCount, remainingPath, failure.Message), failure);
+                }
+            }
         }
 
         // Lease data I/O uses explicit-offset pread/pwrite. Leases are opened O_NONBLOCK

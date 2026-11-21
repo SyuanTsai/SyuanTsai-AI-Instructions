@@ -81,6 +81,104 @@ function ConvertTo-UnixPlatformIdentity {
     }
 }
 
+function Test-UnixPlatformIdentityMatch {
+    param($First,$Second)
+    if($null -eq $First -or $null -eq $Second -or [string]$First.kind -cne 'unix-device-inode' -or [string]$Second.kind -cne 'unix-device-inode'){return $false}
+    try {
+        return (ConvertFrom-UnixIdentityNumber $First.device 'First.device') -eq (ConvertFrom-UnixIdentityNumber $Second.device 'Second.device') -and
+            (ConvertFrom-UnixIdentityNumber $First.fileId 'First.fileId') -eq (ConvertFrom-UnixIdentityNumber $Second.fileId 'Second.fileId')
+    } catch {return $false}
+}
+
+function Assert-UnixPlatformTransactionLease {
+    param($ParentLease,$TransactionLease,[string]$Capability)
+    $parentPath=[IO.Path]::GetFullPath([SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetVerifiedPath($ParentLease)).TrimEnd('/')
+    $transactionPath=[IO.Path]::GetFullPath([SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetVerifiedPath($TransactionLease)).TrimEnd('/')
+    $transactionId=[IO.Path]::GetFileName($transactionPath);$transactionContainer=[IO.Path]::GetDirectoryName($transactionPath);$rootPath=[IO.Path]::GetDirectoryName($transactionContainer)
+    $insideTransaction=[StringComparer]::Ordinal.Equals($parentPath,$transactionPath)-or$parentPath.StartsWith($transactionPath+'/',[StringComparison]::Ordinal)
+    $insideContainer=[StringComparer]::Ordinal.Equals($parentPath,$transactionContainer)-or$parentPath.StartsWith($transactionContainer+'/',[StringComparison]::Ordinal)
+    if([string]::IsNullOrEmpty($rootPath)-or$transactionId-cnotmatch'^[0-9a-f]{32}$'-or[IO.Path]::GetFileName($transactionContainer)-cne'.ai-instructions-txn'-or
+        [uint64]$ParentLease.Observation.Device-ne[uint64]$TransactionLease.Observation.Device-or$insideTransaction-or$insideContainer){
+        throw (New-UnixPlatformVerificationError $Capability 'TransactionLease must be .ai-instructions-txn/<32 lowercase hex> on the target filesystem, and the target must be outside it.')
+    }
+    [pscustomobject][ordered]@{parentPath=$parentPath;transactionPath=$transactionPath;rootPath=$rootPath;transactionId=$transactionId}
+}
+
+function Assert-UnixPlatformLeasePaths {
+    param($ParentLease,$TransactionLease,[string]$Capability)
+    [void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetVerifiedPath($ParentLease)
+    [void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetVerifiedPath($TransactionLease)
+}
+
+function New-UnixPlatformRecoveryError {
+    param([string]$Capability,[string]$Message,$Receipt)
+    $error=New-UnixPlatformVerificationError $Capability $Message;$error.Data['Receipt']=$Receipt;return $error
+}
+
+function Invoke-UnixPlatformDirectoryFlush {
+    param($Lease,[string]$Operation,[string]$Point,[string]$Role)
+    try{[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::FlushDirectory($Lease)}
+    catch{
+        if($_.Exception-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]){throw $_.Exception}
+        throw (New-UnixPlatformVerificationError 'publication-durability' "$Operation $Point flush failed for the $Role directory: $($_.Exception.Message)")
+    }
+}
+
+function Open-UnixPlatformMutationDirectory {
+    param($ParentLease,[string]$Leaf,$Identity,[string]$Capability)
+    try{
+        if($null-eq$Identity-or[string]$Identity.kind-cne'unix-device-inode'){throw[ArgumentException]::new('An expected Unix directory identity is required.')}
+        $device=ConvertFrom-UnixIdentityNumber $Identity.device 'ExpectedIdentity.device';$inode=ConvertFrom-UnixIdentityNumber $Identity.fileId 'ExpectedIdentity.fileId'
+        [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenMutationDirectory($ParentLease,$Leaf,$device,$inode)
+    }catch{
+        if($_.Exception-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]){throw}
+        throw (New-UnixPlatformVerificationError $Capability "The directory lease could not be opened and identity-verified: $($_.Exception.Message)")
+    }
+}
+
+function Get-UnixPlatformDirectoryState {
+    param([Parameter(Mandatory=$true)]$ParentLease,[Parameter(Mandatory=$true)][string]$Leaf)
+    Assert-UnixPlatformHost directory-publication|Out-Null
+    try{
+        [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
+        $state=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::TryGetDirectoryState($ParentLease,$Leaf)
+        if($null-eq$state){return[pscustomobject][ordered]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null}}
+        [pscustomobject][ordered]@{exists=$true;identity=(ConvertTo-UnixPlatformIdentity $state.Observation);inventorySha256=[string]$state.InventorySha256;entryCount=[int64]$state.EntryCount}
+    }catch{
+        if($_.Exception-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]-and[string]$_.Exception.Capability-ceq'directory-publication'){throw $_.Exception}
+        throw (New-UnixPlatformVerificationError 'directory-publication' "Directory state could not be captured: $($_.Exception.Message)")
+    }
+}
+
+function Test-UnixPlatformDirectoryStateMatch {
+    param($First,$Second)
+    if($null-eq$First-or$null-eq$Second){return$false}
+    return($First.exists-is[bool]-and$Second.exists-is[bool]-and[bool]$First.exists-eq[bool]$Second.exists-and
+        (Test-UnixPlatformIdentityMatch $First.identity $Second.identity)-and
+        [string]$First.inventorySha256-ceq[string]$Second.inventorySha256-and
+        $null-ne$First.entryCount-and$null-ne$Second.entryCount-and[int64]$First.entryCount-eq[int64]$Second.entryCount)
+}
+
+function Assert-UnixPlatformExpectedDirectoryState {
+    param($Lease,$ExpectedState,$ExpectedIdentity,[string]$Capability)
+    if($null-eq$ExpectedState){return}
+    try{
+        $required=@('exists','identity','inventorySha256','entryCount')
+        if($ExpectedState-is[array]-or@($ExpectedState.PSObject.Properties).Count-ne$required.Count){throw[ArgumentException]::new('ExpectedState must be an exact directory state.')}
+        foreach($name in $required){if($null-eq$ExpectedState.PSObject.Properties[$name]){throw[ArgumentException]::new("ExpectedState is missing $name.")}}
+        if($ExpectedState.exists-isnot[bool]-or-not[bool]$ExpectedState.exists){throw[ArgumentException]::new('ExpectedState.exists must be true for a moved source directory.')}
+        if($ExpectedState.inventorySha256-isnot[string]-or[string]$ExpectedState.inventorySha256-cnotmatch'^[0-9a-f]{64}$'){throw[ArgumentException]::new('ExpectedState.inventorySha256 must be a lowercase SHA-256 value.')}
+        if(($ExpectedState.entryCount-isnot[int]-and$ExpectedState.entryCount-isnot[long])-or[int64]$ExpectedState.entryCount-lt0){throw[ArgumentException]::new('ExpectedState.entryCount must be a non-negative integer.')}
+        if(-not(Test-UnixPlatformIdentityMatch $ExpectedState.identity $ExpectedIdentity)){throw[ArgumentException]::new('ExpectedState.identity does not match ExpectedIdentity.')}
+        $native=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetDirectoryState($Lease)
+        $observed=[pscustomobject][ordered]@{exists=$true;identity=(ConvertTo-UnixPlatformIdentity $native.Observation);inventorySha256=[string]$native.InventorySha256;entryCount=[int64]$native.EntryCount}
+        if(-not(Test-UnixPlatformDirectoryStateMatch $observed $ExpectedState)){throw[IO.IOException]::new('The source directory identity or complete-tree inventory differs from ExpectedState.')}
+    }catch{
+        if($_.Exception-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]){throw}
+        throw (New-UnixPlatformVerificationError $Capability $_.Exception.Message)
+    }
+}
+
 function ConvertTo-UnixPermissionReceipt {
     param([Parameter(Mandatory=$true)] $Snapshot)
     [pscustomobject][ordered]@{ kind='unix-mode'; mode=[string]$Snapshot.Mode; uid=[uint64]$Snapshot.Uid; gid=[uint64]$Snapshot.Gid }
@@ -516,4 +614,129 @@ function Remove-UnixPlatformOwnedFile {
     }
 }
 
-Export-ModuleMember -Function Set-UnixPlatformPermissions,Get-UnixPlatformPermissionSnapshot,Publish-UnixPlatformFile,Remove-UnixPlatformOwnedFile
+function Assert-UnixPlatformDirectoryJournalOperation {
+    param($Journal,$TransactionContext,$ParentLease,[string]$Leaf,[string]$DestinationLeaf,$ExpectedIdentity,[string]$Direction,$ExpectedState)
+    if($null-eq$Journal){return}
+    try{
+        $required=@('sequence','kind','method','targetRelativePath','stageLeaf','backupLeaf','quarantineLeaf','original','backupIdentity','applied','permissions','state')
+        if($Journal-is[array]-or@($Journal.PSObject.Properties).Count-ne$required.Count){throw[ArgumentException]::new('must be one validated journal v1 operation')}
+        foreach($name in $required){if($null-eq$Journal.PSObject.Properties[$name]){throw[ArgumentException]::new("is missing $name")}}
+        if([string]$Journal.kind-cnotin@('swap-directory','create-directory')){throw[ArgumentException]::new('kind must be swap-directory or create-directory')}
+        if([string]$Journal.method-cne'stage-rename'){throw[ArgumentException]::new('method must be stage-rename')}
+        $targetLeaf=if($Direction-ceq'ToTransaction'){$Leaf}else{$DestinationLeaf}
+        $segments=@(([string]$Journal.targetRelativePath).Split('/'))
+        if($segments.Count-lt1-or@($segments|Where-Object{[string]::IsNullOrWhiteSpace($_)}).Count-gt0){throw[ArgumentException]::new('targetRelativePath is invalid')}
+        foreach($segment in $segments){[void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($segment)}
+        if(-not[StringComparer]::Ordinal.Equals($segments[-1],$targetLeaf)){throw[ArgumentException]::new('targetRelativePath leaf does not match the target leaf')}
+        $parentPath=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetVerifiedPath($ParentLease)
+        $parentRelative=[IO.Path]::GetRelativePath([string]$TransactionContext.rootPath,$parentPath).Replace('\','/')
+        if($parentRelative-eq'.'){$parentRelative=''}
+        if([IO.Path]::IsPathRooted($parentRelative)-or$parentRelative-eq'..'-or$parentRelative.StartsWith('../',[StringComparison]::Ordinal)){throw[ArgumentException]::new('ParentLease is outside the transaction root')}
+        $expectedTarget=if([string]::IsNullOrEmpty($parentRelative)){$targetLeaf}else{$parentRelative+'/'+$targetLeaf}
+        if(-not[StringComparer]::Ordinal.Equals([string]$Journal.targetRelativePath,$expectedTarget)){throw[ArgumentException]::new('targetRelativePath parent does not match ParentLease')}
+        if($null-eq$ExpectedState){throw[ArgumentException]::new('ExpectedState is required when Journal is supplied')}
+        $journalIdentity=$null;$journalState=$null
+        if($Direction-ceq'ToTransaction'){
+            if($null-ne$Journal.backupLeaf-and[StringComparer]::Ordinal.Equals([string]$Journal.backupLeaf,$DestinationLeaf)){
+                if([string]$Journal.kind-cne'swap-directory'-or-not[bool]$Journal.original.exists){throw[ArgumentException]::new('backupLeaf is incompatible with the directory operation')}
+                $journalIdentity=$Journal.original.identity;$journalState=$Journal.original
+            }elseif($null-ne$Journal.quarantineLeaf-and[StringComparer]::Ordinal.Equals([string]$Journal.quarantineLeaf,$DestinationLeaf)){
+                $journalIdentity=$Journal.applied.identity;$journalState=$Journal.applied
+            }else{throw[ArgumentException]::new('DestinationLeaf must match backupLeaf or quarantineLeaf')}
+        }else{
+            if($null-ne$Journal.stageLeaf-and[StringComparer]::Ordinal.Equals([string]$Journal.stageLeaf,$Leaf)){$journalIdentity=$Journal.applied.identity;$journalState=$Journal.applied}
+            elseif($null-ne$Journal.backupLeaf-and[StringComparer]::Ordinal.Equals([string]$Journal.backupLeaf,$Leaf)){
+                if([string]$Journal.kind-cne'swap-directory'){throw[ArgumentException]::new('backupLeaf is incompatible with create-directory')}
+                $journalIdentity=$Journal.backupIdentity;$journalState=$Journal.original
+            }else{throw[ArgumentException]::new('Leaf must match stageLeaf or backupLeaf')}
+        }
+        if(-not(Test-UnixPlatformIdentityMatch $journalIdentity $ExpectedIdentity)){throw[ArgumentException]::new('ExpectedIdentity does not match the journal identity for this rename')}
+        if(-not(Test-UnixPlatformDirectoryStateMatch $journalState $ExpectedState)){throw[ArgumentException]::new('ExpectedState does not match the journal directory state for this rename')}
+    }catch{throw(New-UnixPlatformVerificationError 'directory-publication' "Journal operation mismatch: $($_.Exception.Message)")}
+}
+
+function Move-UnixPlatformOwnedDirectory {
+    param(
+        [Parameter(Mandatory=$true)]$ParentLease,[Parameter(Mandatory=$true)][string]$Leaf,
+        [Parameter(Mandatory=$true)]$TransactionLease,[Parameter(Mandatory=$true)][string]$DestinationLeaf,
+        [Parameter(Mandatory=$true)]$ExpectedIdentity,[Parameter(Mandatory=$true)][ValidateSet('ToTransaction','FromTransaction')][string]$Direction,
+        $ExpectedState,$Journal
+    )
+    Assert-UnixPlatformHost directory-publication|Out-Null
+    $source=$null;$renamed=$false;$receipt=$null;$renameFailure=$null
+    try{
+        if($null-ne$Journal-and$null-eq$ExpectedState){throw(New-UnixPlatformVerificationError 'directory-publication' 'ExpectedState is required when Journal is supplied.')}
+        [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf);[void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($DestinationLeaf)
+        $targetLeaf=if($Direction-ceq'ToTransaction'){$Leaf}else{$DestinationLeaf}
+        [void](Assert-UnixPlatformTargetPath $ParentLease $targetLeaf 'directory-publication')
+        $transactionContext=Assert-UnixPlatformTransactionLease $ParentLease $TransactionLease 'directory-publication'
+        Assert-UnixPlatformLeasePaths $ParentLease $TransactionLease 'directory-publication'
+        Assert-UnixPlatformDirectoryJournalOperation $Journal $transactionContext $ParentLease $Leaf $DestinationLeaf $ExpectedIdentity $Direction $ExpectedState
+        $sourceParent=if($Direction-ceq'ToTransaction'){$ParentLease}else{$TransactionLease};$destinationParent=if($Direction-ceq'ToTransaction'){$TransactionLease}else{$ParentLease}
+        $source=Open-UnixPlatformMutationDirectory $sourceParent $Leaf $ExpectedIdentity 'directory-publication'
+        Assert-UnixPlatformExpectedDirectoryState $source $ExpectedState $ExpectedIdentity 'directory-publication'
+        [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::PreflightDirectoryPublication($ParentLease,$TransactionLease,$Leaf,$DestinationLeaf)
+        Invoke-UnixPlatformDirectoryFlush $ParentLease 'directory-publication' 'preflight' 'parent'
+        Invoke-UnixPlatformDirectoryFlush $TransactionLease 'directory-publication' 'preflight' 'transaction'
+        try{[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::RenameDirectoryNoReplace($source,$destinationParent,$DestinationLeaf);$renamed=$true}
+        catch{
+            $native=$_.Exception;if($native-is[Management.Automation.MethodInvocationException]-and$null-ne$native.InnerException){$native=$native.InnerException}
+            if($native-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException]-and[string]$native.CurrentState-ceq'renamed'){$renamed=$true;$renameFailure=$native}else{throw}
+        }
+        $receipt=[pscustomobject][ordered]@{capability='directory-publication';sourceLeaf=$Leaf;destinationLeaf=$DestinationLeaf;direction=$Direction;identity=(ConvertTo-UnixPlatformIdentity $source.Observation)}
+        if($null-ne$renameFailure){throw(New-UnixPlatformRecoveryError 'directory-publication' "Post-rename durability or complete-state verification failed; journal recovery is required. $($renameFailure.Message)" $receipt)}
+        try{
+            Invoke-UnixPlatformDirectoryFlush $ParentLease 'directory-publication' 'post-rename' 'parent'
+            Invoke-UnixPlatformDirectoryFlush $TransactionLease 'directory-publication' 'post-rename' 'transaction'
+            Assert-UnixPlatformLeasePaths $ParentLease $TransactionLease 'directory-publication'
+            $movedIdentity=ConvertTo-UnixPlatformIdentity ([SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::AssertIdentity($source,$source.Observation,$false))
+            if(-not(Test-UnixPlatformIdentityMatch $movedIdentity $ExpectedIdentity)){throw(New-UnixPlatformVerificationError 'directory-publication' 'The moved directory identity changed after rename.')}
+            $source.Dispose();$source=$null
+            $publishedState=Get-UnixPlatformDirectoryState $destinationParent $DestinationLeaf
+            if(-not[bool]$publishedState.exists-or-not(Test-UnixPlatformIdentityMatch $publishedState.identity $ExpectedIdentity)){throw(New-UnixPlatformVerificationError 'directory-publication' 'The destination directory identity changed after rename.')}
+            if($null-ne$ExpectedState-and-not(Test-UnixPlatformDirectoryStateMatch $publishedState $ExpectedState)){throw(New-UnixPlatformVerificationError 'directory-publication' 'The destination directory identity or complete-tree inventory differs from ExpectedState after rename.')}
+        }catch{throw(New-UnixPlatformRecoveryError 'directory-publication' "Post-rename durability or complete-state verification failed; journal recovery is required. $($_.Exception.Message)" $receipt)}
+        return $receipt
+    }catch{
+        if($renamed){
+            if($null-eq$receipt){$receipt=[pscustomobject][ordered]@{capability='directory-publication';sourceLeaf=$Leaf;destinationLeaf=$DestinationLeaf;direction=$Direction;identity=$ExpectedIdentity}}
+            if($_.Exception-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]-and$null-ne$_.Exception.Data['Receipt']){throw}
+            throw(New-UnixPlatformRecoveryError 'directory-publication' "Post-rename durability or complete-state verification failed; journal recovery is required. $($_.Exception.Message)" $receipt)
+        }
+        if($_.Exception-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]-and[string]$_.Exception.Capability-ceq'directory-publication'){throw}
+        if($_.Exception-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]){throw $_.Exception}
+        throw(New-UnixPlatformVerificationError 'directory-publication' $_.Exception.Message)
+    }finally{if($null-ne$source){$source.Dispose()}}
+}
+
+function Remove-UnixPlatformOwnedDirectoryTree {
+    [CmdletBinding(DefaultParameterSetName='TransactionRoot')]
+    param(
+        [Parameter(Mandatory=$true,ParameterSetName='TransactionRoot')]$TransactionRootLease,
+        [Parameter(Mandatory=$true,ParameterSetName='Transaction')]$TransactionLease,
+        [Parameter(Mandatory=$true)][string]$Leaf,[Parameter(Mandatory=$true)]$ExpectedIdentity
+    )
+    Assert-UnixPlatformHost owned-file-removal|Out-Null
+    $parentLease=if($PSCmdlet.ParameterSetName-ceq'TransactionRoot'){$TransactionRootLease}else{$TransactionLease};$receipt=$null
+    try{
+        [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
+        $parentPath=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetVerifiedPath($parentLease)
+        if($PSCmdlet.ParameterSetName-ceq'TransactionRoot'){
+            if([IO.Path]::GetFileName($parentPath)-cne'.ai-instructions-txn'-or$Leaf-cnotmatch'^[0-9a-f]{32}$'){throw(New-UnixPlatformVerificationError 'owned-file-removal' 'TransactionRootLease must name .ai-instructions-txn and Leaf must be a 32 lowercase hexadecimal transaction ID.')}
+        }elseif([IO.Path]::GetFileName($parentPath)-cnotmatch'^[0-9a-f]{32}$'-or[IO.Path]::GetFileName([IO.Path]::GetDirectoryName($parentPath))-cne'.ai-instructions-txn'){
+            throw(New-UnixPlatformVerificationError 'owned-file-removal' 'TransactionLease must name .ai-instructions-txn/<32 lowercase hex>.')
+        }
+        if($null-eq$ExpectedIdentity-or[string]$ExpectedIdentity.kind-cne'unix-device-inode'){throw(New-UnixPlatformVerificationError 'owned-file-removal' 'ExpectedIdentity must be a Unix device/inode identity.')}
+        $device=ConvertFrom-UnixIdentityNumber $ExpectedIdentity.device 'ExpectedIdentity.device';$inode=ConvertFrom-UnixIdentityNumber $ExpectedIdentity.fileId 'ExpectedIdentity.fileId'
+        Invoke-UnixPlatformDirectoryFlush $parentLease 'owned-directory-tree-removal' 'preflight' 'parent'
+        $removed=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::DeleteOwnedDirectoryTree($parentLease,$Leaf,$device,$inode)
+        $receipt=[pscustomobject][ordered]@{capability='owned-file-removal';removedEntryCount=[int]$removed;leaf=$Leaf}
+        try{Invoke-UnixPlatformDirectoryFlush $parentLease 'owned-directory-tree-removal' 'post-delete' 'parent'}catch{throw(New-UnixPlatformRecoveryError 'owned-file-removal' "Post-delete directory flush failed; manual recovery verification is required. $($_.Exception.Message)" $receipt)}
+        return $receipt
+    }catch{
+        if($_.Exception-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]-and[string]$_.Exception.Capability-ceq'owned-file-removal'){throw}
+        throw(New-UnixPlatformVerificationError 'owned-file-removal' $_.Exception.Message)
+    }
+}
+
+Export-ModuleMember -Function Set-UnixPlatformPermissions,Get-UnixPlatformPermissionSnapshot,Publish-UnixPlatformFile,Remove-UnixPlatformOwnedFile,Get-UnixPlatformDirectoryState,Move-UnixPlatformOwnedDirectory,Remove-UnixPlatformOwnedDirectoryTree

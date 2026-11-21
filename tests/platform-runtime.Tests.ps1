@@ -2626,9 +2626,9 @@ Describe 'Platform runtime contract' {
             }
         }
 
-        # Scenario: Linux and macOS directory adapters remain explicit P11 stubs after P7c file primitives are merged.
-        # Purpose: Keep every directory facade signature aligned, including the mandatory ExpectedIdentity cleanup guard.
-        It 'UnitT705_rejects_unimplemented_unix_directory_primitives_with_typed_failures' {
+        # Scenario: Linux and macOS directory adapters are loaded on a non-Unix host after directory publication is implemented.
+        # Purpose: Keep every directory facade signature aligned while proving the shared Unix host guard replaces the P11 stubs.
+        It 'UnitT705_routes_unix_directory_primitives_through_the_shared_host_guard' {
             foreach ($adapter in @('Linux','MacOS')) {
                 $adapterPath = Join-Path $script:RepositoryRoot "scripts/platform/$adapter.psm1"
                 Import-Module $adapterPath -Force
@@ -2641,9 +2641,9 @@ Describe 'Platform runtime contract' {
                     $directoryArguments=$directoryCase.Arguments
                     try{& $directoryCase.Command @directoryArguments|Out-Null}catch{$directoryCaught=$_}
                     $directoryCaught | Should Not BeNullOrEmpty
-                    $directoryCaught.Exception.GetType().Name | Should Be 'PlatformNotImplementedException'
+                    $directoryCaught.Exception.GetType().Name | Should Be 'PlatformCapabilityUnavailableException'
                     $directoryCaught.Exception.Capability | Should Be $directoryCase.Capability
-                    $directoryCaught.Exception.ImplementationStep | Should Be 'P11'
+                    $directoryCaught.Exception.Platform | Should Be 'windows'
                 }
                 Remove-Module $adapter -Force -ErrorAction SilentlyContinue
             }
@@ -2988,7 +2988,7 @@ Describe 'Platform runtime contract' {
     }
 
     # Scenario: The host capability receipt is queried for the directory-publication primitive.
-    # Purpose: Report Windows availability only after no-replace, identity, and same-filesystem probes; Unix remains explicitly deferred to P11.
+    # Purpose: Report native-host availability only after no-replace, identity, and same-filesystem probes.
     It 'UnitT360_reports_directory_publication_from_native_probe_evidence' {
         $receipt=Get-PlatformCapabilities -Required @()
         $capability=@($receipt.capabilities|Where-Object name -ceq 'directory-publication')
@@ -3005,8 +3005,15 @@ Describe 'Platform runtime contract' {
             $evidence.sameFileSystem|Should Match 'same volume'
         }
         else{
-            $capability[0].status|Should Be 'unavailable'
-            $capability[0].evidence[0].implementation|Should Match 'P11'
+            $capability[0].status|Should Be 'available'
+            $capability[0].evidence.Count|Should Be 1
+            $evidence=$capability[0].evidence[0]
+            (@($evidence.PSObject.Properties.Name|Sort-Object)-join ',')|Should Be 'identityPreserved,movedIdentity,noReplace,sameFileSystem,sourceIdentity'
+            $evidence.noReplace|Should Match 'rejected an existing destination'
+            $evidence.identityPreserved|Should Match 'Unix device and inode'
+            $evidence.sameFileSystem|Should Match 'same filesystem device'
+            $evidence.sourceIdentity.kind|Should Be 'unix-device-inode'
+            $evidence.movedIdentity.kind|Should Be 'unix-device-inode'
         }
     }
 
@@ -4986,6 +4993,155 @@ Describe 'Unix P7c durable publication and removal' {
             $third.Dispose();$third=$null
         } finally {foreach($lease in @($third,$cleanup,$second,$first)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose()}
     }
+
+    # Scenario: A Unix directory state is missing or contains the canonical cross-platform inventory fixture.
+    # Purpose: Bind unix-device-inode identity and the exact Windows-compatible canonical inventory digest.
+    It 'InterT865_captures_the_canonical_unix_directory_state' {
+        $parent=New-P7cDirectory 'directory-state'
+        try {
+            $missing=Get-PlatformDirectoryState -ParentLease $parent -Leaf missing
+            (@($missing.PSObject.Properties.Name)-join ',')|Should Be 'exists,identity,inventorySha256,entryCount'
+            $missing.exists|Should Be $false;$missing.identity|Should BeNullOrEmpty;$missing.inventorySha256|Should BeNullOrEmpty;$missing.entryCount|Should BeNullOrEmpty
+            $tree=Join-Path $script:P7cRoot 'directory-state/tree'
+            [void][IO.Directory]::CreateDirectory((Join-Path $tree empty));[void][IO.Directory]::CreateDirectory((Join-Path $tree nested))
+            [IO.File]::WriteAllText((Join-Path $tree 'a.txt'),'alpha',[Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText((Join-Path $tree 'nested/b.txt'),'beta',[Text.UTF8Encoding]::new($false))
+            $state=Get-PlatformDirectoryState -ParentLease $parent -Leaf tree
+            $state.exists|Should Be $true;$state.identity.kind|Should Be 'unix-device-inode'
+            $state.identity.device|Should Match '^\d+$';$state.identity.fileId|Should Match '^\d+$'
+            $state.inventorySha256|Should Be '073a27d34181673347289a2809bd43f01dce00fd7c2fadbfc1c2a39ce99af26f'
+            $state.entryCount|Should Be 4
+        } finally {$parent.Dispose()}
+    }
+
+    # Scenario: A directory leaf or one of its descendants is a symlink, FIFO, or multiply-linked regular file.
+    # Purpose: Fail closed with directory-publication evidence without following or accepting the unsafe entry.
+    It 'InterT870_rejects_unsafe_unix_directory_inventory_entries' {
+        $parent=New-P7cDirectory 'directory-unsafe'
+        try {
+            $root=Join-Path $script:P7cRoot 'directory-unsafe'
+            [void][IO.Directory]::CreateDirectory((Join-Path $root real));[void][IO.File]::CreateSymbolicLink((Join-Path $root alias),'real')
+            foreach($leaf in @('alias','symlink-tree','fifo-tree','hardlink-tree')){
+                if($leaf -ne 'alias'){[void][IO.Directory]::CreateDirectory((Join-Path $root $leaf))}
+            }
+            [IO.File]::WriteAllText((Join-Path $root 'outside.txt'),'outside')
+            [void][IO.File]::CreateSymbolicLink((Join-Path $root 'symlink-tree/link'),'../outside.txt')
+            $mkfifo=@(Get-Command mkfifo -CommandType Application -ErrorAction Stop)[0];& $mkfifo.Source (Join-Path $root 'fifo-tree/pipe');$LASTEXITCODE|Should Be 0
+            [IO.File]::WriteAllText((Join-Path $root 'hardlink-tree/file'),'linked')
+            New-Item -ItemType HardLink -Path (Join-Path $root 'hardlink-tree/alias') -Target (Join-Path $root 'hardlink-tree/file')|Out-Null
+            foreach($leaf in @('alias','symlink-tree','fifo-tree','hardlink-tree')){
+                $caught=$null;try{Get-PlatformDirectoryState -ParentLease $parent -Leaf $leaf|Out-Null}catch{$caught=Get-P7cTypedPlatformException $_.Exception}
+                $caught.GetType().Name|Should Be 'PlatformVerificationException';$caught.Capability|Should Be 'directory-publication'
+            }
+        } finally {$parent.Dispose()}
+    }
+
+    # Scenario: Unix owned directories move into an empty destination, reject an occupied destination, and round trip through the transaction.
+    # Purpose: Preserve identity and exact complete-tree state with native no-replace rename in both directions.
+    It 'InterT875_moves_unix_owned_directories_without_replacement' {
+        $parent=New-P7cDirectory 'directory-move';$txn=New-P7cTransaction
+        try {
+            $stagePath=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/stage";[void][IO.Directory]::CreateDirectory($stagePath);[IO.File]::WriteAllText((Join-Path $stagePath marker),'stable')
+            $state=Get-PlatformDirectoryState -ParentLease $txn.Lease -Leaf stage
+            [void][IO.Directory]::CreateDirectory((Join-Path $script:P7cRoot 'directory-move/occupied'))
+            $occupiedFailure=$null;try{Move-PlatformOwnedDirectory -ParentLease $parent -Leaf stage -TransactionLease $txn.Lease -DestinationLeaf occupied -ExpectedIdentity $state.identity -Direction FromTransaction -ExpectedState $state|Out-Null}catch{$occupiedFailure=Get-P7cTypedPlatformException $_.Exception}
+            $occupiedFailure.GetType().Name|Should Be 'PlatformVerificationException';$occupiedFailure.Capability|Should Be 'directory-publication'
+            Test-Path -LiteralPath $stagePath|Should Be $true;Test-Path -LiteralPath (Join-Path $script:P7cRoot 'directory-move/occupied')|Should Be $true
+            $from=Move-PlatformOwnedDirectory -ParentLease $parent -Leaf stage -TransactionLease $txn.Lease -DestinationLeaf runtime -ExpectedIdentity $state.identity -Direction FromTransaction -ExpectedState $state
+            (@($from.PSObject.Properties.Name)-join ',')|Should Be 'capability,sourceLeaf,destinationLeaf,direction,identity'
+            $from.identity.fileId|Should Be $state.identity.fileId
+            $published=Get-PlatformDirectoryState -ParentLease $parent -Leaf runtime
+            $published.inventorySha256|Should Be $state.inventorySha256;$published.entryCount|Should Be $state.entryCount;$published.identity.fileId|Should Be $state.identity.fileId
+            $to=Move-PlatformOwnedDirectory -ParentLease $parent -Leaf runtime -TransactionLease $txn.Lease -DestinationLeaf roundtrip -ExpectedIdentity $state.identity -Direction ToTransaction -ExpectedState $state
+            $to.direction|Should Be ToTransaction
+            $restored=Move-PlatformOwnedDirectory -ParentLease $parent -Leaf roundtrip -TransactionLease $txn.Lease -DestinationLeaf restored -ExpectedIdentity $state.identity -Direction FromTransaction -ExpectedState $state
+            $restored.identity.fileId|Should Be $state.identity.fileId;[IO.File]::ReadAllText((Join-Path $script:P7cRoot 'directory-move/restored/marker'))|Should Be stable
+        } finally {$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: A byte changes or an extra entry appears after the expected directory state is recorded.
+    # Purpose: Refuse both moves before rename and preserve every source and destination name.
+    It 'InterT880_rejects_unix_directory_state_drift_before_rename' {
+        $parent=New-P7cDirectory 'directory-drift';$txn=New-P7cTransaction
+        try {
+            foreach($variant in @('bytes','entry')){
+                $leaf="$variant-stage";$path=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/$leaf";[void][IO.Directory]::CreateDirectory($path);[IO.File]::WriteAllText((Join-Path $path marker),'before')
+                $state=Get-PlatformDirectoryState -ParentLease $txn.Lease -Leaf $leaf
+                if($variant -ceq 'bytes'){[IO.File]::WriteAllText((Join-Path $path marker),'after')}else{[IO.File]::WriteAllText((Join-Path $path extra),'extra')}
+                {Move-PlatformOwnedDirectory -ParentLease $parent -Leaf $leaf -TransactionLease $txn.Lease -DestinationLeaf "$variant-runtime" -ExpectedIdentity $state.identity -Direction FromTransaction -ExpectedState $state}|Should Throw 'complete-tree'
+                Test-Path -LiteralPath $path|Should Be $true;Test-Path -LiteralPath (Join-Path $script:P7cRoot "directory-drift/$variant-runtime")|Should Be $false
+            }
+        } finally {$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: Failure injection fires after a successful Unix directory rename and before adapter post-rename durability readback.
+    # Purpose: Return recovery-required directory-publication evidence carrying the completed rename receipt.
+    It 'InterT885_returns_a_receipt_for_unix_post_rename_failure' {
+        $parent=New-P7cDirectory 'directory-recovery';$txn=New-P7cTransaction;$field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static');$caught=$null
+        try {
+            $path=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/stage";[void][IO.Directory]::CreateDirectory($path);[IO.File]::WriteAllText((Join-Path $path marker),'stable')
+            $state=Get-PlatformDirectoryState -ParentLease $txn.Lease -Leaf stage;$hookState=@{Renamed=$false}
+            $hook={param($point)if($point-ceq'directory-publication-after-rename'){$hookState.Renamed=$true}elseif($hookState.Renamed-and$point-ceq'directory-flush-before-fsync'){throw [IO.IOException]::new('injected post-rename failure')}}.GetNewClosure()
+            $field.SetValue($null,[Action[string]]$hook)
+            try{Move-PlatformOwnedDirectory -ParentLease $parent -Leaf stage -TransactionLease $txn.Lease -DestinationLeaf runtime -ExpectedIdentity $state.identity -Direction FromTransaction -ExpectedState $state|Out-Null}catch{$caught=Get-P7cTypedPlatformException $_.Exception}
+            $hookState.Renamed|Should Be $true;$caught.GetType().Name|Should Be 'PlatformVerificationException';$caught.Capability|Should Be 'directory-publication'
+            $receipt=$caught.Data['Receipt'];$receipt.destinationLeaf|Should Be runtime;$receipt.identity.fileId|Should Be $state.identity.fileId
+            Test-Path -LiteralPath $path|Should Be $false;Test-Path -LiteralPath (Join-Path $script:P7cRoot 'directory-recovery/runtime')|Should Be $true
+        } finally {$field.SetValue($null,$null);$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: Owned-tree cleanup receives invalid boundaries or removes a nested transaction tree containing an outward symlink.
+    # Purpose: Reject authority mismatches before mutation, then unlink only the owned tree while preserving the outside target.
+    It 'InterT890_enforces_unix_owned_tree_boundaries_and_unlinks_symlinks_without_traversal' {
+        $rootLease=Open-PlatformDirectory -Root $script:P7cRoot -RelativePath '.ai-instructions-txn';$txn=New-P7cTransaction;$ordinary=New-P7cDirectory 'ordinary-root'
+        try {
+            $outside=Join-Path $script:P7cRoot 'outside-sentinel';[IO.File]::WriteAllText($outside,'sentinel')
+            $backup=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/backup";$nested=Join-Path $backup nested;[void][IO.Directory]::CreateDirectory($nested);[IO.File]::WriteAllText((Join-Path $nested data),'data')
+            $state=Get-PlatformDirectoryState -ParentLease $txn.Lease -Leaf backup
+            [void][IO.File]::CreateSymbolicLink((Join-Path $backup outside),$outside)
+            $ordinaryId=[Guid]::NewGuid().ToString('N');$ordinaryPath=Join-Path $script:P7cRoot "ordinary-root/$ordinaryId";[void][IO.Directory]::CreateDirectory($ordinaryPath);$ordinaryState=Get-PlatformDirectoryState -ParentLease $ordinary -Leaf $ordinaryId
+            foreach($action in @(
+                {Remove-PlatformOwnedDirectoryTree -TransactionRootLease $ordinary -Leaf $ordinaryId -ExpectedIdentity $ordinaryState.identity|Out-Null},
+                {Remove-PlatformOwnedDirectoryTree -TransactionRootLease $rootLease -Leaf not-hex -ExpectedIdentity $state.identity|Out-Null},
+                {Remove-PlatformOwnedDirectoryTree -TransactionLease $txn.Lease -Leaf backup -ExpectedIdentity ([pscustomobject]@{kind='windows-file-id';device='0x1';fileId='0x1'})|Out-Null},
+                {Remove-PlatformOwnedDirectoryTree -TransactionLease $txn.Lease -Leaf backup -ExpectedIdentity ([pscustomobject]@{kind='unix-device-inode';device=$state.identity.device;fileId=([uint64]$state.identity.fileId+1).ToString()})|Out-Null}
+            )){ {&$action}|Should Throw;Test-Path -LiteralPath $backup|Should Be $true }
+            $receipt=Remove-PlatformOwnedDirectoryTree -TransactionLease $txn.Lease -Leaf backup -ExpectedIdentity $state.identity
+            $receipt.capability|Should Be 'owned-file-removal';$receipt.removedEntryCount|Should Be 4
+            Test-Path -LiteralPath $backup|Should Be $false;[IO.File]::ReadAllText($outside)|Should Be sentinel
+        } finally {$ordinary.Dispose();$txn.Lease.Dispose();$rootLease.Dispose()}
+    }
+
+    # Scenario: The directory-publication probe runs on a Unix host with native no-replace rename and owned-tree cleanup.
+    # Purpose: Make directory-publication available only from live Unix identity and filesystem evidence.
+    It 'InterT895_reports_unix_directory_publication_from_live_probe_evidence' {
+        $probe=& (Get-Module platform-runtime) {Test-PlatformDirectoryPublication}
+        $probe.status|Should Be available;$probe.evidence.sourceIdentity.kind|Should Be 'unix-device-inode';$probe.evidence.movedIdentity.kind|Should Be 'unix-device-inode'
+        $receipt=Get-PlatformCapabilities -Required @('directory-publication')
+        ($receipt.capabilities|Where-Object name -ceq 'directory-publication').status|Should Be available
+    }
+
+    # Scenario: A create-directory journal binds its stage identity and complete state to a Unix directory rename.
+    # Purpose: Accept the exact durable operation and reject a mismatched journal before moving either name.
+    It 'InterT897_binds_unix_directory_renames_to_the_exact_journal_operation' {
+        $parent=New-P7cDirectory 'directory-journal';$txn=New-P7cTransaction
+        try {
+            foreach($variant in @('valid','mismatch')){
+                $leaf="$variant-stage";$path=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/$leaf";[void][IO.Directory]::CreateDirectory($path);[IO.File]::WriteAllText((Join-Path $path marker),$variant)
+                $state=Get-PlatformDirectoryState -ParentLease $txn.Lease -Leaf $leaf
+                $applied=[pscustomobject][ordered]@{exists=$true;identity=$state.identity;inventorySha256=$state.inventorySha256;entryCount=$state.entryCount}
+                if($variant-ceq'mismatch'){$applied.identity=[pscustomobject][ordered]@{kind='unix-device-inode';device=$state.identity.device;fileId=([uint64]$state.identity.fileId+1).ToString()}}
+                $journal=[pscustomobject][ordered]@{sequence=1;kind='create-directory';method='stage-rename';targetRelativePath="directory-journal/$variant-runtime";stageLeaf=$leaf;backupLeaf=$null;quarantineLeaf='unused.quarantine';original=[pscustomobject][ordered]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null};backupIdentity=$null;applied=$applied;permissions=$null;state='pending'}
+                if($variant-ceq'valid'){
+                    Move-PlatformOwnedDirectory -ParentLease $parent -Leaf $leaf -TransactionLease $txn.Lease -DestinationLeaf "$variant-runtime" -ExpectedIdentity $state.identity -Direction FromTransaction -ExpectedState $state -Journal $journal|Out-Null
+                    Test-Path -LiteralPath (Join-Path $script:P7cRoot 'directory-journal/valid-runtime')|Should Be $true
+                }else{
+                    {Move-PlatformOwnedDirectory -ParentLease $parent -Leaf $leaf -TransactionLease $txn.Lease -DestinationLeaf "$variant-runtime" -ExpectedIdentity $state.identity -Direction FromTransaction -ExpectedState $state -Journal $journal}|Should Throw 'Journal operation mismatch'
+                    Test-Path -LiteralPath $path|Should Be $true;Test-Path -LiteralPath (Join-Path $script:P7cRoot 'directory-journal/mismatch-runtime')|Should Be $false
+                }
+            }
+        } finally {$txn.Lease.Dispose();$parent.Dispose()}
+    }
     }
 }
 
@@ -6874,6 +7030,18 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $receipt.permissionsDrift.afterSddl|Should Be $changedSddl
         }finally{Set-P7WindowsPostRenamePermissionReadbackHook $null;Close-P7Fixture $f @($stage.Lease,$target.Lease)}
     }
+
+    # Scenario: Windows captures the same canonical directory fixture used by the Unix directory-state regression.
+    # Purpose: Lock the cross-platform entry encoding, ordinal ordering, and SHA-256 golden value on both implementations.
+    It 'InterT900_matches_the_cross_platform_directory_inventory_golden' {
+        $f=New-P7Fixture 'p7d3-directory-golden'
+        try {
+            $tree=Join-Path $f.Root 'target/tree';[void][IO.Directory]::CreateDirectory((Join-Path $tree empty));[void][IO.Directory]::CreateDirectory((Join-Path $tree nested))
+            [IO.File]::WriteAllText((Join-Path $tree 'a.txt'),'alpha',[Text.UTF8Encoding]::new($false));[IO.File]::WriteAllText((Join-Path $tree 'nested/b.txt'),'beta',[Text.UTF8Encoding]::new($false))
+            $state=Get-PlatformDirectoryState -ParentLease $f.Parent -Leaf tree
+            $state.inventorySha256|Should Be '073a27d34181673347289a2809bd43f01dce00fd7c2fadbfc1c2a39ce99af26f';$state.entryCount|Should Be 4
+        } finally {Close-P7Fixture $f}
+    }
     }
 }
 
@@ -6913,8 +7081,8 @@ Describe 'Platform probe cleanup evidence' {
         }
     }
 
-    # Register only on the native host because the directory-publication probe is intentionally unavailable on Unix.
-    if ($IsWindows) {
+    # Register only on a supported native host because directory publication now probes Windows, Linux, and macOS.
+    if ($IsWindows -or $IsLinux -or $IsMacOS) {
         # Scenario: Native directory publication succeeds but exact probe cleanup reports a failure.
         # Purpose: Refuse capability availability when the probe cannot prove that its owned residue was removed.
         It 'UnitT30_marks_directory_publication_unavailable_when_probe_cleanup_fails' {

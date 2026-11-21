@@ -416,11 +416,16 @@ function Test-PlatformPrimitives {
     return [pscustomobject]@{ status=$status; evidence=[pscustomobject]$evidence }
 }
 
+function ConvertTo-PlatformDirectoryIdentity {
+    param([Parameter(Mandatory=$true)]$Observation,[Parameter(Mandatory=$true)][string]$Platform)
+    if($Platform-ceq'windows'){
+        return [pscustomobject][ordered]@{kind='windows-file-id';device=('0x{0:x}'-f[uint64]$Observation.Device);fileId=('0x{0:x}'-f[uint64]$Observation.Inode)}
+    }
+    [pscustomobject][ordered]@{kind='unix-device-inode';device=([uint64]$Observation.Device).ToString([Globalization.CultureInfo]::InvariantCulture);fileId=([uint64]$Observation.Inode).ToString([Globalization.CultureInfo]::InvariantCulture)}
+}
+
 function Test-PlatformDirectoryPublication {
     $platform=Get-CurrentPlatformName
-    if($platform -cne 'windows'){
-        return [pscustomobject]@{status='unavailable';evidence=[pscustomobject][ordered]@{implementation='P11 directory publication is not implemented on this platform.'}}
-    }
     $status='unavailable'
     $evidence=[ordered]@{
         noReplace='not verified'
@@ -443,10 +448,10 @@ function Test-PlatformDirectoryPublication {
         $occupiedLease=Open-PlatformDirectory -Root $path -RelativePath 'target/occupied'
         $transactionRootLease=Open-PlatformDirectory -Root $path -RelativePath '.ai-instructions-txn'
         $transactionLease=Open-PlatformDirectory -Root $path -RelativePath ".ai-instructions-txn/$transactionId"
-        $transactionIdentity=[pscustomobject][ordered]@{kind='windows-file-id';device=('0x{0:x}' -f [uint64]$transactionLease.Observation.Device);fileId=('0x{0:x}' -f [uint64]$transactionLease.Observation.Inode)}
+        $transactionIdentity=ConvertTo-PlatformDirectoryIdentity $transactionLease.Observation $platform
         $stageLease=Open-PlatformDirectory -Root $path -RelativePath ".ai-instructions-txn/$transactionId/stage"
-        $sourceIdentity=[pscustomobject][ordered]@{kind='windows-file-id';device=('0x{0:x}' -f [uint64]$stageLease.Observation.Device);fileId=('0x{0:x}' -f [uint64]$stageLease.Observation.Inode)}
-        $evidence.sameFileSystem=if([uint64]$stageLease.Observation.Device -eq [uint64]$parentLease.Observation.Device){'Source and destination directory leases reported the same volume serial.'}else{throw 'Source and destination are not on the same filesystem.'}
+        $sourceIdentity=ConvertTo-PlatformDirectoryIdentity $stageLease.Observation $platform
+        $evidence.sameFileSystem=if([uint64]$stageLease.Observation.Device -eq [uint64]$parentLease.Observation.Device){if($platform-ceq'windows'){'Source and destination directory leases reported the same volume serial.'}else{'Source and destination directory leases reported the same filesystem device.'}}else{throw 'Source and destination are not on the same filesystem.'}
         $stageLease.Dispose();$stageLease=$null
         $rejected=$false
         try{Move-PlatformOwnedDirectory -ParentLease $parentLease -Leaf 'stage' -TransactionLease $transactionLease -DestinationLeaf 'occupied' -ExpectedIdentity $sourceIdentity -Direction FromTransaction|Out-Null}
@@ -455,9 +460,10 @@ function Test-PlatformDirectoryPublication {
         $evidence.noReplace='Native no-replace directory rename rejected an existing destination and preserved both names.'
         $receipt=Move-PlatformOwnedDirectory -ParentLease $parentLease -Leaf 'stage' -TransactionLease $transactionLease -DestinationLeaf 'published' -ExpectedIdentity $sourceIdentity -Direction FromTransaction
         $movedLease=Open-PlatformDirectory -Root $path -RelativePath 'target/published'
-        $movedIdentity=[pscustomobject][ordered]@{kind='windows-file-id';device=('0x{0:x}' -f [uint64]$movedLease.Observation.Device);fileId=('0x{0:x}' -f [uint64]$movedLease.Observation.Inode)}
+        $movedIdentity=ConvertTo-PlatformDirectoryIdentity $movedLease.Observation $platform
         if([string]$receipt.identity.device -cne [string]$sourceIdentity.device -or [string]$receipt.identity.fileId -cne [string]$sourceIdentity.fileId -or [string]$movedIdentity.fileId -cne [string]$sourceIdentity.fileId){throw 'Directory identity was not preserved by rename.'}
-        $evidence.identityPreserved='Handle and path readback retained the original Windows file ID.'
+        $evidence.identityPreserved=if($platform-ceq'windows'){'Handle and path readback retained the original Windows file ID.'}else{'Descriptor and path readback retained the original Unix device and inode.'}
+        if($platform-cne'windows'){$evidence['sourceIdentity']=$sourceIdentity;$evidence['movedIdentity']=$movedIdentity}
         $status='available'
     }
     catch{$evidence['failure']=$_.Exception.Message}
