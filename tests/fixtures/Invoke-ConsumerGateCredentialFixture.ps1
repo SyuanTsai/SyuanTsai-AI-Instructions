@@ -35,7 +35,6 @@ foreach($directory in @(
 foreach($path in @(
         'consumer/bootstrap/Invoke-PinnedAuthority.ps1','consumer/workflows/consumer-gate.yml',
         'consumer/workflows/consumer-gate-transition.yml','scripts/consumer/ConsumerGate.psm1',
-        'scripts/consumer/Invoke-GateGitByteCapture.ps1',
         'scripts/consumer/ConsumerManifestClosure.psm1',
         'scripts/consumer/Invoke-ConsumerSourceGate.ps1','scripts/consumer/Invoke-ConsumerValidationChild.ps1',
         'scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1','scripts/Invoke-StandardValidation.ps1',

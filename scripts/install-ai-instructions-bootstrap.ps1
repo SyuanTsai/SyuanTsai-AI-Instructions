@@ -516,7 +516,7 @@ function Select-InstallerLicenseDeliveryDocumentPaths {
 function Assert-InstallerPlatformRuntimeSourceInventory {
     param([Parameter(Mandatory = $true)][string] $RuntimeRoot)
     $manifestPath = Join-Path $RuntimeRoot 'platform-runtime.psd1'
-    $expectedManifestSha256 = '24f018876b6e00bac6904e101fb979b81c90bf79cc1a8d2fcd8c1070f3984511'
+    $expectedManifestSha256 = 'ba0ab20876904593b7956422dd914ff5cda09023db62c00db03144c9d0e1cfdf'
     if ((Get-InstallerCanonicalTextSha256 -Path $manifestPath) -cne $expectedManifestSha256) { throw 'Platform runtime manifest differs from the installer trust anchor.' }
     $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath
     if ($null -eq $manifest.PrivateData -or $null -eq $manifest.PrivateData.PlatformRuntime -or

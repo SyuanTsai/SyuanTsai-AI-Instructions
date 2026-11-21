@@ -495,7 +495,6 @@ exit 0
                 'consumer/bootstrap/Invoke-PinnedAuthority.ps1','consumer/workflows/consumer-gate.yml',
                 'consumer/workflows/consumer-gate-transition.yml','scripts/consumer/ConsumerGate.psm1',
                 'scripts/consumer/ConsumerBootstrapSupervisor.psm1',
-                'scripts/consumer/Invoke-GateGitByteCapture.ps1',
                 'scripts/consumer/ConsumerManifestClosure.psm1','scripts/consumer/Invoke-ConsumerSourceGate.ps1',
                 'scripts/consumer/Invoke-ConsumerValidationChild.ps1','scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1',
                 'scripts/Validate-UpstreamAdapter.ps1','docs/standards/upstream-adapter.json',
@@ -511,7 +510,7 @@ exit 0
         Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'tests/fixtures/consumer-gate-validation-runner-fixture.ps1') `
             -Destination (Join-Path $source 'scripts/Invoke-StandardValidation.ps1')
         foreach($productionPath in @('consumer/bootstrap/Invoke-PinnedAuthority.ps1','scripts/consumer/ConsumerGate.psm1',
-                'scripts/consumer/ConsumerBootstrapSupervisor.psm1','scripts/consumer/Invoke-GateGitByteCapture.ps1',
+                'scripts/consumer/ConsumerBootstrapSupervisor.psm1',
                 'scripts/consumer/Invoke-ConsumerSourceGate.ps1')){
             (Get-FileHash -LiteralPath (Join-Path $source $productionPath) -Algorithm SHA256).Hash|Should Be `
                 (Get-FileHash -LiteralPath (Join-Path $script:RepositoryRoot $productionPath) -Algorithm SHA256).Hash

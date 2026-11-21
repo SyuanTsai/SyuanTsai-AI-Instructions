@@ -709,27 +709,23 @@ function Invoke-GateOwnedGitCapture([string]$Root,[string[]]$Arguments,[switch]$
     $id=[guid]::NewGuid().ToString('N')
     $stdoutPath=Join-Path $script:GateGitCaptureRoot "$id.stdout"
     $stderrPath=Join-Path $script:GateGitCaptureRoot "$id.stderr"
-    $bytePath=if($ByteExact){Join-Path $script:GateGitCaptureRoot "$id.bytes"}else{$null}
     $workingDirectory=$null;$lease=$null;$stopwatch=[Diagnostics.Stopwatch]::StartNew()
     try{
+        foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){
+            if($environment.ContainsKey($name)){Throw-GateResult INVALID 'Git child environment contains a credential alias.'}
+        }
         $physicalRoot=& $script:GatePlatformRuntimeModule.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path $Root
         $workingDirectory=& $script:GatePlatformRuntimeModule.ExportedCommands['Open-PlatformDirectory'] -Root $physicalRoot -RootOnly
         $deadline=[DateTimeOffset]::UtcNow.AddMilliseconds($limit)
-        $executable=$git;$ownedArguments=[string[]]@($Arguments)
+        $ownedArguments=[string[]]@($Arguments)
         for($index=0;$index-lt$ownedArguments.Count-1;$index++){
             if($ownedArguments[$index]-ceq'-C' -and $ownedArguments[$index+1]-ceq$Root){$ownedArguments[$index+1]=$physicalRoot}
         }
-        if($ByteExact){
-            $executable=& $script:GatePlatformRuntimeModule.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path (Get-Process -Id $PID).Path
-            $helper=& $script:GatePlatformRuntimeModule.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path `
-                (Join-Path $PSScriptRoot 'Invoke-GateGitByteCapture.ps1')
-            $payload=[Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes(($ownedArguments|ConvertTo-Json -Compress)))
-            $ownedArguments=@('-NoProfile','-NonInteractive','-File',$helper,
-                '-GitPath',$git,'-OutputPath',$bytePath,'-GitArgumentsBase64',$payload)
-        }
-        $lease=& $script:GatePlatformRuntimeModule.ExportedCommands['Start-PlatformOwnedProcess'] -ExecutablePath $executable `
+        $startParameters=@{}
+        if($ByteExact){$startParameters.CaptureProfile='raw-stdout'}
+        $lease=& $script:GatePlatformRuntimeModule.ExportedCommands['Start-PlatformOwnedProcess'] @startParameters -ExecutablePath $git `
             -ArgumentList $ownedArguments -Environment $environment -WorkingDirectoryLease $workingDirectory -Deadline $deadline `
-            -StdoutPath $stdoutPath -StderrPath $stderrPath -OutputLimitCharacters 1048576 -ArgumentZero $executable
+            -StdoutPath $stdoutPath -StderrPath $stderrPath -OutputLimitCharacters 1048576 -ArgumentZero $git
         while(-not($lease.HasExited-and$lease.CaptureCompletedNaturally)-and$null-eq$lease.Cleanup-and[DateTimeOffset]::UtcNow-lt$deadline){
             Start-Sleep -Milliseconds 10
         }
@@ -740,8 +736,11 @@ function Invoke-GateOwnedGitCapture([string]$Root,[string[]]$Arguments,[switch]$
             -ExpectedStartIdentity $lease.StartIdentity}catch{Throw-GateResult FAILED "Git owned-process cleanup failed: $($_.Exception.Message)"}
         if(-not$cleanup.CleanedUp){Throw-GateResult FAILED "Git owned-process cleanup is unconfirmed: $($cleanup.Uncertainty)"}
         if($timedOut){Throw-GateResult FAILED "Git command exceeded its bounded deadline of $([Math]::Ceiling($limit/1000)) seconds."}
-        if($lease.OutputLimitExceeded){Throw-GateResult FAILED 'Git owned-process output exceeded the 1,048,576-character stream limit.'};if($reason-notin@($null,'')){Throw-GateResult FAILED "Git owned-process capture failed: $reason"}
-        $resultPath=if($ByteExact){$bytePath}else{$stdoutPath}
+        if($lease.OutputLimitExceeded){
+            if($lease.OutputLimitStream-ceq'stdout'){Throw-GateResult FAILED 'Git byte output exceeds the supported 2 GiB capture bound.'}
+            Throw-GateResult FAILED 'Git owned-process stderr exceeded the 1,048,576-character limit.'
+        };if($reason-notin@($null,'')){Throw-GateResult FAILED "Git owned-process capture failed: $reason"}
+        $resultPath=$stdoutPath
         if(-not[IO.File]::Exists($resultPath)){Throw-GateResult FAILED 'Git owned-process output capture is missing.'}
         if(([IO.FileInfo]::new($resultPath)).Length-gt[int]::MaxValue){Throw-GateResult FAILED 'Git byte output exceeds the supported 2 GiB read bound.'};if($lease.ExitCode-isnot[int]-and$lease.ExitCode-isnot[long]){Throw-GateResult FAILED 'git exit status is unknown.'}
         [pscustomobject]@{ExitCode=$lease.ExitCode
@@ -754,7 +753,7 @@ function Invoke-GateOwnedGitCapture([string]$Root,[string[]]$Arguments,[switch]$
         if($null-ne$lease){$lease.Dispose()}
         if($null-ne$workingDirectory){$workingDirectory.Dispose()}
         $environment.Clear()
-        foreach($path in @($stdoutPath,$stderrPath,$bytePath)){if(-not[string]::IsNullOrWhiteSpace($path)-and[IO.File]::Exists($path)){[IO.File]::Delete($path)}}
+        foreach($path in @($stdoutPath,$stderrPath)){if(-not[string]::IsNullOrWhiteSpace($path)-and[IO.File]::Exists($path)){[IO.File]::Delete($path)}}
     }
 }
 

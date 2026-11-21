@@ -752,14 +752,15 @@ function Start-PlatformOwnedProcess {
         [ValidateSet('cooperative','strong')][string] $IsolationRequirement = 'cooperative',
         [Parameter(Mandatory=$true)][string] $StdoutPath,
         [Parameter(Mandatory=$true)][string] $StderrPath,
-        # Legacy spelling remains an alias; quotas are UTF-8 decoded characters per stream.
+        # Legacy spelling remains an alias. Standard applies this UTF-8 decoded-character
+        # quota to both streams; raw-stdout applies it only to stderr and fixes stdout at 2 GiB.
         [Alias('OutputLimitBytes')][ValidateRange(1,1048576)][long] $OutputLimitCharacters = 1048576,
         # Unix invocation name only; Windows validates it but keeps its launch semantics.
         [string] $ArgumentZero,
         [ValidateNotNull()][AllowEmptyCollection()][byte[]] $StandardInputBytes,
         # Preserve the bridge's existing asymmetric quotas without changing the
         # standard capture parameter's default or maximum.
-        [ValidateSet('standard','semantic-bridge')][string] $CaptureProfile = 'standard'
+        [ValidateSet('standard','semantic-bridge','raw-stdout')][string] $CaptureProfile = 'standard'
     )
     $platform = Get-CurrentPlatformName
     if ($PSBoundParameters.ContainsKey('StandardInputBytes') -and $StandardInputBytes.Length -gt 16777216) {
@@ -825,6 +826,9 @@ function Start-PlatformCapturedProcess {
     param($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes,$ArgumentZero=$null,[byte[]]$StandardInputBytes,$CaptureProfile='standard')
     if ($PSBoundParameters.ContainsKey('StandardInputBytes')) {
         return [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]::Start($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes,$ArgumentZero,$StandardInputBytes,$CaptureProfile)
+    }
+    if ($CaptureProfile -eq 'raw-stdout') {
+        return [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]::Start($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes,$ArgumentZero,$null,$CaptureProfile)
     }
     if ($CaptureProfile -ne 'standard') { throw [ArgumentException]::new('The semantic-bridge capture profile requires explicit StandardInputBytes.') }
     if ($PSBoundParameters.ContainsKey('ArgumentZero') -and $null -ne $ArgumentZero) {

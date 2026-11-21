@@ -71,8 +71,7 @@ function Initialize-ClosureGitCapture {
 
     $authority = [IO.Path]::GetFullPath($AuthorityRoot)
     $manifest = Join-Path $authority 'scripts/platform-runtime.psd1'
-    $helper = Join-Path $authority 'scripts/consumer/Invoke-GateGitByteCapture.ps1'
-    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf) -or -not (Test-Path -LiteralPath $helper -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
         throw 'Manifest closure owned-process authority is incomplete.'
     }
     $script:ClosureGitRuntime = Import-Module $manifest -Force -PassThru -ErrorAction Stop
@@ -127,26 +126,21 @@ function Invoke-ClosureOwnedGitBytes {
     $id = [guid]::NewGuid().ToString('N')
     $stdoutPath = Join-Path $script:ClosureGitCaptureRoot "$id.stdout"
     $stderrPath = Join-Path $script:ClosureGitCaptureRoot "$id.stderr"
-    $bytePath = Join-Path $script:ClosureGitCaptureRoot "$id.bytes"
     $workingDirectory = $null
     $lease = $null
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
     try {
+        foreach ($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')) {
+            if ($environment.ContainsKey($name)) { throw 'Manifest closure Git child environment contains a credential alias.' }
+        }
         $physicalRepositoryRoot = & $script:ClosureGitRuntime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path $RepositoryRoot
         $workingDirectory = & $script:ClosureGitRuntime.ExportedCommands['Open-PlatformDirectory'] -Root $physicalRepositoryRoot -RootOnly
         $isolatedArguments = @('-c', "core.hooksPath=$script:ClosureGitHooksPath", '-c', 'protocol.file.allow=never',
             '-c', 'credential.helper=', '-C', $physicalRepositoryRoot) + $Arguments
-        $payload = [Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes(($isolatedArguments | ConvertTo-Json -Compress)))
-        $executable = & $script:ClosureGitRuntime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path (Get-Process -Id $PID).Path
-        $helper = & $script:ClosureGitRuntime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path `
-            (Join-Path $script:ClosureAuthorityRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1')
-        $ownedArguments = @('-NoProfile','-NonInteractive','-File',
-            $helper,
-            '-GitPath',$git,'-OutputPath',$bytePath,'-GitArgumentsBase64',$payload)
         $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds($limit)
-        $lease = & $script:ClosureGitRuntime.ExportedCommands['Start-PlatformOwnedProcess'] -ExecutablePath $executable `
-            -ArgumentList $ownedArguments -Environment $environment -WorkingDirectoryLease $workingDirectory -Deadline $deadline `
-            -StdoutPath $stdoutPath -StderrPath $stderrPath -OutputLimitCharacters 1048576 -ArgumentZero $executable
+        $lease = & $script:ClosureGitRuntime.ExportedCommands['Start-PlatformOwnedProcess'] -ExecutablePath $git `
+            -ArgumentList $isolatedArguments -Environment $environment -WorkingDirectoryLease $workingDirectory -Deadline $deadline `
+            -StdoutPath $stdoutPath -StderrPath $stderrPath -OutputLimitCharacters 1048576 -ArgumentZero $git -CaptureProfile raw-stdout
         while (-not ($lease.HasExited -and $lease.CaptureCompletedNaturally) -and $null -eq $lease.Cleanup -and
             [DateTimeOffset]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 10 }
         $timedOut = [DateTimeOffset]::UtcNow -ge $deadline -or $lease.TerminationReason -ceq 'deadline'
@@ -158,14 +152,17 @@ function Invoke-ClosureOwnedGitBytes {
         } catch { throw "Manifest closure Git cleanup failed: $($_.Exception.Message)" }
         if (-not $cleanup.CleanedUp) { throw "Manifest closure Git cleanup is unconfirmed: $($cleanup.Uncertainty)" }
         if ($timedOut) { throw "Manifest closure Git command exceeded its bounded deadline of $([Math]::Ceiling($limit / 1000)) seconds." }
-        if ($lease.OutputLimitExceeded) { throw 'Manifest closure Git stderr exceeded the 1,048,576-character limit.' }
+        if ($lease.OutputLimitExceeded) {
+            if ($lease.OutputLimitStream -ceq 'stdout') { throw 'Manifest closure Git byte output exceeds the supported 2 GiB capture bound.' }
+            throw 'Manifest closure Git stderr exceeded the 1,048,576-character limit.'
+        }
         if ($reason -notin @($null, '')) { throw "Manifest closure Git capture failed: $reason" }
-        if (-not [IO.File]::Exists($bytePath)) { throw 'Manifest closure Git byte capture is missing.' }
-        if (([IO.FileInfo]::new($bytePath)).Length -gt [int]::MaxValue) { throw 'Manifest closure Git byte output exceeds the supported 2 GiB read bound.' }
+        if (-not [IO.File]::Exists($stdoutPath)) { throw 'Manifest closure Git byte capture is missing.' }
+        if (([IO.FileInfo]::new($stdoutPath)).Length -gt [int]::MaxValue) { throw 'Manifest closure Git byte output exceeds the supported 2 GiB read bound.' }
         if ($lease.ExitCode -isnot [int] -and $lease.ExitCode -isnot [long]) { throw 'git exit status is unknown.' }
         [pscustomobject]@{
             ExitCode = $lease.ExitCode
-            Bytes = [IO.File]::ReadAllBytes($bytePath)
+            Bytes = [IO.File]::ReadAllBytes($stdoutPath)
             Error = [Text.UTF8Encoding]::new($false, $true).GetString([IO.File]::ReadAllBytes($stderrPath))
         }
     } finally {
@@ -174,7 +171,7 @@ function Invoke-ClosureOwnedGitBytes {
         if ($null -ne $lease) { $lease.Dispose() }
         if ($null -ne $workingDirectory) { $workingDirectory.Dispose() }
         $environment.Clear()
-        foreach ($path in @($stdoutPath,$stderrPath,$bytePath)) { if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } }
+        foreach ($path in @($stdoutPath,$stderrPath)) { if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } }
     }
 }
 
