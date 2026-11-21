@@ -166,8 +166,13 @@ function Invoke-TestRuntimeV3OrdinalChild {
 
     $outputPath = Join-Path $TestDrive ('runtime-v3-ordinal-stdout-' + [Guid]::NewGuid().ToString('N') + '.txt')
     $errorPath = Join-Path $TestDrive ('runtime-v3-ordinal-stderr-' + [Guid]::NewGuid().ToString('N') + '.txt')
+    $arguments = @('-NoProfile','-NonInteractive')
+    if ([IO.Path]::GetFileNameWithoutExtension($Executable) -ieq 'powershell') {
+        $arguments += @('-ExecutionPolicy','Bypass')
+    }
+    $arguments += @('-File',$ScriptPath,$ModulePath,$InventoryPath)
     $process = Start-Process -FilePath $Executable `
-        -ArgumentList @('-NoProfile','-NonInteractive','-File',$ScriptPath,$ModulePath,$InventoryPath) `
+        -ArgumentList $arguments `
         -PassThru -Wait -NoNewWindow -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath
     return [pscustomobject]@{
         ExitCode = $process.ExitCode
@@ -1050,7 +1055,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
 
             (Get-RuntimeContractError { Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $bundle.inventory }) |
                 Should Match 'control character'
-            (Test-Json -Json ($bundle | ConvertTo-Json -Depth 20) -SchemaFile $schemaPath) | Should Be $false
+            (Test-Json -Json ($bundle | ConvertTo-Json -Depth 20) -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
             (Get-RuntimeContractError {
                 Assert-AiInstructionsRuntimeBundleV3 -Bundle $bundle -Configuration $configuration -RuntimeRoot $fixture.Root
             }) | Should Match 'control character'

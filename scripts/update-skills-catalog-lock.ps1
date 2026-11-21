@@ -3,6 +3,7 @@ param(
     [string] $CatalogPath,
     [string] $SourcePinsPath,
     [string] $OutputPath,
+    [string] $BaseLockPath,
     [hashtable] $SourceArchivePaths = @{},
     [switch] $Check
 )
@@ -42,10 +43,143 @@ function Write-Utf8NoBom {
     [System.IO.File]::WriteAllText($fullPath,$Content,(New-Object System.Text.UTF8Encoding($false)))
 }
 
+function New-ProjectionLockFromExistingLock {
+    param(
+        [Parameter(Mandatory = $true)][object] $Catalog,
+        [Parameter(Mandatory = $true)][object] $Pins,
+        [Parameter(Mandatory = $true)][string] $ExistingLockPath
+    )
+
+    if (-not (Test-Path -LiteralPath $ExistingLockPath -PathType Leaf)) {
+        throw "Skills Catalog base Lock does not exist: $ExistingLockPath"
+    }
+    try { $existingLock = Get-Content -Raw -Encoding UTF8 -LiteralPath $ExistingLockPath | ConvertFrom-Json }
+    catch { throw "Skills Catalog base Lock is not valid JSON: $ExistingLockPath" }
+    if ($existingLock.schemaVersion -isnot [int] -and $existingLock.schemaVersion -isnot [long]) {
+        throw 'Skills Catalog base Lock schemaVersion must be an integer.'
+    }
+    if ([int64]$existingLock.schemaVersion -notin @(2,3)) {
+        throw 'Skills Catalog v3 conversion accepts only an existing v2 or v3 Lock.'
+    }
+    if ([string]$existingLock.catalogId -cne [string]$Catalog.catalogId) {
+        throw 'Skills Catalog base Lock catalogId does not match the Catalog.'
+    }
+
+    $pinsById = @{}
+    foreach ($pin in @($Pins.sources)) {
+        if ($pinsById.ContainsKey([string]$pin.id)) { throw "Duplicate source pin '$([string]$pin.id)'." }
+        $pinsById[[string]$pin.id] = $pin
+    }
+    $existingSourcesById = @{}
+    foreach ($source in @($existingLock.sources)) {
+        if ($existingSourcesById.ContainsKey([string]$source.id)) { throw "Duplicate source '$([string]$source.id)' in the base Lock." }
+        $existingSourcesById[[string]$source.id] = $source
+    }
+    if ($existingSourcesById.Count -ne @($Catalog.sources).Count) {
+        throw 'Skills Catalog base Lock source inventory does not match the Catalog.'
+    }
+
+    $lockSources = @()
+    foreach ($source in @($Catalog.sources | Sort-Object id)) {
+        $sourceId = [string]$source.id
+        if (-not $pinsById.ContainsKey($sourceId) -or -not $existingSourcesById.ContainsKey($sourceId)) {
+            throw "Skills Catalog base Lock is missing source '$sourceId'."
+        }
+        $pin = $pinsById[$sourceId]
+        $existingSource = $existingSourcesById[$sourceId]
+        foreach ($property in @('requestedRef','requestedRefType','resolvedCommit','resolvedVersion')) {
+            if ([string]$existingSource.$property -cne [string]$pin.$property) {
+                throw "Skills Catalog base Lock source '$sourceId' changed '$property'."
+            }
+        }
+        if ([string]$existingSource.repository -cne [string]$source.repository) {
+            throw "Skills Catalog base Lock source '$sourceId' changed repository."
+        }
+        if ([string]$existingSource.archiveSha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw "Skills Catalog base Lock source '$sourceId' has an invalid archiveSha256."
+        }
+        $lockSources += [ordered]@{
+            id = $sourceId
+            repository = [string]$existingSource.repository
+            requestedRef = [string]$existingSource.requestedRef
+            requestedRefType = [string]$existingSource.requestedRefType
+            resolvedCommit = [string]$existingSource.resolvedCommit
+            resolvedVersion = [string]$existingSource.resolvedVersion
+            archiveSha256 = [string]$existingSource.archiveSha256
+        }
+    }
+
+    $activeSkills = @($Catalog.skills | Where-Object { [string]$_.lifecycle.status -ne 'removed' })
+    $existingSkillsById = @{}
+    foreach ($skill in @($existingLock.skills)) {
+        if ($existingSkillsById.ContainsKey([string]$skill.id)) { throw "Duplicate Skill '$([string]$skill.id)' in the base Lock." }
+        $existingSkillsById[[string]$skill.id] = $skill
+    }
+    if ($existingSkillsById.Count -ne $activeSkills.Count) {
+        throw 'Skills Catalog base Lock Skill inventory does not match the Catalog.'
+    }
+
+    $lockSkills = @()
+    foreach ($skill in @($activeSkills | Sort-Object id)) {
+        $skillId = [string]$skill.id
+        if (-not $existingSkillsById.ContainsKey($skillId)) { throw "Skills Catalog base Lock is missing Skill '$skillId'." }
+        $existingSkill = $existingSkillsById[$skillId]
+        if ([string]$existingSkill.sourceId -cne [string]$skill.source.sourceId -or
+            [string]$existingSkill.sourcePath -cne [string]$skill.source.sourcePath) {
+            throw "Skills Catalog base Lock source pin changed for Skill '$skillId'."
+        }
+        if ([string]$existingSkill.contentSha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw "Skills Catalog base Lock Skill '$skillId' has an invalid contentSha256."
+        }
+        $lockSkills += [ordered]@{
+            id = $skillId
+            sourceId = [string]$existingSkill.sourceId
+            sourcePath = [string]$existingSkill.sourcePath
+            contentSha256 = [string]$existingSkill.contentSha256
+        }
+    }
+
+    return [ordered]@{
+        schemaVersion = 3
+        catalogId = [string]$Catalog.catalogId
+        catalogSha256 = Get-RawSha256 -Path $CatalogPath
+        projectionContractSha256 = Get-SkillsCatalogProjectionContractSha256 -Projections $Catalog.projections
+        sources = @($lockSources)
+        skills = @($lockSkills)
+    }
+}
+
 $catalog = Test-SkillsCatalogDocument -CatalogPath $CatalogPath
 $pins = Test-SkillsCatalogSourcePinsDocument -SourcePinsPath $SourcePinsPath -CatalogPath $CatalogPath
 $pinsById = @{}
 foreach ($pin in @($pins.sources)) { $pinsById[[string]$pin.id] = $pin }
+
+if ([int64]$catalog.schemaVersion -eq 3) {
+    $conversionLockPath = if (-not [string]::IsNullOrWhiteSpace($BaseLockPath)) { [System.IO.Path]::GetFullPath($BaseLockPath) } else { $null }
+    if ($null -ne $conversionLockPath) {
+        $resolvedOutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+        $pathComparison = if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+            [System.StringComparison]::OrdinalIgnoreCase
+        }
+        else { [System.StringComparison]::Ordinal }
+        if ([string]::Equals($conversionLockPath,$resolvedOutputPath,$pathComparison)) {
+            throw 'Skills Catalog base Lock path must not equal the output path.'
+        }
+        $lock = New-ProjectionLockFromExistingLock -Catalog $catalog -Pins $pins -ExistingLockPath $conversionLockPath
+        $json = ($lock | ConvertTo-Json -Depth 20 -Compress) + "`n"
+        if ($Check) {
+            if (-not (Test-Path -LiteralPath $resolvedOutputPath -PathType Leaf)) { throw "Skills Catalog lock does not exist: $resolvedOutputPath" }
+            $existing = [System.IO.File]::ReadAllText($resolvedOutputPath).Replace("`r`n", "`n").Replace("`r", "`n")
+            if ($existing -ne $json) { throw 'Skills Catalog lock is stale. Run scripts/update-skills-catalog-lock.ps1 and commit the result.' }
+            Write-Output "Skills Catalog lock is current: $resolvedOutputPath"
+        }
+        else {
+            Write-Utf8NoBom -Path $resolvedOutputPath -Content $json
+            Write-Output "Updated Skills Catalog lock from existing immutable pins: $resolvedOutputPath"
+        }
+        return
+    }
+}
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('skills-catalog-lock-' + [Guid]::NewGuid().ToString('N'))
 $downloadRoot = Join-Path $tempRoot 'downloads'

@@ -23,12 +23,6 @@ if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -l
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$projectionRuntimeAvailable = $false # P7E_TEST_FIXTURE_MARKER: production remains unavailable until production pins are installed.
-if ($WriterSchema -ceq 'V3V5' -and -not $projectionRuntimeAvailable) {
-    throw [System.InvalidOperationException]::new(
-        'Catalog v3 and the projection runtime production pin are not available. [ai-instructions-refusal-code=projection-runtime-unavailable]'
-    )
-}
 
 # BEGIN GENERATED BOOTSTRAP SECTION BASE64
 $bootstrapSectionBytes = [System.Convert]::FromBase64String(
@@ -825,6 +819,13 @@ catch { throw (New-AiInstructionsRefusalException -Code closure-invalid -Message
 Import-Module (Join-Path $repositoryRootPath 'scripts\ai-instructions-install-transaction.psm1') -Force
 $capabilityReceipt = $null
 $catalogDocument = Test-SkillsCatalogDocument -CatalogPath (Join-Path $repositoryRootPath 'catalog\skills-catalog.json')
+$projectionPlatformAvailable = [int64]$catalogDocument.schemaVersion -eq 3 -and
+    [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+if ($WriterSchema -ceq 'V3V5' -and -not $projectionPlatformAvailable) {
+    throw [System.InvalidOperationException]::new(
+        'Catalog v3 and the Windows projection runtime are not available. [ai-instructions-refusal-code=projection-runtime-unavailable]'
+    )
+}
 
 if ([string]::IsNullOrWhiteSpace($CodexHome)) {
     $CodexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
@@ -872,6 +873,7 @@ try {
 
     $capabilityReceipt = Get-PlatformCapabilities -Required @()
     $capabilityReceipt = Assert-AiInstructionsInstallerCapabilities -Receipt $capabilityReceipt
+    $projectionRuntimeAvailable = Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion $catalogDocument.schemaVersion -CapabilityReceipt $capabilityReceipt # P7E_TEST_FIXTURE_MARKER: production requires Catalog v3 and a Windows capability receipt.
 
     $legacyResidue = @(Get-ChildItem -Force -LiteralPath $codexHomePath | Where-Object { $_.Name -like '.ai-instructions-install-*' -or $_.Name -like '.ai-instructions-backup-*' })
     if ($legacyResidue.Count -gt 0) {

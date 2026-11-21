@@ -259,23 +259,25 @@ function Get-TestManagedManifestV4 {
 
     # Scenario: Production Catalog switches to canonical source packages after the source repositories merge.
     # Purpose: Prevent a legacy source path or stale immutable pin from silently returning to production.
-    It 'UnitT10a_binds_production_catalog_v2_to_canonical_sources_and_lock' {
+    It 'UnitT10a_binds_production_catalog_v3_to_canonical_sources_projections_and_lock' {
         $catalog = Test-SkillsCatalogDocument -CatalogPath $script:ProductionCatalog
         $pins = Test-SkillsCatalogSourcePinsDocument -SourcePinsPath $script:ProductionPins -CatalogPath $script:ProductionCatalog
         $lock = Test-SkillsCatalogLockDocument -LockPath $script:ProductionLock -CatalogPath $script:ProductionCatalog
 
-        $catalog.schemaVersion | Should Be 2
-        $lock.schemaVersion | Should Be 2
+        $catalog.schemaVersion | Should Be 3
+        $lock.schemaVersion | Should Be 3
+        (@($catalog.projections | ForEach-Object { "$($_.id)|$($_.scope)|$($_.root)" }) -join "`n") |
+            Should Be (@('user-agents|user|.agents/skills', 'user-claude|user|.claude/skills') -join "`n")
         @($catalog.skills).Count | Should Be 16
         @($lock.skills).Count | Should Be 14
         @($catalog.skills | Where-Object { $_.lifecycle.status -eq 'removed' }).Count | Should Be 2
         foreach ($skill in @($catalog.skills | Where-Object { $_.lifecycle.status -ne 'removed' })) {
             $skill.source.sourcePath | Should Be "skills/$($skill.id)"
-            $skill.source.targetPath | Should Be ".agents/skills/$($skill.id)"
+            $skill.source.PSObject.Properties.Name | Should Not Contain 'targetPath'
             $locked = @($lock.skills | Where-Object { $_.id -ceq $skill.id })
             $locked.Count | Should Be 1
             $locked[0].sourcePath | Should Be $skill.source.sourcePath
-            $locked[0].targetPath | Should Be $skill.source.targetPath
+            $locked[0].PSObject.Properties.Name | Should Not Contain 'targetPath'
         }
         foreach ($pin in @($pins.sources)) {
             $pin.requestedRef | Should Be 'main'
@@ -430,7 +432,7 @@ function Get-TestManagedManifestV4 {
         $skillEntry.targetPath = '.agents/skills/work-with-jira/.ai-instructions-licenses/delivery.json'
         $invalidJson = $manifest | ConvertTo-Json -Depth 100
 
-        (Test-Json -Json $invalidJson -SchemaFile $schemaPath) | Should Be $false
+        (Test-Json -Json $invalidJson -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
         { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'delivery receipt must use the synthetic source path'
 
         $skillEntry.sourcePath = '.ai-instructions-generated/delivery.json'
@@ -458,7 +460,7 @@ function Get-TestManagedManifestV4 {
         $repoInvalidSkill = @($repoInvalid.files | Where-Object artifactType -eq 'skill')[0]
         $repoInvalidSkill.sourcePath = 'readme.md'
         $repoInvalidSkill.targetPath = '.agents/skills/work-with-jira/.ai-instructions-licenses/source/readme.md'
-        (Test-Json -Json ($repoInvalid | ConvertTo-Json -Depth 100) -SchemaFile $repoSchemaPath) | Should Be $false
+        (Test-Json -Json ($repoInvalid | ConvertTo-Json -Depth 100) -SchemaFile $repoSchemaPath -ErrorAction SilentlyContinue) | Should Be $false
         { Assert-ManagedManifestV4 -Manifest $repoInvalid } | Should Throw
 
         $userSchemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\user-skills-managed-manifest-v3.schema.json'
@@ -469,7 +471,7 @@ function Get-TestManagedManifestV4 {
 
         $userInvalid = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
         foreach ($file in @($userInvalid.files | Where-Object { $_.targetPath -cmatch '/\.ai-instructions-licenses/source/' })) { $file.sourcePath = 'readme.md' }
-        (Test-Json -Json ($userInvalid | ConvertTo-Json -Depth 100) -SchemaFile $userSchemaPath) | Should Be $false
+        (Test-Json -Json ($userInvalid | ConvertTo-Json -Depth 100) -SchemaFile $userSchemaPath -ErrorAction SilentlyContinue) | Should Be $false
         { Assert-UserSkillsManagedManifest -Manifest $userInvalid } | Should Throw
     }
 
@@ -538,7 +540,7 @@ function Get-TestManagedManifestV4 {
         $entry.rendererId = 'legacy-unrendered'
         $entry.rendererSha256 = $null
 
-        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath) | Should Be $false
+        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
         { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "may use rendererId 'legacy-unrendered' only with retention 'legacy-preserved'"
     }
 
@@ -553,7 +555,7 @@ function Get-TestManagedManifestV4 {
         $entry = @($manifest.files | Where-Object { $_.artifactType -eq 'instruction' -and $_.rendererId -eq 'build-ai-instructions' })[0]
         $entry.rendererSha256 = $null
 
-        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath) | Should Be $false
+        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
         { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "with rendererId 'build-ai-instructions' must include rendererSha256"
     }
 
@@ -568,7 +570,7 @@ function Get-TestManagedManifestV4 {
         $entry = @($manifest.files | Where-Object { $_.artifactType -eq 'instruction' -and $_.rendererId -eq 'legacy-unrendered' })[0]
         $entry.retention = @('legacy-preserved')
 
-        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath) | Should Be $false
+        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
         { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'retention must be a string'
     }
 
@@ -583,7 +585,7 @@ function Get-TestManagedManifestV4 {
         $entry = @($manifest.files | Where-Object { $_.artifactType -eq 'instruction' -and $_.host -eq 'claude' -and $_.targetPath -like '.claude/ai-instructions-licenses/*' })[0]
         $entry.targetPath = '.claude/ai-instructions-licenses/delivery.json'
 
-        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath) | Should Be $false
+        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
         { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "target path is not allowed for host 'claude'"
 
         $entry.host = 'codex'
