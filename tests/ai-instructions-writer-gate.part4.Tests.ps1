@@ -105,21 +105,35 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
     # Scenario: Recovery is interrupted immediately after undoing each remediation index, ref, or combined file step.
     # Purpose: Re-enter the full reverse walk, treat already-before steps as no-op, and complete the exact before-state without rollback-progress fields.
     It 'InterT145_restarts_reverse_undo_after_each_remediation_substep' {
-        foreach($role in @('git-index','git-ref','remediation-and-instruction')){
-            $target=Join-Path $script:ExternalRoot ("undo-$role");Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $target -Recurse
+        $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'r145') -Failpoint RecoveryOnly
+        $roles=@('git-index','git-ref','remediation-and-instruction')
+        $cases=@(for($index=0;$index-lt$roles.Count;$index++){[pscustomobject]@{Index=$index;Role=$roles[$index];ExternalRoot=$script:ExternalRoot;Seed=$script:P9cSeeds.True;Context=$script:P9cUpdated.Context;ArchivePath=$script:P9cChanged.ArchivePath;Recovery=$recovery}})
+        $worker={param($case)
+            $caseParent=Join-Path $case.ExternalRoot ("p145-"+$case.Index);New-Item -ItemType Directory -Path $caseParent|Out-Null
+            $target=Join-Path $caseParent 'repo';Copy-Item -LiteralPath $case.Seed -Destination $target -Recurse
             $before=Get-P9cPublicationStateSnapshot $target
-            $appliedBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "undo-applied-$role") -Failpoint before-committed-journal-write -RecoveryPath NextRun
-            $appliedResult=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $appliedBootstrap;$appliedResult.ExitCode|Should -Not -Be 0
+            $appliedBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $caseParent 'ap') -Failpoint before-committed-journal-write -RecoveryPath NextRun
+            $appliedResult=Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $target -BootstrapPath $appliedBootstrap
             $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
-            if([string]$journal.phase-cne'applied'){throw "Expected applied journal for $role, found '$($journal.phase)': $($appliedResult.Output)"}
-            $operation=@($journal.operations|Where-Object role -ceq $role|Sort-Object sequence|Select-Object -First 1);$operation.Count|Should -Be 1
-            $rollbackBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "undo-interrupt-$role") -Failpoint ("after-rollback-operation-"+$operation[0].sequence) -RecoveryPath NextRun
-            (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $rollbackBootstrap).ExitCode|Should -Not -Be 0
-            Test-Path -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target)|Should -Be $true
-            foreach($attempt in 1,2){
-                $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "undo-recovery-$role-$attempt") -Failpoint RecoveryOnly
-                (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
-                (Get-P9cPublicationStateSnapshot $target)|Should -Be $before
+            $operation=@($journal.operations|Where-Object role -ceq $case.Role|Sort-Object sequence|Select-Object -First 1)
+            if($operation.Count-ne1){return [pscustomobject]@{AppliedExitCode=$appliedResult.ExitCode;AppliedOutput=$appliedResult.Output;Phase=[string]$journal.phase;OperationCount=$operation.Count}}
+            $rollbackBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $caseParent 'rb') -Failpoint ("after-rollback-operation-"+$operation[0].sequence) -RecoveryPath NextRun
+            $rollbackResult=Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $target -BootstrapPath $rollbackBootstrap
+            $transactionExists=Test-Path -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target)
+            $attempts=@(foreach($attempt in 1,2){$result=Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $target -BootstrapPath $case.Recovery;[pscustomobject]@{ExitCode=$result.ExitCode;Snapshot=(Get-P9cPublicationStateSnapshot $target)}})
+            [pscustomobject]@{AppliedExitCode=$appliedResult.ExitCode;AppliedOutput=$appliedResult.Output;Phase=[string]$journal.phase;OperationCount=$operation.Count;RollbackExitCode=$rollbackResult.ExitCode;TransactionExists=$transactionExists;Before=$before;Attempts=$attempts}
+        }
+        $results=@(Invoke-P9cParallelCases -Cases $cases -Worker $worker)
+        for($index=0;$index-lt$roles.Count;$index++){
+            $role=$roles[$index];$result=$results[$index];if($null-ne$result.ErrorMessage){throw $result.ErrorMessage};$observation=$result.Value
+            $observation.AppliedExitCode|Should -Not -Be 0
+            if($observation.Phase-cne'applied'){throw "Expected applied journal for $role, found '$($observation.Phase)': $($observation.AppliedOutput)"}
+            $observation.OperationCount|Should -Be 1
+            $observation.RollbackExitCode|Should -Not -Be 0
+            $observation.TransactionExists|Should -Be $true
+            foreach($attempt in $observation.Attempts){
+                $attempt.ExitCode|Should -Not -Be 0
+                $attempt.Snapshot|Should -Be $observation.Before
             }
         }
     }
@@ -153,20 +167,42 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         $expected=Join-Path $script:ExternalRoot 'cleanup-expected';Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $expected -Recurse
         (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $expected).ExitCode|Should -Be 0
         $afterState=Get-P9cPublicationStateSnapshot $expected|ConvertFrom-Json;$afterState.indexRaw='<per-target-raw-index>';$afterState=($afterState|ConvertTo-Json -Depth 6 -Compress)
+        $cases=New-Object System.Collections.Generic.List[object];$caseIndex=0
+        foreach($failpoint in @("during-cleanup-$backupLeaf",'after-cleanup-journal-before-directory')){
+            foreach($recoveryPath in @('InProcess','NextRun')){
+                $cases.Add([pscustomobject]@{Index=$caseIndex;Failpoint=$failpoint;RecoveryPath=$recoveryPath;ExternalRoot=$script:ExternalRoot;Seed=$script:P9cSeeds.False;Context=$script:P9cUpdated.Context;ArchivePath=$script:P9cChanged.ArchivePath});$caseIndex++
+            }
+        }
+        $worker={param($case)
+            $caseParent=Join-Path $case.ExternalRoot ("p147-"+$case.Index);New-Item -ItemType Directory -Path $caseParent|Out-Null
+            $target=Join-Path $caseParent 'repo';Copy-Item -LiteralPath $case.Seed -Destination $target -Recurse
+            $targetIndexBefore=[string]((Get-P9cPublicationStateSnapshot $target|ConvertFrom-Json).indexRaw)
+            $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $caseParent 'fp') -Failpoint $case.Failpoint -RecoveryPath $case.RecoveryPath
+            $failed=Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap
+            $observation=[ordered]@{FailedExitCode=$failed.ExitCode;TargetIndexBefore=$targetIndexBefore}
+            if($case.RecoveryPath-ceq'NextRun'){
+                $active=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$observation.ActiveCount=$active.Count
+                if($active.Count-ne1){return [pscustomobject]$observation}
+                if($case.Failpoint-like'during-cleanup-*'){$observation.JournalPhase=[string](Get-Content -Raw -LiteralPath (Join-Path $active[0].FullName 'journal.json')|ConvertFrom-Json).phase}
+                else{$observation.JournalExists=Test-Path -LiteralPath (Join-Path $active[0].FullName 'journal.json')}
+                $observation.RecoveryExitCode=(Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $target).ExitCode
+            }
+            $snapshot=Get-P9cPublicationStateSnapshot $target|ConvertFrom-Json;$observation.SnapshotIndexRaw=$snapshot.indexRaw;$snapshot.indexRaw='<per-target-raw-index>';$observation.Snapshot=($snapshot|ConvertTo-Json -Depth 6 -Compress)
+            return [pscustomobject]$observation
+        }
+        $results=@(Invoke-P9cParallelCases -Cases $cases.ToArray() -Worker $worker);$resultIndex=0
         foreach($failpoint in @("during-cleanup-$backupLeaf",'after-cleanup-journal-before-directory')){
             $snapshots=@{}
             foreach($recoveryPath in @('InProcess','NextRun')){
-                $target=Join-Path $script:ExternalRoot ("cleanup-$($failpoint.Replace('.','-'))-$recoveryPath");Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $target -Recurse
-                $targetIndexBefore=[string]((Get-P9cPublicationStateSnapshot $target|ConvertFrom-Json).indexRaw)
-                $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot ("cleanup-runtime-"+[Guid]::NewGuid().ToString('N'))) -Failpoint $failpoint -RecoveryPath $recoveryPath
-                (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap).ExitCode|Should -Not -Be 0
+                $result=$results[$resultIndex++];if($null-ne$result.ErrorMessage){throw $result.ErrorMessage};$observation=$result.Value
+                $observation.FailedExitCode|Should -Not -Be 0
                 if($recoveryPath-ceq'NextRun'){
-                    $active=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$active.Count|Should -Be 1
-                    if($failpoint-like'during-cleanup-*'){[string](Get-Content -Raw -LiteralPath (Join-Path $active[0].FullName 'journal.json')|ConvertFrom-Json).phase|Should -Be committed}
-                    else{Test-Path -LiteralPath (Join-Path $active[0].FullName 'journal.json')|Should -Be $false}
-                    (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target).ExitCode|Should -Be 0
+                    $observation.ActiveCount|Should -Be 1
+                    if($failpoint-like'during-cleanup-*'){$observation.JournalPhase|Should -Be committed}
+                    else{$observation.JournalExists|Should -Be $false}
+                    $observation.RecoveryExitCode|Should -Be 0
                 }
-                $snapshot=Get-P9cPublicationStateSnapshot $target|ConvertFrom-Json;$snapshot.indexRaw|Should -Be $targetIndexBefore;$snapshot.indexRaw='<per-target-raw-index>';$snapshots[$recoveryPath]=($snapshot|ConvertTo-Json -Depth 6 -Compress)
+                $observation.SnapshotIndexRaw|Should -Be $observation.TargetIndexBefore;$snapshots[$recoveryPath]=$observation.Snapshot
                 $snapshots[$recoveryPath]|Should -Be $afterState
             }
             $snapshots.InProcess|Should -Be $snapshots.NextRun
