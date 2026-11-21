@@ -773,6 +773,17 @@ Describe 'Standard validation resolver hardening' {
         Assert-Match ($output -join "`n") 'prerelease-fallback-self-test: passed' 'Prerelease fallback must remain solvable when no final candidate exists.'
     }
 
+    # Scenario: dep needs prerelease fallback while other has both a final and a newer prerelease candidate in the verified pool.
+    # Purpose: Grant prerelease permission only to the missing project and retain pip's final-first choice for every other project.
+    It 'UnitT29ba_scopes_prerelease_permission_to_the_missing_project' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $helper = Join-Path $script:RepositoryRoot 'scripts/Resolve-PythonWheelClosure.py'
+        $output = Invoke-IsolatedPythonCommand -PythonCommand (Assert-Command -Name 'python') -Arguments @(
+            '-B', '-c', 'import runpy,sys; h=runpy.run_path(sys.argv[1]); h["self_test_prerelease_permission_is_scoped"](); print("scoped-prerelease-self-test: passed")', $helper
+        )
+        Assert-Match ($output -join "`n") 'scoped-prerelease-self-test: passed' 'Prerelease permission must not change final-first selection for unrelated projects.'
+    }
+
     # Scenario: dep>=1.0.dev1 explicitly permits dep 1.0.dev6.
     # Purpose: Preserve explicit PEP 440 prerelease opt-in while applying the default partition elsewhere.
     It 'UnitT29c_honors_an_explicit_prerelease_requirement' {

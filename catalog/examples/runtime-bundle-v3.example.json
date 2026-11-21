@@ -19,7 +19,7 @@
     { "path": "platform/PlatformNative.cs", "sha256": "f9da23bf3e6e3c8960b26d534e14873f6b4fc98b3d13f5b6cdfdd5f7716a4514" },
     { "path": "platform/RuntimePreparation.psm1", "sha256": "dc254c04e7e2caf280726e66f67434776bc7df12a210a38c80596e41344fd077" },
     { "path": "platform/Unix.psm1", "sha256": "c55944c9ece57c9ba62b78d1bd563271fc9f660508d3725ab5821d5444cb5fd5" },
-    { "path": "platform/UnixNative.cs", "sha256": "171da4acded889da89ab4e7af2729e9bbf4f3639cf1e63fe08a4c046f7545c74" },
+    { "path": "platform/UnixNative.cs", "sha256": "9cdd69036d47d3b1c21c390acf5d616d8fa7f559fc6f2b02d98177a93629abfe" },
     { "path": "platform/UnixProcess.cs", "sha256": "125d2b3eecdad6a6c201d5f5d61a6efd0ad55ba93822c7b83a679a5397005db1" },
     { "path": "platform/Windows.psm1", "sha256": "9b7442178083a9b165ed3bf53367d5c3ce1b1f09d56f0f6efe964b524e17be0b" },
     { "path": "platform/WindowsNative.cs", "sha256": "6eea8ca2701b6a6de88ee4a3348f053d07a0543d607832e667335c838bb7d433" },
