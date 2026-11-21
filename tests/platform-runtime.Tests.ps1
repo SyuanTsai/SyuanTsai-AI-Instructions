@@ -2582,6 +2582,46 @@ Describe 'Platform runtime contract' {
         [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::IsTransactionStoreTarget('C:\root\.AI-INSTRUCTIONS-TXN\0123456789abcdef0123456789abcdef','target') | Should Be $true
     }
 
+    # Scenario: Every Unix PowerShell adapter is parsed on a Windows test host.
+    # Purpose: Reject language keywords glued to variable tokens before Unix-only execution can hide the command-name defect.
+    It 'UnitT28_rejects_language_keywords_glued_to_variables_in_unix_adapters' {
+        foreach($adapter in @('Unix','Linux','MacOS')) {
+            $path = Join-Path $script:RepositoryRoot "scripts/platform/$adapter.psm1"
+            $tokens = $null
+            $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors)
+            @($errors).Count | Should Be 0
+            $gluedCommands = @($ast.FindAll({param($node)
+                $node -is [Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -match '^(return|throw|exit|break|continue)\$'
+            },$true))
+            $gluedCommands.Count | Should Be 0
+        }
+    }
+
+    # Scenario: A generic exception wraps a typed Unix platform verification exception on any test host.
+    # Purpose: Preserve the typed inner failure so adapter error classification remains fail closed.
+    It 'UnitT29_returns_the_wrapped_typed_unix_platform_exception' {
+        $unixPath = Join-Path $script:RepositoryRoot 'scripts/platform/Unix.psm1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($unixPath,[ref]$tokens,[ref]$errors)
+        @($errors).Count | Should Be 0
+        $resolver = $ast.Find({param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Resolve-UnixPlatformException'
+        },$true)
+        $resolver | Should Not BeNullOrEmpty
+        $module = New-Module -ScriptBlock ([scriptblock]::Create("$($resolver.Extent.Text)`nExport-ModuleMember -Function Resolve-UnixPlatformException"))
+        try {
+            $typed = [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]::new('directory-publication','linux','fixture failure')
+            $wrapped = [Exception]::new('wrapper',$typed)
+            $resolved = & $module.ExportedCommands['Resolve-UnixPlatformException'] $wrapped
+            [object]::ReferenceEquals($resolved,$typed) | Should Be $true
+        }
+        finally { $module | Remove-Module -Force -ErrorAction SilentlyContinue }
+    }
+
     # Scenario: Linux and macOS adapters are loaded directly on Windows after their P7 primitives exist.
     # Purpose: Preserve origin/main's typed fail-closed assertion without retaining a NotImplemented stub.
     if ($IsWindows) {

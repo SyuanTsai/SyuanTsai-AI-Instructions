@@ -26,9 +26,9 @@ function Resolve-UnixPlatformException {
         if($current-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]-or
             $current-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException]-or
             $current-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]-or
-            $current-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException]){return$current}
+            $current-is[SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException]){return $current}
     }
-    return$Exception
+    return $Exception
 }
 
 function Assert-UnixPlatformTargetPath {
@@ -168,7 +168,7 @@ function Get-UnixPlatformDirectoryState {
 
 function Test-UnixPlatformDirectoryStateMatch {
     param($First,$Second)
-    if($null-eq$First-or$null-eq$Second){return$false}
+    if($null-eq$First-or$null-eq$Second){return $false}
     return($First.exists-is[bool]-and$Second.exists-is[bool]-and[bool]$First.exists-eq[bool]$Second.exists-and
         (Test-UnixPlatformIdentityMatch $First.identity $Second.identity)-and
         [string]$First.inventorySha256-ceq[string]$Second.inventorySha256-and
