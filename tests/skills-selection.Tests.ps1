@@ -425,6 +425,30 @@ function New-SelectionCatalog {
         Assert-ThrowsMessage { Resolve-SkillsSelection -Catalog $catalog -Selection $selection } 'duplicate'
     }
 
+    # Scenario: An installed connector-gated Skill requires configured evidence while the matching tuple is only available or authenticated.
+    # Purpose: Preserve only the managed installation for non-absent states that do not yet satisfy the requirement, while keeping fresh-install filtering unchanged.
+    It 'UnitT103_preserves_installed_Skills_for_non_absent_mismatched_states_but_filters_fresh_installs' {
+        $catalog = New-SelectionCatalog
+        $catalog.skills = @($catalog.skills | Where-Object { $_.id -ne 'skill-optional' }) + @(
+            (New-TestSkill -Id 'skill-optional' -Compatibility (New-TestCompatibility -RequiredCapabilities @(
+                [pscustomobject]@{ kind='connector'; id='datadog'; state='configured' }
+            )))
+        )
+        $selection = [pscustomobject]@{ profiles=@('optional'); includeSkills=@(); excludeSkills=@() }
+
+        foreach ($state in @('available','authenticated')) {
+            $evidence = @([pscustomobject]@{kind='connector';id='datadog';state=$state})
+            @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -CapabilityEvidence $evidence).Count | Should Be 0
+            $warnings = @()
+
+            $resolved = @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -CapabilityEvidence $evidence -InstalledSkillIds @('skill-optional') -WarningVariable warnings)
+
+            Assert-StringSequence -Actual $resolved -Expected @('skill-optional')
+            ($warnings -join "`n") | Should Match 'connector:datadog'
+            ($warnings -join "`n") | Should Match 'absent'
+        }
+    }
+
     # Scenario: The approved Atlassian profile resolves its existing setup fallback on Windows and filters platform-specific Skills elsewhere.
     # Purpose: Keep one-off publishing available when Git documentation synchronization is activated on supported platforms.
     It 'InterT97_keeps_publisher_and_docs_as_code_available_together' {

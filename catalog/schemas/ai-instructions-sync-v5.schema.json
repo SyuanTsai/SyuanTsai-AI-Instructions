@@ -35,6 +35,7 @@
       ]
     },
     "capabilityEvidence": {
+      "description": "Explicit capability evidence. The runtime validator rejects duplicate (kind,id) tuples even when their state values differ.",
       "type": "array",
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/capabilityEvidence" }

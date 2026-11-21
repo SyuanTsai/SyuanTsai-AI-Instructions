@@ -2334,20 +2334,104 @@ Describe 'SYP-511 capability evidence reconciliation' {
         @((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json')|ConvertFrom-Json).files).Count|Should Be 0
     }
 
-    # Scenario: Config and environment evidence disagree for the same connector while the desired-state planner reads an installed manifest.
-    # Purpose: Apply the environment value for that run without changing the persisted configuration object.
-    It 'InterT30_uses_environment_evidence_as_a_non_persistent_per_run_override' {
-        $catalog=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog.json')|ConvertFrom-Json
-        $selection=[pscustomobject]@{profiles=@('observability');includeSkills=@();excludeSkills=@()}
-        $stored=@([pscustomobject]@{kind='connector';id='datadog';state='absent'})
-        $before=$stored|ConvertTo-Json -Compress
+    # Scenario: Config stores configured connector evidence, but the environment explicitly declares the same connector absent for one Apply.
+    # Purpose: Remove both managed projection roots and manifest entries for that run without modifying the persisted config bytes.
+    It 'InterT30_applies_environment_absent_without_persisting_the_override' {
+        $requirement=[pscustomobject]@{kind='connector';id='datadog';state='configured'}
+        $fixture=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'syp511-env-absent-fixture') -WithoutCopilot -CapabilityRequirement $requirement -PayloadText "---`nname: work-with-jira`ndescription: projection test`n---`n`n# Fixture`n"
+        $archivePath=New-TestProjectionSourceArchive -PayloadPath ([string]$fixture.Files[0].stagedPath) -ArchivePath (Join-Path $TestDrive 'syp511-env-absent.zip')
+        $fixture.Lock.sources[0].archiveSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        [IO.File]::WriteAllText((Join-Path $fixture.RuntimeRoot 'catalog/skills-catalog-lock.json'),(($fixture.Lock|ConvertTo-Json -Depth 20)+"`n"),[Text.UTF8Encoding]::new($false))
+        $configuration=$fixture.GateContext.configuration|ConvertTo-Json -Depth 20|ConvertFrom-Json
+        $configuration|Add-Member -NotePropertyName capabilityEvidence -NotePropertyValue @([pscustomobject]@{kind='connector';id='datadog';state='configured'})
+        $configPath=Join-Path $TestDrive 'syp511-env-absent-config.json'
+        [IO.File]::WriteAllText($configPath,(($configuration|ConvertTo-Json -Depth 20)+"`n"),[Text.UTF8Encoding]::new($false))
+        [byte[]]$configBytesBefore=[IO.File]::ReadAllBytes($configPath)
+        $configuration=Get-Content -Raw -Encoding UTF8 -LiteralPath $configPath|ConvertFrom-Json
+        $platformModule=Import-Module (Join-Path $fixture.RuntimeRoot 'platform-runtime.psd1') -Force -PassThru
+        $receipt=&$platformModule {Get-PlatformCapabilities -Required @()}
+        $bundle=New-TestAiInstructionsRuntimeBundleV3 -RuntimeRoot $fixture.RuntimeRoot -Repository ([string]$fixture.Manifest.catalogRepository) -Commit ([string]$fixture.Manifest.catalogCommit) -Acquisition git-checkout -CapabilityReceipt $receipt
+        $gate=Assert-UserProjectionRuntimeGate -Bundle $bundle -Configuration $configuration -RuntimeRoot $fixture.RuntimeRoot -CapabilityReceipt $receipt
+        $userHome=Join-Path $TestDrive 'syp511-env-absent-user'
+        $arguments=@{RuntimeRoot=$fixture.RuntimeRoot;Configuration=$configuration;CatalogRepository=[string]$bundle.repository;CatalogCommit=[string]$bundle.commit;GateContext=$gate;LocalArchiveOverrides=@{'agent-skills'=$archivePath};UserHome=$userHome}
+        $installed=Get-UserSkillsDesiredState @arguments -WorkingRoot (Join-Path $TestDrive 'syp511-env-absent-install')
+        (Invoke-UserSkillsReconciliation -DesiredState $installed -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"absent"}]'
+
+        $removed=Get-UserSkillsDesiredState @arguments -WorkingRoot (Join-Path $TestDrive 'syp511-env-absent-remove')
+        $applied=Invoke-UserSkillsReconciliation -DesiredState $removed -UserHome $userHome -Mode Apply
+
+        $applied.outcome|Should Be 'applied'
+        Test-Path -LiteralPath (Join-Path $userHome '.agents/skills/work-with-jira')|Should Be $false
+        Test-Path -LiteralPath (Join-Path $userHome '.claude/skills/work-with-jira')|Should Be $false
+        @((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json')|ConvertFrom-Json).files).Count|Should Be 0
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath))|Should Be ([Convert]::ToBase64String($configBytesBefore))
+    }
+
+    # Scenario: A managed connector-gated Skill requires configured evidence while the per-run evidence is authenticated.
+    # Purpose: Preserve the installed projections with a warning and report both Apply and VerifyOnly as current, while a fresh install remains filtered by the selection unit test.
+    It 'InterT40_preserves_an_installed_Skill_when_authenticated_does_not_satisfy_configured' {
+        $requirement=[pscustomobject]@{kind='connector';id='datadog';state='configured'}
+        $fixture=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'syp511-authenticated-fixture') -WithoutCopilot -CapabilityRequirement $requirement -PayloadText "---`nname: work-with-jira`ndescription: projection test`n---`n`n# Fixture`n"
+        $archivePath=New-TestProjectionSourceArchive -PayloadPath ([string]$fixture.Files[0].stagedPath) -ArchivePath (Join-Path $TestDrive 'syp511-authenticated.zip')
+        $fixture.Lock.sources[0].archiveSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        [IO.File]::WriteAllText((Join-Path $fixture.RuntimeRoot 'catalog/skills-catalog-lock.json'),(($fixture.Lock|ConvertTo-Json -Depth 20)+"`n"),[Text.UTF8Encoding]::new($false))
+        $platformModule=Import-Module (Join-Path $fixture.RuntimeRoot 'platform-runtime.psd1') -Force -PassThru
+        $receipt=&$platformModule {Get-PlatformCapabilities -Required @()}
+        $bundle=New-TestAiInstructionsRuntimeBundleV3 -RuntimeRoot $fixture.RuntimeRoot -Repository ([string]$fixture.Manifest.catalogRepository) -Commit ([string]$fixture.Manifest.catalogCommit) -Acquisition git-checkout -CapabilityReceipt $receipt
+        $configuration=$fixture.GateContext.configuration
+        $gate=Assert-UserProjectionRuntimeGate -Bundle $bundle -Configuration $configuration -RuntimeRoot $fixture.RuntimeRoot -CapabilityReceipt $receipt
+        $userHome=Join-Path $TestDrive 'syp511-authenticated-user'
+        $arguments=@{RuntimeRoot=$fixture.RuntimeRoot;Configuration=$configuration;CatalogRepository=[string]$bundle.repository;CatalogCommit=[string]$bundle.commit;GateContext=$gate;LocalArchiveOverrides=@{'agent-skills'=$archivePath};UserHome=$userHome}
         $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"configured"}]'
+        $installed=Get-UserSkillsDesiredState @arguments -WorkingRoot (Join-Path $TestDrive 'syp511-authenticated-install')
+        (Invoke-UserSkillsReconciliation -DesiredState $installed -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"authenticated"}]'
+        $warnings=@()
 
-        $selectionModule=Import-Module (Join-Path $script:RuntimeRoot 'skills-selection.psm1') -Force -PassThru
-        $resolved=@(& $selectionModule { param($Catalog,$Selection,$Evidence) Resolve-SkillsSelection -Catalog $Catalog -Selection $Selection -CapabilityEvidence $Evidence } $catalog $selection $stored)
+        $preserved=Get-UserSkillsDesiredState @arguments -WorkingRoot (Join-Path $TestDrive 'syp511-authenticated-preserve') -WarningVariable warnings
+        $apply=Invoke-UserSkillsReconciliation -DesiredState $preserved -UserHome $userHome -Mode Apply
+        $verify=Invoke-UserSkillsReconciliation -DesiredState $preserved -UserHome $userHome -Mode VerifyOnly
 
-        $resolved|Should Contain 'investigate-datadog-logs'
-        ($stored|ConvertTo-Json -Compress)|Should Be $before
+        @($preserved.SkillIds)|Should Be @('work-with-jira')
+        ($warnings-join"`n")|Should Match 'connector:datadog'
+        $apply.outcome|Should Be 'current'
+        $verify.outcome|Should Be 'current'
+        Test-Path -LiteralPath (Join-Path $userHome '.agents/skills/work-with-jira/SKILL.md')|Should Be $true
+        Test-Path -LiteralPath (Join-Path $userHome '.claude/skills/work-with-jira/SKILL.md')|Should Be $true
+    }
+
+    # Scenario: Desired state observes an empty managed manifest, then another normal update installs the capability-gated Skill before the stale plan obtains its lock.
+    # Purpose: Bind the observed empty set explicitly so the stale no-evidence plan returns concurrent and cannot remove the newly installed Skill.
+    It 'InterT50_binds_an_empty_installed_set_across_desired_state_and_lock_acquisition' {
+        $requirement=[pscustomobject]@{kind='connector';id='datadog';state='configured'}
+        $fixture=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'syp511-empty-race-fixture') -WithoutCopilot -CapabilityRequirement $requirement -PayloadText "---`nname: work-with-jira`ndescription: projection test`n---`n`n# Fixture`n"
+        $archivePath=New-TestProjectionSourceArchive -PayloadPath ([string]$fixture.Files[0].stagedPath) -ArchivePath (Join-Path $TestDrive 'syp511-empty-race.zip')
+        $fixture.Lock.sources[0].archiveSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        [IO.File]::WriteAllText((Join-Path $fixture.RuntimeRoot 'catalog/skills-catalog-lock.json'),(($fixture.Lock|ConvertTo-Json -Depth 20)+"`n"),[Text.UTF8Encoding]::new($false))
+        $platformModule=Import-Module (Join-Path $fixture.RuntimeRoot 'platform-runtime.psd1') -Force -PassThru
+        $receipt=&$platformModule {Get-PlatformCapabilities -Required @()}
+        $bundle=New-TestAiInstructionsRuntimeBundleV3 -RuntimeRoot $fixture.RuntimeRoot -Repository ([string]$fixture.Manifest.catalogRepository) -Commit ([string]$fixture.Manifest.catalogCommit) -Acquisition git-checkout -CapabilityReceipt $receipt
+        $configuration=$fixture.GateContext.configuration
+        $gate=Assert-UserProjectionRuntimeGate -Bundle $bundle -Configuration $configuration -RuntimeRoot $fixture.RuntimeRoot -CapabilityReceipt $receipt
+        $userHome=Join-Path $TestDrive 'syp511-empty-race-user'
+        $arguments=@{RuntimeRoot=$fixture.RuntimeRoot;CatalogRepository=[string]$bundle.repository;CatalogCommit=[string]$bundle.commit;LocalArchiveOverrides=@{'agent-skills'=$archivePath};UserHome=$userHome}
+        $stale=Get-UserSkillsDesiredState @arguments -Configuration $configuration -GateContext $gate -WorkingRoot (Join-Path $TestDrive 'syp511-empty-race-stale')
+        $stale.PSObject.Properties.Name|Should Contain 'InstalledSkillIds'
+        @($stale.InstalledSkillIds).Count|Should Be 0
+        $configured=$configuration|ConvertTo-Json -Depth 20|ConvertFrom-Json
+        $configured|Add-Member -NotePropertyName capabilityEvidence -NotePropertyValue @([pscustomobject]@{kind='connector';id='datadog';state='configured'})
+        $configuredGate=Assert-UserProjectionRuntimeGate -Bundle $bundle -Configuration $configured -RuntimeRoot $fixture.RuntimeRoot -CapabilityReceipt $receipt
+        $newer=Get-UserSkillsDesiredState @arguments -Configuration $configured -GateContext $configuredGate -WorkingRoot (Join-Path $TestDrive 'syp511-empty-race-newer')
+        (Invoke-UserSkillsReconciliation -DesiredState $newer -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+
+        $staleResult=Invoke-UserSkillsReconciliation -DesiredState $stale -UserHome $userHome -Mode Apply
+
+        $staleResult.outcome|Should Be 'concurrent'
+        [int]$staleResult.exitCode|Should Be 3
+        Test-Path -LiteralPath (Join-Path $userHome '.agents/skills/work-with-jira/SKILL.md')|Should Be $true
+        Test-Path -LiteralPath (Join-Path $userHome '.claude/skills/work-with-jira/SKILL.md')|Should Be $true
+        @((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json')|ConvertFrom-Json).files).Count|Should Be 2
     }
 }
 

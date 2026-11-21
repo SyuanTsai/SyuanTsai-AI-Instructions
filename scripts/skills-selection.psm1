@@ -115,18 +115,6 @@ function Test-ExplicitCapabilityEvidence {
     return $false
 }
 
-function Test-CapabilityEvidenceTuplePresent {
-    param(
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Evidence,
-        [Parameter(Mandatory = $true)][string] $Kind,
-        [Parameter(Mandatory = $true)][string] $Id
-    )
-    foreach ($item in $Evidence) {
-        if ([string]$item.kind -ceq $Kind -and [string]$item.id -ceq $Id) { return $true }
-    }
-    return $false
-}
-
 function Test-ShellExpression {
     param([Parameter(Mandatory = $true)][string] $Expression)
 
@@ -290,7 +278,7 @@ function Get-SkillUnknownCapabilityState {
         if (Test-CapabilityRequirement -Requirement $requirement -Evidence $Evidence) { continue }
         $kind = [string](Get-OptionalPropertyValue -Object $requirement -Name 'kind' -DefaultValue '')
         $id = [string](Get-OptionalPropertyValue -Object $requirement -Name 'id' -DefaultValue '')
-        if ($kind -notin @('connector','environment') -or (Test-CapabilityEvidenceTuplePresent -Evidence $Evidence -Kind $kind -Id $id)) {
+        if ($kind -notin @('connector','environment') -or (Test-ExplicitCapabilityEvidence -Evidence $Evidence -Kind $kind -Id $id -State 'absent')) {
             return [pscustomobject]@{Preserve=$false;Missing=@()}
         }
         $missing.Add("$kind`:$id")
@@ -302,7 +290,7 @@ function Get-SkillUnknownCapabilityState {
             if (Test-CapabilityRequirement -Requirement $requirement -Evidence $Evidence) { $satisfied=$true;break }
             $kind = [string](Get-OptionalPropertyValue -Object $requirement -Name 'kind' -DefaultValue '')
             $id = [string](Get-OptionalPropertyValue -Object $requirement -Name 'id' -DefaultValue '')
-            if ($kind -in @('connector','environment') -and -not (Test-CapabilityEvidenceTuplePresent -Evidence $Evidence -Kind $kind -Id $id)) {
+            if ($kind -in @('connector','environment') -and -not (Test-ExplicitCapabilityEvidence -Evidence $Evidence -Kind $kind -Id $id -State 'absent')) {
                 $unknownAlternatives.Add("$kind`:$id")
             }
         }
@@ -561,7 +549,7 @@ function Resolve-SkillsSelection {
             $unknownState = Get-SkillUnknownCapabilityState -Skill $skill -Evidence $evidence
             if ($installed.Contains($skillId) -and [bool]$unknownState.Preserve) {
                 $missingText = @($unknownState.Missing) -join ', '
-                Write-Warning "Preserved installed Skill '$skillId' because capability state is unknown: $missingText. Declare or modify evidence with -CapabilityEvidence; declare state 'absent' to remove it."
+                Write-Warning "Preserved installed Skill '$skillId' because these capability requirements are not satisfied but are not explicitly absent: $missingText. Declare or modify evidence with -CapabilityEvidence; declare state 'absent' to remove it."
                 continue
             }
             if ($explicitIncludes.ContainsKey($skillId)) {
@@ -616,7 +604,7 @@ function Resolve-SkillsSelection {
                     $dependencyUnknownState = Get-SkillUnknownCapabilityState -Skill $dependencySkill -Evidence $evidence
                     if ($installed.Contains($dependencyId) -and [bool]$dependencyUnknownState.Preserve) {
                         $missingText = @($dependencyUnknownState.Missing) -join ', '
-                        Write-Warning "Preserved installed Skill '$dependencyId' because capability state is unknown: $missingText. Declare or modify evidence with -CapabilityEvidence; declare state 'absent' to remove it."
+                        Write-Warning "Preserved installed Skill '$dependencyId' because these capability requirements are not satisfied but are not explicitly absent: $missingText. Declare or modify evidence with -CapabilityEvidence; declare state 'absent' to remove it."
                         $selected[$dependencyId] = $true
                         $changed = $true
                         continue

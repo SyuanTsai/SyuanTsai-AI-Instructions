@@ -1059,7 +1059,7 @@ function Get-UserSkillsDesiredState {
         LicenseWarnings=[string[]]$licenseWarnings.ToArray(); CatalogBytes=$catalogBytes; LockBytes=$lockBytes; ProjectionIds=[string[]]$ProjectionIds
         GateContext=$(if($projectionAware){$GateContext}else{$null}); InstructionsArtifact=$instructionsArtifact
     }
-    if($installedSkillIds.Count-gt0){$desiredState['InstalledSkillIds']=[string[]]$installedSkillIds}
+    if(-not[string]::IsNullOrWhiteSpace($UserHome)){$desiredState['InstalledSkillIds']=[string[]]$installedSkillIds}
     return [pscustomobject]$desiredState
 }
 
@@ -2130,9 +2130,6 @@ function Invoke-UserSkillsReconciliation {
     $manifestPath = Get-AgentEnvironmentFullPath -Root $home -RelativePath $manifestRelative
     $existingManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath $manifestRelative
     $existingManifestIdentity = $existingManifestSnapshot.Identity
-    if($null-ne$DesiredState.PSObject.Properties['InstalledSkillIds']){
-        Assert-AgentEnvironmentOrdinalSetEqual -Actual ([string[]]@($DesiredState.InstalledSkillIds)) -Expected ([string[]]@(Get-AgentEnvironmentManifestSkillIds -Manifest $existingManifestSnapshot.Manifest)) -Context 'Desired-state installed Skill evidence'
-    }
     if ((Test-Path -LiteralPath $journalPath) -and $Mode -ne 'Apply') {
         Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $journalRelative | Out-Null
         if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { throw 'Agent environment recovery journal path must be a file.' }
@@ -2277,6 +2274,14 @@ function Invoke-UserSkillsReconciliation {
         $lockedManifestIdentity = $lockedManifestSnapshot.Identity
         if ($existingManifestIdentity -cne $lockedManifestIdentity) {
             return New-AgentEnvironmentResult -Outcome 'concurrent' -DesiredState $DesiredState -Installed @() -Updated @() -Removed @() -Preserved @() -Failed @('User Skills managed manifest changed while acquiring the Agent environment lock.') -RollbackState 'not-started' -BackupPath $null
+        }
+        if($null-ne$DesiredState.PSObject.Properties['InstalledSkillIds']){
+            try{
+                Assert-AgentEnvironmentOrdinalSetEqual -Actual ([string[]]@($DesiredState.InstalledSkillIds)) -Expected ([string[]]@(Get-AgentEnvironmentManifestSkillIds -Manifest $lockedManifestSnapshot.Manifest)) -Context 'Desired-state installed Skill evidence'
+            }
+            catch{
+                return New-AgentEnvironmentResult -Outcome 'concurrent' -DesiredState $DesiredState -Installed @() -Updated @() -Removed @() -Preserved @() -Failed @('User Skills managed manifest no longer matches the installed Skill set used to build desired state.') -RollbackState 'not-started' -BackupPath $null
+            }
         }
         $instructionsRelative=$null;$instructionsObservation=$null;$instructionsDesiredBytes=$null;$instructionsDesiredSha=$null;$instructionsChanged=$false
         if($null-ne$instructionsArtifact){
