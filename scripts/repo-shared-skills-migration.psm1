@@ -92,26 +92,27 @@ function Get-CanonicalRepositoryRoot {
 
 $script:RepoSharedSkillsPlatformRuntimeModule = $null
 
-function Import-RepoSharedSkillsPlatformRuntime {
-    if ($null -ne $script:RepoSharedSkillsPlatformRuntimeModule) { return $script:RepoSharedSkillsPlatformRuntimeModule }
-    $manifestPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'platform-runtime.psd1'))
-    $modules = @(Import-Module -Name $manifestPath -PassThru -Scope Local -ErrorAction Stop)
-    if ($modules.Count -ne 1 -or
-        [IO.Path]::GetFullPath([string]$modules[0].ModuleBase) -cne [IO.Path]::GetFullPath($PSScriptRoot)) {
-        throw 'Repository Skill migration platform runtime did not load from its expected sibling path.'
+function Set-RepoSharedSkillsPlatformRuntime {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Module)
+
+    if ($null -eq $Module -or $Module -isnot [Management.Automation.PSModuleInfo]) {
+        throw 'Repository Skill migration platform runtime must be a non-null PSModuleInfo.'
     }
-    foreach ($commandName in @('Assert-PlatformRuntimeInventory','Open-PlatformDirectory','Resolve-PlatformPhysicalPath')) {
-        if (-not $modules[0].ExportedCommands.ContainsKey($commandName)) {
+    foreach ($commandName in @('Open-PlatformDirectory','Resolve-PlatformPhysicalPath')) {
+        if (-not $Module.ExportedCommands.ContainsKey($commandName)) {
             throw "Repository Skill migration platform runtime does not expose '$commandName'."
         }
     }
-    & $modules[0].ExportedCommands['Assert-PlatformRuntimeInventory'] | Out-Null
-    $script:RepoSharedSkillsPlatformRuntimeModule = $modules[0]
-    return $script:RepoSharedSkillsPlatformRuntimeModule
+    $script:RepoSharedSkillsPlatformRuntimeModule = $Module
 }
 
 function Get-UnixPhysicalRootIdentity {
     param([Parameter(Mandatory=$true)][string]$CanonicalPath,[Parameter(Mandatory=$true)][string]$RootName)
+    if ($null -eq $script:RepoSharedSkillsPlatformRuntimeModule) {
+        throw 'Repository and USER physical root identity cannot be verified: the verified platform runtime was not provided; migration fails closed.'
+    }
+    $runtime = $script:RepoSharedSkillsPlatformRuntimeModule
     $item = $null
     try { $item = Get-Item -Force -LiteralPath $CanonicalPath -ErrorAction Stop }
     catch [Management.Automation.ItemNotFoundException] { return $null }
@@ -125,7 +126,6 @@ function Get-UnixPhysicalRootIdentity {
 
     $lease = $null
     try {
-        $runtime = Import-RepoSharedSkillsPlatformRuntime
         # Root-only leases reject symlink components. Resolve every component first so
         # the lease observes the directory a root alias actually targets.
         $physicalPath = & $runtime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path $CanonicalPath
@@ -393,4 +393,4 @@ function Assert-RepoSharedSkillsMigrationEvidence {
     }
 }
 
-Export-ModuleMember -Function Get-RepoSharedSkillsMigrationPlan, Assert-RepoSharedSkillsMigrationEvidence, Get-RepoSkillMigrationGitState, Get-UserSharedSkillsReadiness, Assert-RepoAndUserRootsDistinct
+Export-ModuleMember -Function Get-RepoSharedSkillsMigrationPlan, Assert-RepoSharedSkillsMigrationEvidence, Get-RepoSkillMigrationGitState, Get-UserSharedSkillsReadiness, Assert-RepoAndUserRootsDistinct, Set-RepoSharedSkillsPlatformRuntime
