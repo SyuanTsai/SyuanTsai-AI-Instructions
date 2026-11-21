@@ -90,18 +90,79 @@ function Get-CanonicalRepositoryRoot {
     return $root
 }
 
+$script:RepoSharedSkillsPlatformRuntimeModule = $null
+
+function Import-RepoSharedSkillsPlatformRuntime {
+    if ($null -ne $script:RepoSharedSkillsPlatformRuntimeModule) { return $script:RepoSharedSkillsPlatformRuntimeModule }
+    $manifestPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'platform-runtime.psd1'))
+    $modules = @(Import-Module -Name $manifestPath -PassThru -Scope Local -ErrorAction Stop)
+    if ($modules.Count -ne 1 -or
+        [IO.Path]::GetFullPath([string]$modules[0].ModuleBase) -cne [IO.Path]::GetFullPath($PSScriptRoot)) {
+        throw 'Repository Skill migration platform runtime did not load from its expected sibling path.'
+    }
+    foreach ($commandName in @('Assert-PlatformRuntimeInventory','Open-PlatformDirectory','Resolve-PlatformPhysicalPath')) {
+        if (-not $modules[0].ExportedCommands.ContainsKey($commandName)) {
+            throw "Repository Skill migration platform runtime does not expose '$commandName'."
+        }
+    }
+    & $modules[0].ExportedCommands['Assert-PlatformRuntimeInventory'] | Out-Null
+    $script:RepoSharedSkillsPlatformRuntimeModule = $modules[0]
+    return $script:RepoSharedSkillsPlatformRuntimeModule
+}
+
+function Get-UnixPhysicalRootIdentity {
+    param([Parameter(Mandatory=$true)][string]$CanonicalPath,[Parameter(Mandatory=$true)][string]$RootName)
+    $item = $null
+    try { $item = Get-Item -Force -LiteralPath $CanonicalPath -ErrorAction Stop }
+    catch [Management.Automation.ItemNotFoundException] { return $null }
+    catch [IO.DirectoryNotFoundException] { return $null }
+    catch {
+        throw "$RootName physical root identity cannot be obtained; migration fails closed. $($_.Exception.Message)"
+    }
+    if (-not $item.PSIsContainer) {
+        throw "$RootName physical root is not a directory; migration fails closed."
+    }
+
+    $lease = $null
+    try {
+        $runtime = Import-RepoSharedSkillsPlatformRuntime
+        # Root-only leases reject symlink components. Resolve every component first so
+        # the lease observes the directory a root alias actually targets.
+        $physicalPath = & $runtime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path $CanonicalPath
+        $lease = & $runtime.ExportedCommands['Open-PlatformDirectory'] -Root $physicalPath -RootOnly
+        return [pscustomobject]@{
+            Device = [uint64]$lease.Observation.Device
+            Inode = [uint64]$lease.Observation.Inode
+        }
+    }
+    catch {
+        throw "$RootName physical root identity cannot be obtained; migration fails closed. $($_.Exception.Message)"
+    }
+    finally { if ($null -ne $lease) { $lease.Dispose() } }
+}
+
 function Assert-RepoAndUserRootsDistinct {
     [CmdletBinding()]
     param([Parameter(Mandatory=$true)][string]$Repository,[Parameter(Mandatory=$true)][string]$UserHome)
 
     $repositoryCanonical = Get-CanonicalRepositoryRoot $Repository
     $userCanonical = Get-CanonicalRepositoryRoot $UserHome
-    if ($repositoryCanonical.Equals($userCanonical,[StringComparison]::OrdinalIgnoreCase)) {
+    $isWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    $pathComparison = if ($isWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    if ($repositoryCanonical.Equals($userCanonical,$pathComparison)) {
         throw 'Repository and USER roots must be physically distinct; canonical root alias detected.'
     }
 
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-        throw 'Repository and USER physical root identity cannot be verified on this platform; migration fails closed.'
+    if (-not $isWindows) {
+        $repositoryIdentity = Get-UnixPhysicalRootIdentity -CanonicalPath $repositoryCanonical -RootName 'Repository'
+        if ($null -eq $repositoryIdentity) { throw 'Repository physical root is missing; migration fails closed.' }
+        $userIdentity = Get-UnixPhysicalRootIdentity -CanonicalPath $userCanonical -RootName 'USER'
+        if ($null -eq $userIdentity) { return $true }
+        if ([uint64]$repositoryIdentity.Device -eq [uint64]$userIdentity.Device -and
+            [uint64]$repositoryIdentity.Inode -eq [uint64]$userIdentity.Inode) {
+            throw 'Repository and USER roots resolve to the same physical directory; aliased roots are not eligible for Skill migration.'
+        }
+        return $true
     }
     $repositoryIdentity = [CodexAiInstructions.RepositoryRootIdentity]::TryGetDirectoryIdentity($repositoryCanonical)
     if ($null -eq $repositoryIdentity) { throw 'Repository physical root is missing; migration fails closed.' }

@@ -1281,6 +1281,72 @@ Describe 'SYP214 whole-Skill migration evidence' {
         finally { if($substAlias){Remove-Syp214SubstAlias -Alias $substAlias} }
     }
 
+    # Register only on the native host; keep this file's Core CI skip count at zero.
+    if($IsLinux -or $IsMacOS){
+        # Scenario: Repository and USER roots are separate existing Unix directories.
+        # Purpose: Permit migration when native device and inode observations prove the roots are distinct.
+        It 'InterT46_allows_distinct_Unix_repository_and_USER_roots' {
+            $unixRepository=Join-Path $caseRoot 'unix-repository'
+            $unixUser=Join-Path $caseRoot 'unix-user'
+            [void][IO.Directory]::CreateDirectory($unixRepository)
+            [void][IO.Directory]::CreateDirectory($unixUser)
+
+            (Assert-RepoAndUserRootsDistinct -Repository $unixRepository -UserHome $unixUser) | Should Be $true
+        }
+
+        # Scenario: The USER path is a symbolic-link alias of the repository root.
+        # Purpose: Compare resolved directory identities and reject a lexical alias before migration.
+        It 'InterT47_rejects_a_Unix_USER_symlink_to_the_repository_root' {
+            $unixRepository=Join-Path $caseRoot 'unix-repository'
+            $unixUserAlias=Join-Path $caseRoot 'unix-user-alias'
+            [void][IO.Directory]::CreateDirectory($unixRepository)
+            New-Item -ItemType SymbolicLink -Path $unixUserAlias -Target $unixRepository | Out-Null
+
+            { Assert-RepoAndUserRootsDistinct -Repository $unixRepository -UserHome $unixUserAlias } |
+                Should Throw 'Repository and USER roots resolve to the same physical directory; aliased roots are not eligible for Skill migration.'
+        }
+
+        # Scenario: The repository path is a symbolic-link alias of the USER root.
+        # Purpose: Apply the same physical-identity rejection regardless of which root is the alias.
+        It 'InterT48_rejects_a_Unix_repository_symlink_to_the_USER_root' {
+            $unixUser=Join-Path $caseRoot 'unix-user'
+            $unixRepositoryAlias=Join-Path $caseRoot 'unix-repository-alias'
+            [void][IO.Directory]::CreateDirectory($unixUser)
+            New-Item -ItemType SymbolicLink -Path $unixRepositoryAlias -Target $unixUser | Out-Null
+
+            { Assert-RepoAndUserRootsDistinct -Repository $unixRepositoryAlias -UserHome $unixUser } |
+                Should Throw 'Repository and USER roots resolve to the same physical directory; aliased roots are not eligible for Skill migration.'
+        }
+
+        # Scenario: Two existing Unix directories differ only by letter case on a case-sensitive filesystem.
+        # Purpose: Keep canonical-path comparison ordinal so distinct case variants remain eligible.
+        It 'InterT49_allows_distinct_case_variant_Unix_roots' {
+            $lowerRoot=Join-Path $caseRoot 'case-root'
+            $upperRoot=Join-Path $caseRoot 'CASE-ROOT'
+            [void][IO.Directory]::CreateDirectory($lowerRoot)
+            if([IO.Directory]::Exists($upperRoot)){
+                Set-TestInconclusive 'The test filesystem is case-insensitive; distinct case-variant directories cannot be created.'
+                return
+            }
+            [void][IO.Directory]::CreateDirectory($upperRoot)
+
+            (Assert-RepoAndUserRootsDistinct -Repository $lowerRoot -UserHome $upperRoot) | Should Be $true
+        }
+
+        # Scenario: One Unix root is absent while the other root exists.
+        # Purpose: Fail closed for a missing repository while preserving the supported missing-USER state.
+        It 'InterT50_distinguishes_missing_Unix_repository_and_USER_roots' {
+            $existingRoot=Join-Path $caseRoot 'existing-root'
+            $missingRepository=Join-Path $caseRoot 'missing-repository'
+            $missingUser=Join-Path $caseRoot 'missing-user'
+            [void][IO.Directory]::CreateDirectory($existingRoot)
+
+            { Assert-RepoAndUserRootsDistinct -Repository $missingRepository -UserHome $existingRoot } |
+                Should Throw 'Repository physical root is missing; migration fails closed.'
+            (Assert-RepoAndUserRootsDistinct -Repository $existingRoot -UserHome $missingUser) | Should Be $true
+        }
+    }
+
     }
 
     # Scenario: USER is a parent directory of a valid single-file Skill consumer.
