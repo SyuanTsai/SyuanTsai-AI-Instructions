@@ -1492,43 +1492,13 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private static void RunMutationTestHook(string point)
         {
             Action<string> hook = MutationTestHook;
-            if (hook == null) return;
-            try { hook(point); }
-            catch (Exception ex)
-            {
-                for (Exception current = ex; current != null; current = current.InnerException)
-                {
-                    if (current is PlatformCapabilityUnavailableException ||
-                        current is PlatformErrnoException ||
-                        current is PlatformMutationException ||
-                        current is PlatformVerificationException)
-                    {
-                        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(current).Throw();
-                    }
-                }
-                throw;
-            }
+            if (hook != null) hook(point);
         }
 
         private static void RunProbeTestHook(string point)
         {
             Action<string> hook = ProbeTestHook;
-            if (hook == null) return;
-            try { hook(point); }
-            catch (Exception ex)
-            {
-                for (Exception current = ex; current != null; current = current.InnerException)
-                {
-                    if (current is PlatformCapabilityUnavailableException ||
-                        current is PlatformErrnoException ||
-                        current is PlatformMutationException ||
-                        current is PlatformVerificationException)
-                    {
-                        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(current).Throw();
-                    }
-                }
-                throw;
-            }
+            if (hook != null) hook(point);
         }
 
         public static string GetSha256(UnixLease lease)

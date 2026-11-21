@@ -3956,6 +3956,13 @@ Describe 'Unix P7c durable publication and removal' {
             $state = Get-P7cState $Lease
             [pscustomobject][ordered]@{ exists=$true;sha256=$state.sha256;length=$state.length;identity=$state.identity }
         }
+        function Get-P7cTypedPlatformException([Exception]$Exception) {
+            # Mutation/probe hooks are PowerShell scriptblocks invoked as .NET delegates, so PowerShell wraps the typed exception; this helper only removes that delegate wrapper.
+            for($current=$Exception;$null-ne$current;$current=$current.InnerException){
+                if($current.GetType().Namespace-ceq'SyuanTsai.AIInstructions.PlatformRuntime'-and$current.GetType().Name-like'*Exception'){return $current}
+            }
+            return $Exception
+        }
         function Get-P7cAbsentState { [pscustomobject][ordered]@{ exists=$false; sha256=$null; length=$null; identity=$null } }
         function Read-P7cText($Parent,[string]$Leaf) {
             $lease = Open-PlatformFile -ParentLease $Parent -Leaf $Leaf -Access Read -CreateMode OpenExisting
@@ -4458,7 +4465,7 @@ Describe 'Unix P7c durable publication and removal' {
                 $hook={param($point)if($point-ceq$failurePoint){throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]::new($failureCapability,[SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem())}}.GetNewClosure()
                 $field.SetValue($null,[Action[string]]$hook)
                 $caught=$null
-                try{Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage $stageState|Out-Null}catch{$caught=$_.Exception}
+                try{Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage $stageState|Out-Null}catch{$caught=Get-P7cTypedPlatformException $_.Exception}
                 $caught.GetType().Name|Should Be 'PlatformCapabilityUnavailableException'
                 (Read-P7cText $parent target)|Should Be original
                 (Read-P7cText $txn.Lease stage)|Should Be replacement
@@ -4631,7 +4638,7 @@ Describe 'Unix P7c durable publication and removal' {
             $stage=New-P7cFile $txn.Lease stage replacement
             $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'destination-preflight-after-probe-cleanup-before-transaction-fsync'){throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]::new('directory-fsync: EINVAL',[SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem())}})
             $caught=$null
-            try{Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage)|Out-Null}catch{$caught=$_.Exception}
+            try{Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage)|Out-Null}catch{$caught=Get-P7cTypedPlatformException $_.Exception}
             $caught.GetType().Name|Should Be PlatformCapabilityUnavailableException;$caught.Capability|Should Match directory-fsync
             (Read-P7cText $parent target)|Should Be original;(Read-P7cText $txn.Lease stage)|Should Be replacement
             Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/backup")|Should Be $false
@@ -4841,7 +4848,7 @@ Describe 'Unix P7c durable publication and removal' {
             $stage=New-P7cFile $txn.Lease stage replacement;$stageState=Get-P7cStageState $stage
             $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'publication-before-original-file-fsync'){throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException]::new('fsync-publication-original-file',5,'EIO')}})
             $caught=$null
-            try{Publish-PlatformFile -ParentLease $publishParent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage $stageState|Out-Null}catch{$caught=$_.Exception}
+            try{Publish-PlatformFile -ParentLease $publishParent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage $stageState|Out-Null}catch{$caught=Get-P7cTypedPlatformException $_.Exception}
             $caught.GetType().Name|Should Be PlatformErrnoException;$caught.Operation|Should Be 'fsync-publication-original-file'
             (Read-P7cText $publishParent target)|Should Be original;(Read-P7cText $txn.Lease stage)|Should Be replacement
             Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/backup")|Should Be $false
@@ -4849,7 +4856,7 @@ Describe 'Unix P7c durable publication and removal' {
             $removeTarget=New-P7cFile $removeParent target owned;$removeState=Get-P7cState $removeTarget;$removeTarget.Dispose();$removeTarget=$null
             $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'removal-before-original-file-fsync'){throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException]::new('fsync-removal-original-file',5,'EIO')}})
             $caught=$null
-            try{Remove-PlatformOwnedFile -ParentLease $removeParent -Leaf target -ExpectedState $removeState -TransactionLease $txn.Lease -TombstoneLeaf tombstone|Out-Null}catch{$caught=$_.Exception}
+            try{Remove-PlatformOwnedFile -ParentLease $removeParent -Leaf target -ExpectedState $removeState -TransactionLease $txn.Lease -TombstoneLeaf tombstone|Out-Null}catch{$caught=Get-P7cTypedPlatformException $_.Exception}
             $caught.GetType().Name|Should Be PlatformErrnoException;$caught.Operation|Should Be 'fsync-removal-original-file'
             (Read-P7cText $removeParent target)|Should Be owned;(Read-P7cText $txn.Lease stage)|Should Be replacement
             Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/tombstone")|Should Be $false

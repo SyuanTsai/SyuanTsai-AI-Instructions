@@ -1053,6 +1053,17 @@ class LazyPoolResolver:
                 continue
             requirements = tuple(self.requirements[project].values())
             if any(
+                not descriptor.version.is_prerelease
+                and descriptor.filename not in self.attempted.get(project, set())
+                and all(
+                    not requirement.specifier
+                    or requirement.specifier.contains(descriptor.version, prereleases=True)
+                    for requirement in requirements
+                )
+                for descriptor in self.catalog.descriptors(project)
+            ):
+                continue
+            if any(
                 entry.path.parent.resolve() == self.candidate_dir
                 and entry.path.is_file()
                 and entry.metadata.normalized_name == project
@@ -1068,28 +1079,32 @@ class LazyPoolResolver:
         return permitted
 
     def _run_offline_plan(self) -> bool:
+        self.prerelease_permissions = set()
         # Every round first preserves pip's default final-release preference.
         if self._run_offline_pip(self._build_offline_pip_command()):
             return True
-        eligible = self._prerelease_permission_projects(self.last_pip_error)
-        if not eligible:
-            return False
-        newly_permitted = eligible.difference(self.prerelease_permissions)
-        self.prerelease_permissions.update(eligible)
-        if self.budget is not None:
-            for project in sorted(newly_permitted):
-                self.budget.record(
-                    phase="prerelease-permission", round_number=self.rounds,
-                    candidate_count=len(self.entries), project=project,
-                    source="offline verified pool fallback",
-                )
         constraints_path = self.plan_path.with_name(
             self.plan_path.name + ".prerelease-constraints.txt"
         )
-        with constraints_path.open("w", encoding="utf-8", newline="\n") as output:
-            for project in sorted(self.prerelease_permissions):
-                output.write(f"{project}>=0.0.dev0\n")
-        return self._run_offline_pip(self._build_offline_pip_command(constraints_path))
+        for _ in range(len(self.requirements)):
+            eligible = self._prerelease_permission_projects(self.last_pip_error)
+            newly_permitted = eligible.difference(self.prerelease_permissions)
+            if not newly_permitted:
+                return False
+            self.prerelease_permissions.update(newly_permitted)
+            if self.budget is not None:
+                for project in sorted(newly_permitted):
+                    self.budget.record(
+                        phase="prerelease-permission", round_number=self.rounds,
+                        candidate_count=len(self.entries), project=project,
+                        source="offline verified pool fallback",
+                    )
+            with constraints_path.open("w", encoding="utf-8", newline="\n") as output:
+                for project in sorted(self.prerelease_permissions):
+                    output.write(f"{project}>=0.0.dev0\n")
+            if self._run_offline_pip(self._build_offline_pip_command(constraints_path)):
+                return True
+        return False
 
     def _unsatisfied_projects(self) -> List[Tuple[str, List[Requirement], Set[str]]]:
         # A project is a contradiction when no verified entry satisfies all of
@@ -1778,6 +1793,98 @@ def self_test_falls_back_to_prerelease() -> None:
     self_test_prerelease_candidate_priority("dep>=0.28.0", ("1.0.dev6",), "1.0.dev6")
 
 
+def self_test_multiple_prerelease_permissions() -> None:
+    # Scenario: Two required projects only offer development releases.
+    # Purpose: Grant every project-specific permission needed within the same pip round.
+    with tempfile.TemporaryDirectory(prefix="wheel-prerelease-multiple-") as temporary:
+        root = Path(temporary)
+        sources = root / "sources"
+        sources.mkdir()
+        root_wheel = make_test_wheel(
+            sources, "prerelease-multiple-root", "1.0", ("dep-a>=1.0", "dep-b>=1.0")
+        )
+        wheels = [
+            make_test_wheel(sources, "dep-a", "2.0.dev1"),
+            make_test_wheel(sources, "dep-b", "2.0.dev1"),
+        ]
+        resolver = LazyPoolResolver(
+            LocalCatalog([local_descriptor(path) for path in wheels]),
+            root_wheel, file_sha256(root_wheel), root / "pool", root / "plan.json",
+        )
+        resolver.resolve()
+        selection = validate_and_select_plan(root / "plan.json", resolver, root / "selected")
+        selected = {entry["normalizedName"]: entry["version"] for entry in selection["entries"]}
+        if selected.get("dep-a") != "2.0.dev1" or selected.get("dep-b") != "2.0.dev1":
+            raise AssertionError(f"Both prerelease-only projects must resolve; got {selected!r}")
+
+
+def self_test_prerelease_permission_waits_for_final_attempt() -> None:
+    # Scenario: A verified prerelease is pooled while a satisfying final remains unattempted.
+    # Purpose: Explore the final candidate before permitting prerelease fallback.
+    with tempfile.TemporaryDirectory(prefix="wheel-prerelease-final-attempt-") as temporary:
+        root = Path(temporary)
+        sources = root / "sources"
+        sources.mkdir()
+        root_wheel = make_test_wheel(sources, "prerelease-final-root", "1.0", ("dep>=1.0",))
+        wheels = [
+            make_test_wheel(sources, "dep", "2.0.dev1"),
+            make_test_wheel(sources, "dep", "1.5"),
+        ]
+        descriptors = [local_descriptor(path) for path in wheels]
+        resolver = LazyPoolResolver(
+            LocalCatalog(descriptors),
+            root_wheel, file_sha256(root_wheel), root / "pool", root / "plan.json",
+        )
+        prerelease = descriptors[0]
+        prerelease_path = resolver.catalog.materialize(prerelease, resolver.candidate_dir)
+        prerelease_metadata = verify_candidate(prerelease_path, prerelease)
+        resolver.entries[prerelease_path.name] = PoolEntry(
+            prerelease, prerelease_path, prerelease_metadata, "pypi-simple-json"
+        )
+        resolver.attempted.setdefault("dep", set()).add(prerelease.filename)
+        missing = "ERROR: No matching distribution found for dep"
+        if resolver._prerelease_permission_projects(missing):
+            raise AssertionError("An unattempted satisfying final must block prerelease permission")
+        if not resolver._add_next_candidate("dep"):
+            raise AssertionError("The final candidate fixture must remain available for an attempt")
+        if resolver._prerelease_permission_projects(missing) != {"dep"}:
+            raise AssertionError("An attempted final must no longer block a satisfying prerelease")
+
+
+def self_test_prerelease_permissions_reset_each_round() -> None:
+    # Scenario: One round needs prerelease fallback and the next succeeds without constraints.
+    # Purpose: Keep permissions local to the most recent offline pip round.
+    with tempfile.TemporaryDirectory(prefix="wheel-prerelease-round-reset-") as temporary:
+        root = Path(temporary)
+        sources = root / "sources"
+        sources.mkdir()
+        root_wheel = make_test_wheel(sources, "prerelease-reset-root", "1.0", ("dep>=1.0",))
+        wheel = make_test_wheel(sources, "dep", "2.0.dev1")
+        resolver = LazyPoolResolver(
+            LocalCatalog([local_descriptor(wheel)]),
+            root_wheel, file_sha256(root_wheel), root / "pool", root / "plan.json",
+        )
+        resolver._seed_new_projects()
+        outcomes = iter((False, True))
+
+        def first_round(_command: Sequence[str]) -> bool:
+            solved = next(outcomes)
+            resolver.last_pip_error = "" if solved else "ERROR: No matching distribution found for dep"
+            return solved
+
+        resolver._run_offline_pip = first_round  # type: ignore[method-assign]
+        if not resolver._run_offline_plan() or resolver.prerelease_permissions != {"dep"}:
+            raise AssertionError("The first round must record its prerelease permission")
+
+        def second_round(_command: Sequence[str]) -> bool:
+            resolver.last_pip_error = ""
+            return True
+
+        resolver._run_offline_pip = second_round  # type: ignore[method-assign]
+        if not resolver._run_offline_plan() or resolver.prerelease_permissions:
+            raise AssertionError("Prerelease permissions must reset before the next round")
+
+
 def self_test_prerelease_permission_is_scoped() -> None:
     # Scenario: One project requires prerelease fallback while another has final and prerelease candidates.
     # Purpose: Keep the fallback permission project-scoped and preserve final-first selection elsewhere.
@@ -2008,6 +2115,9 @@ def self_test_command(arguments: argparse.Namespace) -> None:
     self_test_root_missing_dependency_fails_closed()
     self_test_prefers_final_over_prerelease()
     self_test_falls_back_to_prerelease()
+    self_test_multiple_prerelease_permissions()
+    self_test_prerelease_permission_waits_for_final_attempt()
+    self_test_prerelease_permissions_reset_each_round()
     self_test_prerelease_permission_is_scoped()
     self_test_first_prerelease_attempt_has_no_constraints()
     self_test_honors_explicit_prerelease_requirement()
