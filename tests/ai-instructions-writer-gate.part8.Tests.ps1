@@ -154,10 +154,11 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'r155') -Failpoint RecoveryOnly
         $parallelCases=New-Object System.Collections.Generic.List[object];$caseIndex=0
         foreach($case in $cases){foreach($recoveryPath in @('InProcess','NextRun')){
-            $parallelCases.Add([pscustomobject]@{Index=$caseIndex;Name=$case.Name;Failpoint=$case.Failpoint;Stored=$case.Stored;Bound=$case.Bound;RecoveryPath=$recoveryPath;EvidenceSequence=$evidenceSequence;ExternalRoot=$script:ExternalRoot;Seed=$script:P9cSeeds.False;Context=$script:P9cUpdated.Context;ArchivePath=$script:P9cChanged.ArchivePath;Recovery=$recovery});$caseIndex++
+            $caseParent=Join-Path $script:ExternalRoot ("p155-"+$caseIndex);New-Item -ItemType Directory -Path $caseParent|Out-Null
+            $parallelCases.Add([pscustomobject]@{Index=$caseIndex;Name=$case.Name;Failpoint=$case.Failpoint;Stored=$case.Stored;Bound=$case.Bound;RecoveryPath=$recoveryPath;EvidenceSequence=$evidenceSequence;CaseParent=$caseParent;Seed=$script:P9cSeeds.False;Context=$script:P9cUpdated.Context;ArchivePath=$script:P9cChanged.ArchivePath;Recovery=$recovery});$caseIndex++
         }}
         $worker={param($case)
-                $caseParent=Join-Path $case.ExternalRoot ("p155-"+$case.Index);New-Item -ItemType Directory -Path $caseParent|Out-Null
+                $caseParent=$case.CaseParent
                 $target=Join-Path $caseParent 'repo';Copy-Item -LiteralPath $case.Seed -Destination $target -Recurse
                 $before=Get-P9cPublicationStateSnapshot $target
                 $stashBefore=(@(& git -C $target rev-parse --verify refs/stash 2>$null)|Select-Object -First 1)

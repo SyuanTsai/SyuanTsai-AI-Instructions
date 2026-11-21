@@ -107,9 +107,9 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
     It 'InterT145_restarts_reverse_undo_after_each_remediation_substep' {
         $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'r145') -Failpoint RecoveryOnly
         $roles=@('git-index','git-ref','remediation-and-instruction')
-        $cases=@(for($index=0;$index-lt$roles.Count;$index++){[pscustomobject]@{Index=$index;Role=$roles[$index];ExternalRoot=$script:ExternalRoot;Seed=$script:P9cSeeds.True;Context=$script:P9cUpdated.Context;ArchivePath=$script:P9cChanged.ArchivePath;Recovery=$recovery}})
+        $cases=@(for($index=0;$index-lt$roles.Count;$index++){$caseParent=Join-Path $script:ExternalRoot ("p145-"+$index);New-Item -ItemType Directory -Path $caseParent|Out-Null;[pscustomobject]@{Index=$index;Role=$roles[$index];CaseParent=$caseParent;Seed=$script:P9cSeeds.True;Context=$script:P9cUpdated.Context;ArchivePath=$script:P9cChanged.ArchivePath;Recovery=$recovery}})
         $worker={param($case)
-            $caseParent=Join-Path $case.ExternalRoot ("p145-"+$case.Index);New-Item -ItemType Directory -Path $caseParent|Out-Null
+            $caseParent=$case.CaseParent
             $target=Join-Path $caseParent 'repo';Copy-Item -LiteralPath $case.Seed -Destination $target -Recurse
             $before=Get-P9cPublicationStateSnapshot $target
             $appliedBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $caseParent 'ap') -Failpoint before-committed-journal-write -RecoveryPath NextRun
@@ -170,11 +170,12 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         $cases=New-Object System.Collections.Generic.List[object];$caseIndex=0
         foreach($failpoint in @("during-cleanup-$backupLeaf",'after-cleanup-journal-before-directory')){
             foreach($recoveryPath in @('InProcess','NextRun')){
-                $cases.Add([pscustomobject]@{Index=$caseIndex;Failpoint=$failpoint;RecoveryPath=$recoveryPath;ExternalRoot=$script:ExternalRoot;Seed=$script:P9cSeeds.False;Context=$script:P9cUpdated.Context;ArchivePath=$script:P9cChanged.ArchivePath});$caseIndex++
+                $caseParent=Join-Path $script:ExternalRoot ("p147-"+$caseIndex);New-Item -ItemType Directory -Path $caseParent|Out-Null
+                $cases.Add([pscustomobject]@{Index=$caseIndex;Failpoint=$failpoint;RecoveryPath=$recoveryPath;CaseParent=$caseParent;Seed=$script:P9cSeeds.False;Context=$script:P9cUpdated.Context;ArchivePath=$script:P9cChanged.ArchivePath});$caseIndex++
             }
         }
         $worker={param($case)
-            $caseParent=Join-Path $case.ExternalRoot ("p147-"+$case.Index);New-Item -ItemType Directory -Path $caseParent|Out-Null
+            $caseParent=$case.CaseParent
             $target=Join-Path $caseParent 'repo';Copy-Item -LiteralPath $case.Seed -Destination $target -Recurse
             $targetIndexBefore=[string]((Get-P9cPublicationStateSnapshot $target|ConvertFrom-Json).indexRaw)
             $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $caseParent 'fp') -Failpoint $case.Failpoint -RecoveryPath $case.RecoveryPath

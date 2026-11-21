@@ -30,31 +30,22 @@ function Invoke-P9cParallelCases {
     if($Cases.Count-eq0){return @()}
 
     $indexed=@(for($index=0;$index-lt$Cases.Count;$index++){[pscustomobject]@{Index=$index;Case=$Cases[$index]}})
-    $hadAuthorDate=Test-Path Env:GIT_AUTHOR_DATE;$priorAuthorDate=$env:GIT_AUTHOR_DATE
-    $hadCommitterDate=Test-Path Env:GIT_COMMITTER_DATE;$priorCommitterDate=$env:GIT_COMMITTER_DATE
-    try{
-        $env:GIT_AUTHOR_DATE=$script:P9cFixedGitDate
-        $env:GIT_COMMITTER_DATE=$script:P9cFixedGitDate
-        if($ThrottleLimit-eq1){
-            $results=@(foreach($workItem in $indexed){
-                try{[pscustomobject]@{Index=$workItem.Index;Value=(& $Worker $workItem.Case);ErrorMessage=$null}}
-                catch{[pscustomobject]@{Index=$workItem.Index;Value=$null;ErrorMessage=$_.Exception.Message;ErrorPosition=$_.InvocationInfo.PositionMessage;ErrorStack=$_.ScriptStackTrace}}
-            })
-        }else{
-            $supportPath=$script:P9cTestSupportPath
-            $workerText=$Worker.ToString()
-            $results=@($indexed|ForEach-Object -Parallel {
-                $workItem=$_
-                try{
-                    . $using:supportPath
-                    $workerBlock=[scriptblock]::Create($using:workerText)
-                    [pscustomobject]@{Index=$workItem.Index;Value=(& $workerBlock $workItem.Case);ErrorMessage=$null}
-                }catch{[pscustomobject]@{Index=$workItem.Index;Value=$null;ErrorMessage=$_.Exception.Message;ErrorPosition=$_.InvocationInfo.PositionMessage;ErrorStack=$_.ScriptStackTrace}}
-            } -ThrottleLimit $ThrottleLimit)
-        }
-    }finally{
-        if($hadAuthorDate){$env:GIT_AUTHOR_DATE=$priorAuthorDate}else{Remove-Item Env:GIT_AUTHOR_DATE -ErrorAction SilentlyContinue}
-        if($hadCommitterDate){$env:GIT_COMMITTER_DATE=$priorCommitterDate}else{Remove-Item Env:GIT_COMMITTER_DATE -ErrorAction SilentlyContinue}
+    if($ThrottleLimit-eq1){
+        $results=@(foreach($workItem in $indexed){
+            try{[pscustomobject]@{Index=$workItem.Index;Value=(& $Worker $workItem.Case);ErrorMessage=$null}}
+            catch{[pscustomobject]@{Index=$workItem.Index;Value=$null;ErrorMessage=$_.Exception.Message;ErrorPosition=$_.InvocationInfo.PositionMessage;ErrorStack=$_.ScriptStackTrace}}
+        })
+    }else{
+        $supportPath=$script:P9cTestSupportPath
+        $workerText=$Worker.ToString()
+        $results=@($indexed|ForEach-Object -Parallel {
+            $workItem=$_
+            try{
+                . $using:supportPath
+                $workerBlock=[scriptblock]::Create($using:workerText)
+                [pscustomobject]@{Index=$workItem.Index;Value=(& $workerBlock $workItem.Case);ErrorMessage=$null}
+            }catch{[pscustomobject]@{Index=$workItem.Index;Value=$null;ErrorMessage=$_.Exception.Message;ErrorPosition=$_.InvocationInfo.PositionMessage;ErrorStack=$_.ScriptStackTrace}}
+        } -ThrottleLimit $ThrottleLimit)
     }
     return @($results|Sort-Object Index)
 }
@@ -281,31 +272,46 @@ function Invoke-P9bRepoBootstrap {
         [string]$GitExecutable,
         [string]$BootstrapPath=(Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1')
     )
-    $userHome=Join-Path (Split-Path -Parent $TargetRoot) 'p9b-user'
-    New-Item -ItemType Directory -Force -Path $userHome|Out-Null
+    $caseParent=Split-Path -Parent $TargetRoot
+    $userHome=Join-Path $caseParent 'p9b-user'
+    $tempRoot=Join-Path $caseParent 't'
+    New-Item -ItemType Directory -Force -Path $userHome,$tempRoot|Out-Null
     $arguments=@(
-        '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$BootstrapPath,
         '-SourceArchivePath',$ArchivePath,'-ConfigurationPath',$Context.RoutingPath,'-ProvenancePath',$Context.ProvenancePath,
         '-RuntimeRoot',$Context.RuntimeRoot,'-TargetRoot',$TargetRoot,'-UserHome',$userHome
     )
     if(-not[string]::IsNullOrWhiteSpace($GitExecutable)){$arguments+=@('-GitExecutable',$GitExecutable)}
     if(-not[string]::IsNullOrWhiteSpace([string]$Context.ProjectCandidateArchivePath)){$arguments+=@('-ProjectCandidateArchivePath',[string]$Context.ProjectCandidateArchivePath)}
-    $datesAlreadyScoped=($env:GIT_AUTHOR_DATE -ceq $script:P9cFixedGitDate)-and($env:GIT_COMMITTER_DATE -ceq $script:P9cFixedGitDate)
-    if(-not$datesAlreadyScoped){
-        $hadAuthorDate=Test-Path Env:GIT_AUTHOR_DATE;$priorAuthorDate=$env:GIT_AUTHOR_DATE
-        $hadCommitterDate=Test-Path Env:GIT_COMMITTER_DATE;$priorCommitterDate=$env:GIT_COMMITTER_DATE
-    }
+    $startInfo=[Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName=$script:PowerShellExecutable
+    $startInfo.UseShellExecute=$false
+    $startInfo.CreateNoWindow=$true
+    $startInfo.RedirectStandardOutput=$true
+    $startInfo.RedirectStandardError=$true
+    $startInfo.StandardOutputEncoding=[Text.UTF8Encoding]::new($false)
+    $startInfo.StandardErrorEncoding=[Text.UTF8Encoding]::new($false)
+    $encodedArguments=@(@($BootstrapPath)+$arguments|ForEach-Object{[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$_))})
+    $encodedArgumentList=@($encodedArguments|ForEach-Object{"'$_'"})-join','
+    $command="`$encodedArguments=@($encodedArgumentList);`$decodedArguments=@(`$encodedArguments|ForEach-Object{[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(`$_))});`$scriptPath=[string]`$decodedArguments[0];`$parameters=@{};for(`$index=1;`$index-lt`$decodedArguments.Count;`$index+=2){`$parameters[[string]`$decodedArguments[`$index].TrimStart('-')]=`$decodedArguments[`$index+1]};try{& `$scriptPath @parameters 2>&1}catch{`$_|Write-Output;exit 1};exit 0"
+    $encodedCommand=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    foreach($argument in @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',$encodedCommand)){$null=$startInfo.ArgumentList.Add([string]$argument)}
+    foreach($name in @('TEMP','TMP','TMPDIR')){$startInfo.Environment[$name]=$tempRoot}
+    $startInfo.Environment['GIT_AUTHOR_DATE']=$script:P9cFixedGitDate
+    $startInfo.Environment['GIT_COMMITTER_DATE']=$script:P9cFixedGitDate
+    $process=[Diagnostics.Process]::new();$process.StartInfo=$startInfo
     try{
-        if(-not$datesAlreadyScoped){$env:GIT_AUTHOR_DATE=$script:P9cFixedGitDate;$env:GIT_COMMITTER_DATE=$script:P9cFixedGitDate}
-        $output=& $script:PowerShellExecutable @arguments 2>&1
-        $exitCode=$LASTEXITCODE
+        if(-not$process.Start()){throw 'Could not start the bootstrap PowerShell process.'}
+        $standardOutputTask=$process.StandardOutput.ReadToEndAsync()
+        $standardErrorTask=$process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $standardOutput=$standardOutputTask.GetAwaiter().GetResult()
+        $standardError=$standardErrorTask.GetAwaiter().GetResult()
+        $exitCode=$process.ExitCode
     }finally{
-        if(-not$datesAlreadyScoped){
-            if($hadAuthorDate){$env:GIT_AUTHOR_DATE=$priorAuthorDate}else{Remove-Item Env:GIT_AUTHOR_DATE -ErrorAction SilentlyContinue}
-            if($hadCommitterDate){$env:GIT_COMMITTER_DATE=$priorCommitterDate}else{Remove-Item Env:GIT_COMMITTER_DATE -ErrorAction SilentlyContinue}
-        }
+        $process.Dispose()
     }
-    return [pscustomobject]@{ExitCode=$exitCode;Output=($output-join[Environment]::NewLine)}
+    $output=([string]$standardOutput+[string]$standardError).TrimEnd([char[]]@("`r","`n"))
+    return [pscustomobject]@{ExitCode=$exitCode;Output=$output}
 }
 
 function New-P9cProjectFixture {
@@ -616,15 +622,17 @@ function Invoke-P9cInterT140FailpointMatrix {
     $cases=New-Object System.Collections.Generic.List[object];$caseIndex=0
     foreach($role in $roles){foreach($position in @('before','after-before-journal')){foreach($recoveryPath in @('InProcess','NextRun')){
         $sequence=$roleSequences[$role]
+        $caseParent=Join-Path $ExternalRoot ("c"+$caseIndex);New-Item -ItemType Directory -Path $caseParent|Out-Null
         $cases.Add([pscustomobject]@{
             Index=$caseIndex;ExternalRoot=$ExternalRoot;Seed=$Seed;Context=$Context;ArchivePath=$ArchivePath
+            CaseParent=$caseParent
             WithRemediation=$WithRemediation;Role=$role;Position=$position;RecoveryPath=$recoveryPath;Sequence=$sequence
             Failpoint=if($position-ceq'before'){"before-operation-$sequence"}else{"after-operation-$sequence-before-journal"}
             RecoveryOnly=$recoveryOnly
         });$caseIndex++
     }}}
     $worker={param($case)
-        $caseParent=Join-Path $case.ExternalRoot ("c"+$case.Index);New-Item -ItemType Directory -Path $caseParent|Out-Null
+        $caseParent=$case.CaseParent
         $caseRoot=Join-Path $caseParent 'repo';Copy-Item -LiteralPath $case.Seed -Destination $caseRoot -Recurse
         $before=Get-P9cPublicationStateSnapshot $caseRoot
         $failpointBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $caseParent 'fp') -Failpoint $case.Failpoint -RecoveryPath $case.RecoveryPath
@@ -815,12 +823,13 @@ function Invoke-P9cJournalDurabilityRecoveryMatrix {
         [pscustomobject]@{Phase='committed';Failpoint='after-journal-publish-before-parent-flush';DurablePhase='committed';Expected='after'}
     )
     $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $ExternalRoot 'r179') -Failpoint RecoveryOnly
-    $parallelCases=@(for($index=0;$index-lt$cases.Count;$index++){[pscustomobject]@{
+    $parallelCases=@(for($index=0;$index-lt$cases.Count;$index++){$caseParent=Join-Path $ExternalRoot ("c"+$index);New-Item -ItemType Directory -Path $caseParent|Out-Null;[pscustomobject]@{
         Index=$index;ExternalRoot=$ExternalRoot;Seed=$Seed;Context=$Context;ArchivePath=$ArchivePath;Recovery=$recovery
+        CaseParent=$caseParent
         Phase=$cases[$index].Phase;Failpoint=$cases[$index].Failpoint;DurablePhase=$cases[$index].DurablePhase;Expected=$cases[$index].Expected
     }})
     $worker={param($case)
-        $caseParent=Join-Path $case.ExternalRoot ("c"+$case.Index);New-Item -ItemType Directory -Path $caseParent|Out-Null
+        $caseParent=$case.CaseParent
         $target=Join-Path $caseParent 'repo';Copy-Item -LiteralPath $case.Seed -Destination $target -Recurse
         $beforeState=Get-P9cPublicationStateSnapshot $target|ConvertFrom-Json;$beforeState.indexRaw='<clone-local-stat-cache>';$before=($beforeState|ConvertTo-Json -Depth 6 -Compress)
         $bootstrap=New-P9cJournalDurabilityFailpointBootstrap -Root (Join-Path $caseParent 'fp') -Phase $case.Phase -Failpoint $case.Failpoint
