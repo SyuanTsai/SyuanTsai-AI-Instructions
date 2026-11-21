@@ -1,5 +1,6 @@
 $script:RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $script:RolloutModule = Join-Path $script:RepositoryRoot 'scripts\ai-instructions-rollout.psm1'
+$script:IsWindowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 
 function Invoke-RolloutTestGit {
     param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string[]] $Arguments)
@@ -78,7 +79,7 @@ function New-RolloutTestGitShim {
         [Parameter(Mandatory = $true)][ValidateSet('inside_worktree','symbolic_HEAD','origin')][string] $FailurePoint,
         [Parameter(Mandatory = $true)][int] $ExitCode
     )
-    if ($IsWindows) {
+    if ($script:IsWindowsHost) {
         $failureCommand = switch ($FailurePoint) {
             'inside_worktree' { 'if /I "%~3 %~4"=="rev-parse --is-inside-work-tree" exit /b {0}' -f $ExitCode }
             'symbolic_HEAD' { 'if /I "%~3 %~4 %~5 %~6"=="symbolic-ref -q --short HEAD" exit /b {0}' -f $ExitCode }
@@ -259,7 +260,7 @@ Describe 'AI instructions all-repository rollout' {
     # Scenario: Public repository discovery receives an undefined negative exit code from a Git identity query.
     # Purpose: Ensure discovery fails closed instead of reporting zero discovered repositories and zero failures.
     # Register only on the native host because negative and NTSTATUS native process exit codes are Windows semantics.
-    if ($IsWindows) {
+    if ($script:IsWindowsHost) {
       It 'UnitT93_rethrows_discovery_<Case>_Git_exit_code_<ExitCodeLabel>' -TestCases @(
         foreach ($exitCase in @(
             @{ ExitCode=-1; ExitCodeLabel='minus_1' },
@@ -482,7 +483,7 @@ Describe 'AI instructions all-repository rollout' {
     # When: Those roots pass through rollout path canonicalization.
     # Then: Each value remains an absolute filesystem root instead of becoming drive-relative (for example, C:).
     # Register only on the native host because fixed-drive enumeration is a Windows drive model.
-    if ($IsWindows) {
+    if ($script:IsWindowsHost) {
       It 'InterT75_preserves_absolute_fixed_drive_roots' {
         $roots = @(Get-AiInstructionsFixedSearchRoots)
 

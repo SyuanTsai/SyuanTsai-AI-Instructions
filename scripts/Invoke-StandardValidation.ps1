@@ -648,26 +648,128 @@ function Assert-StandardValidationRegularFile {
     }
 }
 
+function Get-StandardValidationUnixNativeToolPath {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('id','stat')][string] $Name,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    foreach ($candidate in @("/usr/bin/$Name", "/bin/$Name")) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    throw "INVALID|$Context cannot determine Unix ownership because '$Name' is unavailable."
+}
+
+function Get-StandardValidationUnixCurrentUid {
+    param([Parameter(Mandatory = $true)][string] $Context)
+
+    $idPath = Get-StandardValidationUnixNativeToolPath -Name id -Context $Context
+    $output = @(& $idPath -u 2>$null)
+    $value = ($output -join '').Trim()
+    if ($LASTEXITCODE -ne 0 -or $value -cnotmatch '^[0-9]+$') {
+        throw "INVALID|$Context could not determine the current Unix user id."
+    }
+    return [uint64]::Parse($value, [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-StandardValidationUnixOwnerUid {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $statPath = Get-StandardValidationUnixNativeToolPath -Name stat -Context $Context
+    $isMacOS = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)
+    $output = if ($isMacOS) { @(& $statPath -f '%u' $Path 2>$null) } else { @(& $statPath -c '%u' -- $Path 2>$null) }
+    $value = ($output -join '').Trim()
+    if ($LASTEXITCODE -ne 0 -or $value -cnotmatch '^[0-9]+$') {
+        throw "INVALID|$Context could not determine the Unix owner id: $Path"
+    }
+    return [uint64]::Parse($value, [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Assert-StandardValidationTrustedUnixToolPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    try { $target = Get-Item -Force -LiteralPath $Path -ErrorAction Stop }
+    catch { throw "INVALID|$Context file is missing or inaccessible: $Path. $($_.Exception.Message)" }
+    $targetUnixMode = [string]$target.UnixMode
+    if ($targetUnixMode.Length -eq 0) {
+        throw "INVALID|$Context Unix file type could not be determined: $Path"
+    }
+    if ($targetUnixMode[0] -cne '-') {
+        throw "INVALID|$Context must resolve to a regular file: $Path"
+    }
+
+    $currentUid = Get-StandardValidationUnixCurrentUid -Context $Context
+    $currentPath = [IO.Path]::GetFullPath($target.FullName)
+    $isTarget = $true
+    while ($true) {
+        try { $item = Get-Item -Force -LiteralPath $currentPath -ErrorAction Stop }
+        catch { throw "INVALID|$Context trusted Unix path could not be inspected: $currentPath. $($_.Exception.Message)" }
+        $unixMode = [string]$item.UnixMode
+        $expectedType = if ($isTarget) { '-' } else { 'd' }
+        if ($unixMode.Length -eq 0 -or $unixMode[0] -cne $expectedType) {
+            throw "INVALID|$Context trusted Unix path type could not be verified: $currentPath"
+        }
+        try { $mode = [IO.File]::GetUnixFileMode($currentPath) }
+        catch { throw "INVALID|$Context Unix permissions could not be determined: $currentPath. $($_.Exception.Message)" }
+        $writeMask = [int][IO.UnixFileMode]::GroupWrite -bor [int][IO.UnixFileMode]::OtherWrite
+        if (([int]$mode -band $writeMask) -ne 0) {
+            throw "INVALID|$Context trusted Unix path must not grant group-write or other-write permission: $currentPath"
+        }
+        $ownerUid = Get-StandardValidationUnixOwnerUid -Path $currentPath -Context $Context
+        if ($ownerUid -ne 0 -and $ownerUid -ne $currentUid) {
+            throw "INVALID|$Context trusted Unix path must be owned by root or the current user: $currentPath"
+        }
+        $parent = [IO.Directory]::GetParent($currentPath)
+        if ($null -eq $parent) { break }
+        $currentPath = $parent.FullName
+        $isTarget = $false
+    }
+}
+
 function Resolve-StandardValidationInternalUseToolPath {
     param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
 
-    if (-not (Test-Path -LiteralPath $Path)) {
-        throw "INVALID|$Context file is missing: $Path"
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) {
+        Assert-StandardValidationRegularFile -Path $Path -Context $Context
+        return [IO.Path]::GetFullPath($Path)
     }
-    $item = Get-Item -Force -LiteralPath $Path -ErrorAction Stop
-    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) {
-            throw "INVALID|$Context must be a regular non-reparse file: $Path"
+
+    try { $full = [IO.Path]::GetFullPath($Path) }
+    catch { throw "INVALID|$Context path is invalid: $Path. $($_.Exception.Message)" }
+    for ($hop = 0; $hop -lt 40; $hop++) {
+        $anchor = [IO.Path]::GetPathRoot($full)
+        $parts = $full.Substring($anchor.Length).Split(
+            [char[]]@([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar),
+            [StringSplitOptions]::RemoveEmptyEntries)
+        $current = $anchor
+        $redirected = $false
+        for ($index = 0; $index -lt $parts.Length; $index++) {
+            $current = Join-Path $current $parts[$index]
+            $entry = if ($index -eq $parts.Length - 1) { [IO.FileInfo]::new($current) } else { [IO.DirectoryInfo]::new($current) }
+            try { $linkTarget = $entry.LinkTarget }
+            catch { throw "INVALID|$Context symbolic-link metadata could not be read: $current. $($_.Exception.Message)" }
+            if ([string]::IsNullOrEmpty($linkTarget)) { continue }
+            try { $target = $entry.ResolveLinkTarget($false) }
+            catch { throw "INVALID|$Context symbolic-link target could not be resolved: $current. $($_.Exception.Message)" }
+            if ($null -eq $target) { throw "INVALID|$Context symbolic-link target could not be resolved: $current" }
+            $full = $target.FullName
+            for ($tail = $index + 1; $tail -lt $parts.Length; $tail++) { $full = Join-Path $full $parts[$tail] }
+            $redirected = $true
+            break
         }
-        try { $item = $item.ResolveLinkTarget($true) }
-        catch { throw "INVALID|$Context symbolic-link target could not be resolved: $Path. $($_.Exception.Message)" }
-        if ($null -eq $item) { throw "INVALID|$Context symbolic-link target could not be resolved: $Path" }
+        if (-not $redirected) {
+            $resolved = [IO.Path]::GetFullPath($full)
+            Assert-StandardValidationTrustedUnixToolPath -Path $resolved -Context $Context
+            return $resolved
+        }
     }
-    if ($item.PSIsContainer -or $item -isnot [System.IO.FileInfo] -or
-        ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "INVALID|$Context must resolve to a regular non-reparse file: $Path"
-    }
-    return [System.IO.Path]::GetFullPath($item.FullName)
+    throw "INVALID|$Context symbolic-link chain exceeds the 40-link resolution limit: $Path"
 }
 
 function Assert-StandardValidationLauncherFileIdentity {
@@ -6509,6 +6611,16 @@ function Resolve-StandardValidationInternalSkillUse {
             throw 'BLOCKED|Internal use tool changed during evaluation.'
         }
     }
+    $decisionTools = @($approval.requiredTools | ForEach-Object {
+        $tool = $tools[[string]$_.id]
+        [ordered]@{
+            id = [string]$_.id
+            minimumVersion = [string]$_.minimumVersion
+            version = [string]$tool.version
+            path = $toolPaths[[string]$_.id]
+            sha256 = [string]$tool.sha256
+        }
+    })
     return [ordered]@{
         schemaVersion = 1
         contract = 'internal-skill-use-decision-v1'
@@ -6522,7 +6634,7 @@ function Resolve-StandardValidationInternalSkillUse {
         policySha256 = [string]$snapshot.sha256
         authorizationGranted = $true
         authorizedOperations = @($Purpose)
-        requiredTools = @($approval.requiredTools)
+        requiredTools = $decisionTools
         retainedFindings = @($approval.retainedFindings)
         conditions = @($approval.conditions)
         hostToolPreauthorization = $false

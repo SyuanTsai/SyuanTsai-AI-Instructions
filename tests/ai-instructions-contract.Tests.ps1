@@ -4,6 +4,7 @@ Describe 'AI instructions machine-readable contract' {
         $script:ContractPath = Join-Path $script:RepositoryRoot 'ai-instructions-contract.json'
         $script:BootstrapPath = Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions.ps1'
         $script:BuilderPath = Join-Path $script:RepositoryRoot 'scripts\Build-AiInstructions.ps1'
+        $script:IsWindowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 
 function Get-AiInstructionText {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -263,7 +264,7 @@ function Invoke-AiInstructionBuilderProcess {
 
     $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BuilderPath,'-RepositoryRoot',$Root)
     if ($Check) { $arguments += '-Check' }
-    $powerShellExecutable = (Get-Process -Id $PID).Path
+    $powerShellExecutable = if ($script:IsWindowsHost) { 'powershell.exe' } else { (Get-Process -Id $PID).Path }
     $output = & $powerShellExecutable @arguments 2>&1 | Out-String
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
 }

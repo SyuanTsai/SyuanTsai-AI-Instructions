@@ -1,7 +1,8 @@
 $script:BootstrapScript = Join-Path $PSScriptRoot '..\scripts\bootstrap-ai-instructions.ps1'
 $script:ManifestPath = '.codex\ai-instructions.manifest.json'
 $script:TestRepositoryUrl = 'git@example.com:team/bootstrap-test.git'
-$script:TestPowerShellExecutable = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' } })
+$script:IsWindowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+$script:TestPowerShellExecutable = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { if ($script:IsWindowsHost) { 'pwsh.exe' } else { 'pwsh' } })
 
 function Invoke-TestGit {
     param(
@@ -55,11 +56,11 @@ function New-TestGitWrapper {
 
     $scriptPath = Join-Path $Root 'git-wrapper.ps1'
     Set-TestText -Path $scriptPath -Value @"
-param([Parameter(ValueFromRemainingArguments = `$true)][string[]] `$GitArguments)
+`$GitArguments = @(`$args)
 `$ErrorActionPreference = 'Stop'
 $ScriptBody
 "@
-    if ($IsWindows) {
+    if ($script:IsWindowsHost) {
         $wrapperPath = Join-Path $Root 'git-wrapper.cmd'
         Set-TestText -Path $wrapperPath -Value @"
 @echo off
@@ -2987,7 +2988,7 @@ exit `$LASTEXITCODE
 
     # Scenario: A caller supplies an explicit Git executable while relying on automatic target discovery.
     # Purpose: Route target discovery, safety probes, mutation, and finalization through one consistent executable.
-    if ($IsWindows) {
+    if ($script:IsWindowsHost) {
     It 'InterT90_routes_every_git_call_through_the_configured_executable' {
         # Given
         New-TestConfiguration -Path $configurationPath
@@ -3070,7 +3071,7 @@ exit `$LASTEXITCODE
         Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $true
     }
 
-    if ($IsWindows) {
+    if ($script:IsWindowsHost) {
     # Scenario: A target repository cannot store recovery evidence, without any concurrent metadata drift.
     # Purpose: Preserve main's clean rollback guarantee when stash storage itself is the only failure.
     It 'InterT92_rolls_back_cleanly_when_personal_agent_stash_store_fails_without_metadata_drift' {

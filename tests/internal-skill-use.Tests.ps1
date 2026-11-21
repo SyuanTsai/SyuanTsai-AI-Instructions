@@ -31,9 +31,18 @@ Describe 'Internal Skill use approvals' {
             $entry.files = @($inventory | ForEach-Object { [ordered]@{ path = $_.path; sha256 = $_.sha256 } })
             $entry.contentSha256 = Get-StandardValidationInventorySha256 -Inventory $inventory
             $policy | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $policyPath -Encoding utf8NoBOM
+            $toolRoot = $root
+            if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+                $toolRoot = Join-Path $script:InternalUseTrustedUnixRoot ([guid]::NewGuid().ToString('N'))
+                [void][IO.Directory]::CreateDirectory($toolRoot)
+                [IO.File]::SetUnixFileMode($toolRoot, [IO.UnixFileMode]448)
+            }
             $tools = foreach ($id in @('powershell', 'git')) {
-                $path = Join-Path $root "$id.fixture"
+                $path = Join-Path $toolRoot "$id.fixture"
                 [IO.File]::WriteAllText($path, "frozen $id fixture", [Text.UTF8Encoding]::new($false))
+                if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+                    [IO.File]::SetUnixFileMode($path, [IO.UnixFileMode]384)
+                }
                 [pscustomobject]@{ id = $id; version = '7.6.6'; path = $path; sha256 = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant() }
             }
             [pscustomobject]@{ authority = $authority; skill = $skill; policyPath = $policyPath; policy = $policy; tools = @($tools); paths = $paths }
@@ -60,6 +69,19 @@ Describe 'Internal Skill use approvals' {
                 Resolve-StandardValidationInternalSkillUse @parameters
             }
             finally { $script:StandardValidationRepositoryRoot = $previous }
+        }
+        $script:InternalUseTrustedUnixRoot = $null
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+            $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+            if ([string]::IsNullOrWhiteSpace($userProfile)) { throw 'A Unix user profile is required for trusted-path tests.' }
+            $script:InternalUseTrustedUnixRoot = Join-Path $userProfile ('.internal-use-tests-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($script:InternalUseTrustedUnixRoot)
+            [IO.File]::SetUnixFileMode($script:InternalUseTrustedUnixRoot, [IO.UnixFileMode]448)
+        }
+    }
+    AfterAll {
+        if ($null -ne $script:InternalUseTrustedUnixRoot -and (Test-Path -LiteralPath $script:InternalUseTrustedUnixRoot)) {
+            Remove-Item -LiteralPath $script:InternalUseTrustedUnixRoot -Recurse -Force
         }
     }
     # Scenario: A consumer requests the new internal-use reader from its pinned central runner.
@@ -184,12 +206,16 @@ Describe 'Internal Skill use approvals' {
         # Purpose: Bind approval to the final regular file bytes without rejecting ordinary Unix package-manager layouts.
         It 'UnitT81_AcceptsAUnixToolSymlinkToTheReviewedRegularFile' {
             $fixture = New-InternalUseFixture
-            $targetPath = [string]$fixture.tools[1].path
-            $linkPath = Join-Path (Split-Path -Parent $targetPath) 'git-link'
+            $targetPath = Join-Path $script:InternalUseTrustedUnixRoot 'git'
+            Copy-Item -LiteralPath ([string]$fixture.tools[1].path) -Destination $targetPath
+            [IO.File]::SetUnixFileMode($targetPath, [IO.UnixFileMode]384)
+            $linkPath = Join-Path (Split-Path -Parent ([string]$fixture.tools[1].path)) 'git-link'
             New-Item -ItemType SymbolicLink -Path $linkPath -Target $targetPath | Out-Null
             $fixture.tools[1].path = $linkPath
 
-            (Invoke-InternalUseFixture $fixture).status | Should -Be 'approved'
+            $decision = Invoke-InternalUseFixture $fixture
+            $decision.status | Should -Be 'approved'
+            ($decision.requiredTools | Where-Object id -eq 'git').path | Should -Be ([IO.Path]::GetFullPath($targetPath))
         }
 
         # Scenario: A frozen tool path is a symbolic link whose final target is a directory.
@@ -197,13 +223,92 @@ Describe 'Internal Skill use approvals' {
         It 'UnitT82_RejectsAUnixToolSymlinkToANonRegularTarget' {
             $fixture = New-InternalUseFixture
             $parent = Split-Path -Parent ([string]$fixture.tools[1].path)
-            $directoryPath = Join-Path $parent 'tool-directory'
+            $directoryPath = Join-Path $script:InternalUseTrustedUnixRoot 'tool-directory'
             New-Item -ItemType Directory -Path $directoryPath | Out-Null
+            [IO.File]::SetUnixFileMode($directoryPath, [IO.UnixFileMode]448)
             $linkPath = Join-Path $parent 'git-directory-link'
             New-Item -ItemType SymbolicLink -Path $linkPath -Target $directoryPath | Out-Null
             $fixture.tools[1].path = $linkPath
 
-            { Invoke-InternalUseFixture $fixture } | Should -Throw '*regular non-reparse file*'
+            { Invoke-InternalUseFixture $fixture } | Should -Throw '*regular file*'
+        }
+
+        # Scenario: A frozen tool link resolves to a FIFO that would block a pathname hash.
+        # Purpose: Reject non-regular Unix file types before any content read or hash can open them.
+        It 'UnitT83_RejectsAUnixToolSymlinkToAFifoWithoutBlocking' {
+            $fifoPath = Join-Path $script:InternalUseTrustedUnixRoot 'tool-fifo'
+            $mkfifo = @('/usr/bin/mkfifo', '/bin/mkfifo') | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+            if ([string]::IsNullOrWhiteSpace($mkfifo)) { throw 'A native mkfifo executable is required for this Unix regression.' }
+            & $mkfifo $fifoPath
+            if ($LASTEXITCODE -ne 0) { throw 'The FIFO fixture could not be created.' }
+            $linkPath = Join-Path $TestDrive 'fifo-link'
+            New-Item -ItemType SymbolicLink -Path $linkPath -Target $fifoPath | Out-Null
+            $scriptPath = Join-Path $script:InternalUseRoot 'scripts/Invoke-StandardValidation.ps1'
+            $job = Start-Job -ScriptBlock {
+                param($ValidationScript, $CandidateRoot, $LinkPath)
+                . $ValidationScript -CandidateRoot $CandidateRoot -AdapterPath (Join-Path $CandidateRoot 'unused.json') -ArtifactsRoot $CandidateRoot -SourceRepository 'https://example.test/internal.git' -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -DefineFunctionsOnly
+                $resolved = Resolve-StandardValidationInternalUseToolPath -Path $LinkPath -Context 'internal use tool'
+                Get-StandardValidationFileSha256 -Path $resolved -Context 'internal use tool'
+            } -ArgumentList $scriptPath, $TestDrive, $linkPath
+            try {
+                Wait-Job -Job $job -Timeout 5 | Out-Null
+                $job.State | Should -Not -Be 'Running'
+                $job.State | Should -Be 'Failed'
+                $job.ChildJobs[0].JobStateInfo.Reason.Message | Should -Match 'regular file'
+            }
+            finally {
+                Stop-Job -Job $job -ErrorAction SilentlyContinue
+                Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        # Scenario: A frozen tool link resolves to a regular file writable by a non-owner class.
+        # Purpose: Prevent another account from changing reviewed tool bytes after validation.
+        It 'UnitT84_RejectsAUnixToolSymlinkToA_<PermissionClass>WritableFile' -TestCases @(
+            @{ PermissionClass = 'Group'; Mode = [IO.UnixFileMode]400 },
+            @{ PermissionClass = 'World'; Mode = [IO.UnixFileMode]386 }
+        ) {
+            param($PermissionClass, $Mode)
+            $fixture = New-InternalUseFixture
+            $targetPath = Join-Path $script:InternalUseTrustedUnixRoot ("$PermissionClass-writable-tool".ToLowerInvariant())
+            Copy-Item -LiteralPath ([string]$fixture.tools[1].path) -Destination $targetPath
+            [IO.File]::SetUnixFileMode($targetPath, $Mode)
+            $linkPath = Join-Path (Split-Path -Parent ([string]$fixture.tools[1].path)) ("$PermissionClass-writable-link".ToLowerInvariant())
+            New-Item -ItemType SymbolicLink -Path $linkPath -Target $targetPath | Out-Null
+            $fixture.tools[1].path = $linkPath
+
+            { Invoke-InternalUseFixture $fixture } | Should -Throw '*group-write or other-write*'
+        }
+
+        # Scenario: A frozen tool link resolves below a group/world-writable ancestor directory.
+        # Purpose: Prevent pathname replacement after hashing, including below sticky directories.
+        It 'UnitT86_RejectsAUnixToolSymlinkBelowAWritableDirectory' {
+            $fixture = New-InternalUseFixture
+            $writableDirectory = Join-Path $script:InternalUseTrustedUnixRoot 'writable-directory'
+            [void][IO.Directory]::CreateDirectory($writableDirectory)
+            [IO.File]::SetUnixFileMode($writableDirectory, [IO.UnixFileMode]511)
+            $targetPath = Join-Path $writableDirectory 'git'
+            Copy-Item -LiteralPath ([string]$fixture.tools[1].path) -Destination $targetPath
+            [IO.File]::SetUnixFileMode($targetPath, [IO.UnixFileMode]384)
+            $linkPath = Join-Path (Split-Path -Parent ([string]$fixture.tools[1].path)) 'writable-directory-link'
+            New-Item -ItemType SymbolicLink -Path $linkPath -Target $targetPath | Out-Null
+            $fixture.tools[1].path = $linkPath
+
+            { Invoke-InternalUseFixture $fixture } | Should -Throw '*group-write or other-write*'
+        }
+
+        # Scenario: A frozen tool path is a symbolic-link cycle.
+        # Purpose: Bound link traversal and fail closed instead of looping or hashing an unresolved path.
+        It 'UnitT88_RejectsAUnixToolSymlinkLoop' {
+            $fixture = New-InternalUseFixture
+            $parent = Split-Path -Parent ([string]$fixture.tools[1].path)
+            $firstLink = Join-Path $parent 'loop-a'
+            $secondLink = Join-Path $parent 'loop-b'
+            New-Item -ItemType SymbolicLink -Path $firstLink -Target $secondLink | Out-Null
+            New-Item -ItemType SymbolicLink -Path $secondLink -Target $firstLink | Out-Null
+            $fixture.tools[1].path = $firstLink
+
+            { Invoke-InternalUseFixture $fixture } | Should -Throw '*link*'
         }
     }
 

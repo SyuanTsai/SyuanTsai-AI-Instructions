@@ -1,7 +1,8 @@
 $script:RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $script:CleanupScript = Join-Path $script:RepositoryRoot 'scripts\cleanup-ai-instructions-pollution.ps1'
 $script:ManifestRelativePath = '.codex/ai-instructions.manifest.json'
-$script:TestPowerShellExecutable = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' } })
+$script:IsWindowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+$script:TestPowerShellExecutable = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { if ($script:IsWindowsHost) { 'pwsh.exe' } else { 'pwsh' } })
 
 function Invoke-CleanupTestGit {
     param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string[]] $Arguments)
@@ -33,11 +34,11 @@ function New-CleanupTestGitWrapper {
 
     $scriptPath = Join-Path $Root 'git-wrapper.ps1'
     Set-CleanupTestText -Path $scriptPath -Value @"
-param([Parameter(ValueFromRemainingArguments = `$true)][string[]] `$GitArguments)
+`$GitArguments = @(`$args)
 `$ErrorActionPreference = 'Stop'
 $ScriptBody
 "@
-    if ($IsWindows) {
+    if ($script:IsWindowsHost) {
         $wrapperPath = Join-Path $Root 'git-wrapper.cmd'
         Set-CleanupTestText -Path $wrapperPath -Value @"
 @echo off
@@ -488,7 +489,7 @@ Describe 'tracked AI instructions pollution cleanup' {
     # Scenario: An external process already has the shared exclude file open for writing when cleanup reaches its exclude update.
     # Purpose: Stop before index mutation instead of using an unlocked read-modify-write sequence that can lose user rules.
     # Register only on the native host because FileShare write denial is a Windows locking scenario.
-    if ($IsWindows) {
+    if ($script:IsWindowsHost) {
       It 'InterT79_fails_closed_when_the_shared_exclude_write_handle_is_unavailable' {
         $targetRoot = Join-Path $TestDrive 'locked-exclude'
         New-PollutedTestRepository -Path $targetRoot
@@ -513,7 +514,7 @@ Describe 'tracked AI instructions pollution cleanup' {
     # Scenario: The shared Git info directory is a junction to a location outside the repository metadata.
     # Purpose: Stop before cleanup writes shared exclusions through a reparse-backed parent.
     # Register only on the native host because directory junctions and reparse attributes are Windows filesystem semantics.
-    if ($IsWindows) {
+    if ($script:IsWindowsHost) {
       It 'InterT71_rejects_a_reparse_backed_shared_Git_info_directory' {
         $targetRoot = Join-Path $TestDrive 'reparse-git-info'
         New-PollutedTestRepository -Path $targetRoot
@@ -878,7 +879,7 @@ exit `$LASTEXITCODE
     # Scenario: A managed manifest is reached through a directory junction after the polluted commit was created.
     # Purpose: Treat reparse-backed ownership evidence as unsafe and stop before touching the Git index.
     # Register only on the native host because directory junctions and reparse attributes are Windows filesystem semantics.
-    if ($IsWindows) {
+    if ($script:IsWindowsHost) {
       It 'InterT74_rejects_a_reparse_backed_managed_manifest_path' {
         $targetRoot = Join-Path $TestDrive 'reparse-manifest'
         New-PollutedTestRepository -Path $targetRoot
