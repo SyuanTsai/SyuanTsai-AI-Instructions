@@ -6,7 +6,7 @@
     "install-ai-instructions-bootstrap.part2.Tests.ps1": 19,
     "install-ai-instructions-bootstrap.part3.Tests.ps1": 20,
     "bootstrap-ai-instructions.Tests.ps1": 26,
-    "ai-instructions-writer-gate.part2.Tests.ps1": 17,
+    "ai-instructions-writer-gate.part2.Tests.ps1": 25,
     "agent-environment-reconciler.Tests.ps1": 17,
     "ai-instructions-writer-gate.part1.Tests.ps1": 15,
     "syp214-user-only.Tests.ps1": 10,
