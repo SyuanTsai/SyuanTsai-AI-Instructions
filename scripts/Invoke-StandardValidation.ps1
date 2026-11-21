@@ -6628,16 +6628,6 @@ function Resolve-StandardValidationInternalSkillUse {
             throw 'BLOCKED|Internal use tool changed during evaluation.'
         }
     }
-    $decisionTools = @($approval.requiredTools | ForEach-Object {
-        $tool = $tools[[string]$_.id]
-        [ordered]@{
-            id = [string]$_.id
-            minimumVersion = [string]$_.minimumVersion
-            version = [string]$tool.version
-            path = $toolPaths[[string]$_.id]
-            sha256 = [string]$tool.sha256
-        }
-    })
     return [ordered]@{
         schemaVersion = 1
         contract = 'internal-skill-use-decision-v1'
@@ -6651,7 +6641,7 @@ function Resolve-StandardValidationInternalSkillUse {
         policySha256 = [string]$snapshot.sha256
         authorizationGranted = $true
         authorizedOperations = @($Purpose)
-        requiredTools = $decisionTools
+        requiredTools = @($approval.requiredTools)
         retainedFindings = @($approval.retainedFindings)
         conditions = @($approval.conditions)
         hostToolPreauthorization = $false

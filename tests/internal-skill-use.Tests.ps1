@@ -185,6 +185,23 @@ Describe 'Internal Skill use approvals' {
         }
     }
 
+    # Scenario: A registered approval produces an approved v1 decision on any supported host.
+    # Purpose: Preserve the exact required-tools contract without leaking validator-only tool identity details.
+    It 'UnitT75_ReturnsTheExactV1RequiredToolShapeAndRegistryValues' {
+        $fixture = New-InternalUseFixture
+        $registered = @($fixture.policy.internalUseApprovals[0].requiredTools)
+
+        $decision = Invoke-InternalUseFixture $fixture
+
+        $decision.status | Should -Be 'approved'
+        @($decision.requiredTools).Count | Should -Be $registered.Count
+        for ($index = 0; $index -lt $registered.Count; $index++) {
+            (@($decision.requiredTools[$index].PSObject.Properties.Name) -join ',') | Should -Be 'id,minimumVersion'
+            $decision.requiredTools[$index].id | Should -Be $registered[$index].id
+            $decision.requiredTools[$index].minimumVersion | Should -Be $registered[$index].minimumVersion
+        }
+    }
+
     # Scenario: A resolved Unix tool or ancestor exposes ordinary, special, writable, or symbolic-link mode text.
     # Purpose: Evaluate permissions from numeric bits, accept harmless special bits, and reject link mode before its 0777 bits are considered.
     It 'UnitT79_ClassifiesTrustedUnixMode_<ModeLabel>' -TestCases @(
@@ -243,7 +260,6 @@ Describe 'Internal Skill use approvals' {
 
             $decision = Invoke-InternalUseFixture $fixture
             $decision.status | Should -Be 'approved'
-            ($decision.requiredTools | Where-Object id -eq 'git').path | Should -Be ([IO.Path]::GetFullPath($targetPath))
         }
 
         # Scenario: A frozen tool path is a symbolic link whose final target is a directory.
