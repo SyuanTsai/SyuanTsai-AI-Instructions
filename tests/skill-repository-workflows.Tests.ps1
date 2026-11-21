@@ -269,6 +269,7 @@ Describe 'Agent Skill authority workflow contract' {
             '.github/workflows/syp86-production-lock.yml' = 1
             '.github/workflows/validator-maintenance-producer.yml' = 1
         }
+        $script:ExpectedOrdinaryWorkflowPaths = @($script:WorkflowExpectations.Keys)
         $script:AuthorityTests = @(
             'internal-source-continuation.Tests.ps1'
             'skill-repository-standard.Tests.ps1'
@@ -290,6 +291,23 @@ Describe 'Agent Skill authority workflow contract' {
         function Assert-Equal {
             param($Actual, $Expected, [string] $Message)
             if ($Actual -ne $Expected) { throw "$Message Expected='$Expected' Actual='$Actual'." }
+        }
+
+        function Test-TemporaryProbeWorkflowPath {
+            param([string] $Path)
+            return ($env:GITHUB_REF -clike 'refs/heads/probe/*' -and
+                $Path -cmatch '^\.github/workflows/probe-[^/]*\.yml$')
+        }
+
+        function Get-OrdinaryWorkflowInventory {
+            param([string[]] $Paths)
+            return @($Paths | Where-Object { -not (Test-TemporaryProbeWorkflowPath -Path $_) })
+        }
+
+        function Assert-OrdinaryWorkflowInventory {
+            param([string[]] $Paths)
+            Assert-Equal $Paths.Count $script:ExpectedOrdinaryWorkflowPaths.Count 'The repository must retain exactly the seven registered active workflow files.'
+            Assert-Equal (($Paths | Sort-Object) -join '|') (($script:ExpectedOrdinaryWorkflowPaths | Sort-Object) -join '|') 'The workflow inventory must retire the unmatched protected maintenance consumer and reject unreviewed workflow additions.'
         }
 
         function Assert-Match {
@@ -667,20 +685,10 @@ jobs:
     # Purpose: Keep one Windows Core job, one Windows Install Smoke job, and verified PowerShell provenance.
     It 'UnitT15_ordinary_workflows_use_verified_Windows_PowerShell_only' {
         $workflowDirectory = Join-Path $script:RepositoryRoot '.github/workflows'
-        $workflowPaths = @(Get-ChildItem -LiteralPath $workflowDirectory -File |
+        $workflowPaths = @(Get-OrdinaryWorkflowInventory -Paths @(Get-ChildItem -LiteralPath $workflowDirectory -File |
             Where-Object { $_.Extension -in @('.yml', '.yaml') } |
-            ForEach-Object { [IO.Path]::GetRelativePath($script:RepositoryRoot, $_.FullName).Replace('\', '/') })
-        $expectedWorkflowPaths = @(
-            '.github/workflows/consumer-transition-probe.yml',
-            '.github/workflows/pr8-powershell-validation.yml',
-            '.github/workflows/skill-tools-path-patch.yml',
-            '.github/workflows/standards-conformance.yml',
-            '.github/workflows/syp101-production-smoke.yml',
-            '.github/workflows/syp86-production-lock.yml',
-            '.github/workflows/validator-maintenance-producer.yml'
-        )
-        Assert-Equal $workflowPaths.Count $expectedWorkflowPaths.Count 'The repository must retain exactly the seven registered active workflow files.'
-        Assert-Equal (($workflowPaths | Sort-Object) -join '|') (($expectedWorkflowPaths | Sort-Object) -join '|') 'The workflow inventory must retire the unmatched protected maintenance consumer and reject unreviewed workflow additions.'
+            ForEach-Object { [IO.Path]::GetRelativePath($script:RepositoryRoot, $_.FullName).Replace('\', '/') }))
+        Assert-OrdinaryWorkflowInventory -Paths $workflowPaths
         $pullRequestWorkflows = New-Object 'System.Collections.Generic.List[string]'
         $pullRequestJobNames = New-Object 'System.Collections.Generic.List[string]'
         foreach ($relativePath in $workflowPaths) {
@@ -768,6 +776,32 @@ jobs:
             "- platform: linux`n            os: ubuntu-latest`n            asset: powershell-7.6.6-linux-x64.tar.gz`n            sha256: DDBC4A2D113BBD46D283CFEDCBCD117A70CAEFD7673F41F2B4E0000BADF103BC",
             "- platform: macos`n            os: macos-latest`n            asset: powershell-7.6.6-osx-arm64.tar.gz`n            sha256: 6DF833D094EBAC1C1A74340D7B3437F4AAF5E03CE640484A1C4359F3CE8B3DB1"
         )) { Assert-True $diagnostic.Replace("`r`n", "`n").Contains($matrixRow) "Standards Conformance is missing reviewed matrix row '$($matrixRow.Split("`n")[0])'." }
+    }
+
+    # Scenario: A temporary probe workflow is present on a probe branch, a pull request, or another ref.
+    # Purpose: Exclude only direct probe-*.yml workflow files on refs/heads/probe/* while rejecting every other workflow addition.
+    It 'UnitT15a_scopes_temporary_probe_workflow_exclusions_to_probe_branches' {
+        $probePath = '.github/workflows/probe-x.yml'
+        $originalRef = $env:GITHUB_REF
+        try {
+            foreach ($ref in @($null, 'refs/pull/1/merge')) {
+                if ($null -eq $ref) { Remove-Item Env:GITHUB_REF -ErrorAction SilentlyContinue } else { $env:GITHUB_REF = $ref }
+                Assert-Throws -Action {
+                    Assert-OrdinaryWorkflowInventory -Paths (Get-OrdinaryWorkflowInventory -Paths ($script:ExpectedOrdinaryWorkflowPaths + $probePath))
+                } -Message "Probe workflow was excluded outside a probe branch: $ref"
+            }
+
+            $env:GITHUB_REF = 'refs/heads/probe/x'
+            Assert-OrdinaryWorkflowInventory -Paths (Get-OrdinaryWorkflowInventory -Paths ($script:ExpectedOrdinaryWorkflowPaths + $probePath))
+            foreach ($path in @('.github/workflows/probe-x.yaml', '.github/workflows/sub/probe-x.yml')) {
+                Assert-Throws -Action {
+                    Assert-OrdinaryWorkflowInventory -Paths (Get-OrdinaryWorkflowInventory -Paths ($script:ExpectedOrdinaryWorkflowPaths + $path))
+                } -Message "Non-matching workflow was excluded on a probe branch: $path"
+            }
+        }
+        finally {
+            if ($null -eq $originalRef) { Remove-Item Env:GITHUB_REF -ErrorAction SilentlyContinue } else { $env:GITHUB_REF = $originalRef }
+        }
     }
 
     # Scenario: A diagnostic leg is softened or the summary accepts incomplete evidence.

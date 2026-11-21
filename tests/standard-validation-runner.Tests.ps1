@@ -527,7 +527,7 @@ param(
             $physicalDirectory = Join-Path $root 'physical'
             [void][IO.Directory]::CreateDirectory($physicalDirectory)
             $physicalCommand = Join-Path $physicalDirectory 'echo'
-            [IO.File]::Copy('/bin/echo',$physicalCommand)
+            [IO.File]::WriteAllBytes($physicalCommand,[IO.File]::ReadAllBytes('/bin/echo'))
             [IO.File]::SetUnixFileMode($physicalCommand,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute)
             $binDirectory = Join-Path $root 'bin'
             [void][IO.Directory]::CreateDirectory($binDirectory)
@@ -589,14 +589,14 @@ param(
                 $root = Join-Path $TestDrive 'replaced-command'
                 [void][IO.Directory]::CreateDirectory($root)
                 $script:ValidatorReplacementTarget = Join-Path $root 'target'
-                [IO.File]::Copy('/bin/echo',$script:ValidatorReplacementTarget)
+                [IO.File]::WriteAllBytes($script:ValidatorReplacementTarget,[IO.File]::ReadAllBytes('/bin/echo'))
                 [IO.File]::SetUnixFileMode($script:ValidatorReplacementTarget,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute)
                 $command = Join-Path $root 'command'
                 [void](New-Item -ItemType SymbolicLink -Path $command -Target 'target')
                 Mock Start-PlatformOwnedProcess {
                     param($ExecutableLease,$ArgumentZero,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$StdoutPath,$StderrPath,$OutputLimitCharacters)
                     [IO.File]::Move($script:ValidatorReplacementTarget,($script:ValidatorReplacementTarget + '.old'))
-                    [IO.File]::Copy('/bin/echo',$script:ValidatorReplacementTarget)
+                    [IO.File]::WriteAllBytes($script:ValidatorReplacementTarget,[IO.File]::ReadAllBytes('/bin/echo'))
                     [IO.File]::SetUnixFileMode($script:ValidatorReplacementTarget,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute)
                     & $script:ValidatorRealStart -ExecutableLease $ExecutableLease -ArgumentZero $ArgumentZero -ArgumentList $ArgumentList -Environment $Environment -WorkingDirectoryLease $WorkingDirectoryLease -Deadline $Deadline -StdoutPath $StdoutPath -StderrPath $StderrPath -OutputLimitCharacters $OutputLimitCharacters
                 }

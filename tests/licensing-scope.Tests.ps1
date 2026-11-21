@@ -17,6 +17,17 @@ Describe 'Repository licensing scope' {
             return (Get-Content -LiteralPath (Join-Path $script:LicensingRoot $RelativePath) -Raw -Encoding UTF8).Replace("`r`n", "`n")
         }
 
+        function Test-TemporaryProbeWorkflowPath {
+            param([string] $Path)
+            return ($env:GITHUB_REF -clike 'refs/heads/probe/*' -and
+                $Path -cmatch '^\.github/workflows/probe-[^/]*\.yml$')
+        }
+
+        function Get-LicensingInventoryPaths {
+            param([string[]] $Paths)
+            return @($Paths | Where-Object { -not (Test-TemporaryProbeWorkflowPath -Path $_) })
+        }
+
         function Assert-LicensingInventory {
             param($Scope, [string[]] $ExpectedPaths)
             if ($null -eq $Scope -or ($Scope.schemaVersion -isnot [int] -and $Scope.schemaVersion -isnot [long]) -or
@@ -62,12 +73,43 @@ Describe 'Repository licensing scope' {
     It 'InterT10_covers_every_tracked_file_with_the_intended_classification' {
         $tracked = @(& git -C $script:LicensingRoot ls-files)
         if ($LASTEXITCODE -ne 0 -or $tracked.Count -eq 0) { throw 'Cannot read tracked inventory.' }
+        $tracked = @(Get-LicensingInventoryPaths -Paths $tracked)
         $scope = Get-LicensingText 'licensing-scope.json' | ConvertFrom-Json
         Assert-LicensingInventory -Scope $scope -ExpectedPaths $tracked
         foreach ($path in $tracked) {
             if (-not (Test-Path -LiteralPath (Join-Path $script:LicensingRoot $path) -PathType Leaf)) {
                 throw "Missing tracked file: $path"
             }
+        }
+    }
+
+    # Scenario: A temporary probe workflow is present on a probe branch, a pull request, or another ref.
+    # Purpose: Exclude only direct probe-*.yml workflow files on refs/heads/probe/* while keeping all other licensing inventory strict.
+    It 'UnitT15_scopes_temporary_probe_workflow_exclusions_to_probe_branches' {
+        $baseline = Get-LicensingText 'licensing-scope.json' | ConvertFrom-Json
+        $paths = @($baseline.files.path)
+        $probePath = '.github/workflows/probe-x.yml'
+        $originalRef = $env:GITHUB_REF
+        try {
+            foreach ($ref in @($null, 'refs/pull/1/merge')) {
+                if ($null -eq $ref) { Remove-Item Env:GITHUB_REF -ErrorAction SilentlyContinue } else { $env:GITHUB_REF = $ref }
+                $rejected = $false
+                try { Assert-LicensingInventory -Scope $baseline -ExpectedPaths (Get-LicensingInventoryPaths -Paths ($paths + $probePath)) }
+                catch { $rejected = $true }
+                if (-not $rejected) { throw "Probe workflow was excluded outside a probe branch: $ref" }
+            }
+
+            $env:GITHUB_REF = 'refs/heads/probe/x'
+            Assert-LicensingInventory -Scope $baseline -ExpectedPaths (Get-LicensingInventoryPaths -Paths ($paths + $probePath))
+            foreach ($path in @('.github/workflows/probe-x.yaml', '.github/workflows/sub/probe-x.yml')) {
+                $rejected = $false
+                try { Assert-LicensingInventory -Scope $baseline -ExpectedPaths (Get-LicensingInventoryPaths -Paths ($paths + $path)) }
+                catch { $rejected = $true }
+                if (-not $rejected) { throw "Non-matching workflow was excluded on a probe branch: $path" }
+            }
+        }
+        finally {
+            if ($null -eq $originalRef) { Remove-Item Env:GITHUB_REF -ErrorAction SilentlyContinue } else { $env:GITHUB_REF = $originalRef }
         }
     }
 

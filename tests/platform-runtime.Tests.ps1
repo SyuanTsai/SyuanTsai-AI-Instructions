@@ -862,7 +862,7 @@ Start-Sleep 30
           foreach ($override in @($false,$true)) {
             $f = New-P3Fixture; $file = $null; $p = $null
             try {
-                [IO.File]::Copy('/bin/sh',(Join-Path $f.Path 'executable'))
+                [IO.File]::WriteAllBytes((Join-Path $f.Path 'executable'),[IO.File]::ReadAllBytes('/bin/sh'))
                 $file = Open-PlatformFile -ParentLease $f.Directory -Leaf 'executable' -Access Read -CreateMode OpenExisting
                 Set-PlatformPermissions -Lease $file -Policy @{ Mode=448 } | Out-Null
                 $invocation = Join-Path $f.Path 'venv/bin/sh'
