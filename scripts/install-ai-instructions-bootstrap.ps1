@@ -14,7 +14,9 @@ param(
     [string] $ExpectedUpdateChannel,
     [string] $ExpectedUpdateRef,
     [ValidateSet('v2v4','v3v5')][string] $ExpectedCurrentGeneration,
-    [ValidateSet('Auto','V2V4','V3V5')][string] $WriterSchema = 'Auto'
+    [ValidateSet('Auto','V2V4','V3V5')][string] $WriterSchema = 'Auto',
+    [string] $CapabilityEvidence,
+    [switch] $ClearCapabilityEvidence
 )
 
 if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7 -or [Environment]::Version.Major -lt 8) {
@@ -23,6 +25,19 @@ if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -l
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+$capabilityEvidenceParameterSpecified = $PSBoundParameters.ContainsKey('CapabilityEvidence')
+if ($capabilityEvidenceParameterSpecified -and $ClearCapabilityEvidence) {
+    throw '-CapabilityEvidence and -ClearCapabilityEvidence are mutually exclusive.'
+}
+$capabilityEvidenceDeclarationSpecified = $capabilityEvidenceParameterSpecified -or [bool]$ClearCapabilityEvidence
+$capabilityEvidenceJson = if ($capabilityEvidenceParameterSpecified) { $CapabilityEvidence }
+    elseif ($ClearCapabilityEvidence) { '[]' }
+    elseif (-not [string]::IsNullOrWhiteSpace([string]$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE)) {
+        $capabilityEvidenceDeclarationSpecified = $true
+        [string]$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE
+    }
+    else { $null }
 
 # BEGIN GENERATED BOOTSTRAP SECTION BASE64
 $bootstrapSectionBytes = [System.Convert]::FromBase64String(
@@ -811,6 +826,15 @@ try { Assert-InstallerPlatformRuntimeSourceInventory -RuntimeRoot $platformRunti
 catch { throw [IO.InvalidDataException]::new("The verified installer platform runtime closure is invalid. $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception) }
 try { Import-Module $runtimeContractSource -Force -ErrorAction Stop }
 catch { throw [IO.InvalidDataException]::new("The verified installer runtime contract is invalid. $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception) }
+$declaredCapabilityEvidence = @()
+if ($capabilityEvidenceDeclarationSpecified) {
+    try {
+        $parsedCapabilityEvidence = $capabilityEvidenceJson | ConvertFrom-Json -NoEnumerate
+        if ($parsedCapabilityEvidence -isnot [System.Array]) { throw 'Capability evidence must be a JSON array.' }
+        $declaredCapabilityEvidence = @(Get-AiInstructionsNormalizedCapabilityEvidence -Evidence @($parsedCapabilityEvidence) -Context 'Installer capability evidence')
+    }
+    catch { throw "CapabilityEvidence is invalid: $($_.Exception.Message)" }
+}
 Import-Module (Join-Path $repositoryRootPath 'scripts\skills-catalog-contract.psm1') -Force
 Import-Module (Join-Path $repositoryRootPath 'scripts\license-delivery.psm1') -Force
 $platformRuntimeModule = Import-Module (Join-Path $platformRuntimeRoot 'platform-runtime.psd1') -Force -PassThru
@@ -843,6 +867,14 @@ $agentsPath = Join-Path $codexHomePath 'AGENTS.md'
 $hooksPath = Join-Path $codexHomePath 'hooks.json'
 $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
 $installLockPath = Join-Path $codexHomePath 'ai-instructions-install.lock'
+
+if ($capabilityEvidenceDeclarationSpecified) {
+    $preflightState = Get-InstallerExistingRuntimeState -ConfigurationPath $configurationPath -RuntimeDirectory $runtimeDirectory
+    $preflightUsesV3V5 = $WriterSchema -ceq 'V3V5' -or ($WriterSchema -ceq 'Auto' -and [string]$preflightState.Generation -ceq 'v3v5')
+    if (-not $preflightUsesV3V5) {
+        throw 'Capability evidence persistence requires config v5; rerun with -WriterSchema V3V5.'
+    }
+}
 
 # Reject invalid encoding or ambiguous managed boundaries before creating the
 # install lock or any persistent directory. The bytes are merged again while
@@ -909,6 +941,9 @@ try {
         -RequestedWriterSchema $WriterSchema
     $selectedWriterSchema = [string]$lockedSelection.Schema
     $capabilityReceipt = $lockedSelection.CapabilityReceipt
+    if ($capabilityEvidenceDeclarationSpecified -and $selectedWriterSchema -cne 'v3v5') {
+        throw 'Capability evidence persistence requires config v5; rerun with -WriterSchema V3V5.'
+    }
     $runtimeLicenseArtifactPaths = if ($selectedWriterSchema -ceq 'v3v5') { $runtimeV3ArtifactPaths } else { $runtimeArtifactPaths }
     $runtimeLicenses = New-LicenseDeliveryPackage -SourceRoot $repositoryRootPath -ArtifactPaths $runtimeLicenseArtifactPaths `
         -SourceRepository $catalogRepository -SourceCommit $catalogRef -ArtifactId 'ai-instructions-runtime'
@@ -944,6 +979,7 @@ try {
         ExistingConfiguration=$existingConfiguration;CatalogRepository=$catalogRepository;CatalogRef=$catalogRef
         AdditionalExcludedRepositoryUrls=$ExcludedRepositoryUrls;AdditionalExcludedRepositoryPaths=$ExcludedRepositoryPaths;Catalog=$catalogDocument
     }
+    if ($capabilityEvidenceDeclarationSpecified) { $configurationParameters.CapabilityEvidence = [object[]]$declaredCapabilityEvidence }
     $configuration = if ($selectedWriterSchema -ceq 'v3v5') {
         ConvertTo-AiInstructionsSyncConfigurationV5 @configurationParameters
     }

@@ -170,12 +170,27 @@ function Test-TrustedProperty {
 }
 
 function Assert-TrustedProperties {
-    param([Parameter(Mandatory = $true)][object] $Object,[Parameter(Mandatory = $true)][string[]] $Required,[Parameter(Mandatory = $true)][string] $Context)
+    param([Parameter(Mandatory = $true)][object] $Object,[Parameter(Mandatory = $true)][string[]] $Required,[string[]] $Optional=@(),[Parameter(Mandatory = $true)][string] $Context)
     foreach ($name in $Required) {
         if (-not (Test-TrustedProperty -Object $Object -Name $name)) { throw "$Context is missing '$name'." }
     }
     foreach ($name in @($Object.PSObject.Properties.Name)) {
-        if ($name -cnotin $Required) { throw "$Context contains unsupported property '$name'." }
+        if ($name -cnotin @($Required+$Optional)) { throw "$Context contains unsupported property '$name'." }
+    }
+}
+
+function Assert-TrustedCapabilityEvidence {
+    param([Parameter(Mandatory = $true)][object]$Value)
+    if($Value-isnot[System.Array]){throw 'AI instruction sync configuration capabilityEvidence must be an array.'}
+    $seen=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($item in @($Value)){
+        Assert-TrustedProperties -Object $item -Required @('kind','id','state') -Context 'AI instruction sync configuration capabilityEvidence item'
+        if($item.kind-isnot[string]-or[string]$item.kind-cnotin@('command','connector','environment')-or
+           $item.id-isnot[string]-or[string]$item.id-cnotmatch'^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$'-or
+           $item.state-isnot[string]-or[string]$item.state-cnotin@('absent','available','authenticated','configured')){
+            throw 'AI instruction sync configuration capabilityEvidence item is invalid.'
+        }
+        if(-not$seen.Add("$([string]$item.kind)`n$([string]$item.id)")){throw 'AI instruction sync configuration capabilityEvidence contains a duplicate kind and id.'}
     }
 }
 
@@ -442,7 +457,8 @@ function Assert-InstalledRuntime {
     }
     $configurationProperties = @('schemaVersion','excludedRepositoryUrls','excludedRepositoryPaths','catalog','updates')
     if ($generation -ceq 'v3v5') { $configurationProperties += 'projections' }
-    Assert-TrustedProperties -Object $configuration -Required $configurationProperties -Context 'AI instruction sync configuration'
+    $configurationOptionalProperties=if($generation-ceq'v3v5'){@('capabilityEvidence')}else{@()}
+    Assert-TrustedProperties -Object $configuration -Required $configurationProperties -Optional $configurationOptionalProperties -Context 'AI instruction sync configuration'
     Assert-TrustedStringArray -Value $configuration.excludedRepositoryUrls -Context 'AI instruction excludedRepositoryUrls'
     Assert-TrustedStringArray -Value $configuration.excludedRepositoryPaths -Context 'AI instruction excludedRepositoryPaths'
     $normalizedExcludedUrls = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -482,6 +498,7 @@ function Assert-InstalledRuntime {
         Assert-TrustedProperties -Object $configuration.projections -Required @('user','project') -Context 'AI instruction sync configuration projections'
         Assert-TrustedStringArray -Value $configuration.projections.user -Context 'AI instruction sync configuration projections.user' -StableId
         Assert-TrustedStringArray -Value $configuration.projections.project -Context 'AI instruction sync configuration projections.project' -StableId
+        if(Test-TrustedProperty -Object $configuration -Name 'capabilityEvidence'){Assert-TrustedCapabilityEvidence -Value $configuration.capabilityEvidence}
     }
 
     $bundleProperties = @('schemaVersion','repository','commit','acquisition','archiveSha256','inventorySha256','inventory')

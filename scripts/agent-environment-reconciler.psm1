@@ -832,7 +832,11 @@ function Assert-AgentEnvironmentProjectionDesiredStateBinding {
     [string[]]$expectedProjections=@($GateContext.configuration.projections.user)
     Assert-AgentEnvironmentOrdinalSetEqual -Actual ([string[]]@($DesiredState.ProjectionIds)) -Expected $expectedProjections -Context 'Desired projection selection'
     Assert-AgentEnvironmentOrdinalSetEqual -Actual ([string[]]@($DesiredState.Manifest.projections)) -Expected $expectedProjections -Context 'Desired manifest projection selection'
-    [string[]]$expectedSkillIds=@(Resolve-SkillsSelection -Catalog $trustedCatalog -Selection $GateContext.configuration.catalog)
+    [object[]]$storedEvidence=@()
+    if($null-ne$GateContext.configuration.PSObject.Properties['capabilityEvidence']){$storedEvidence=@($GateContext.configuration.capabilityEvidence)}
+    [string[]]$selectionInstalledSkillIds=@()
+    if($null-ne$DesiredState.PSObject.Properties['InstalledSkillIds']){$selectionInstalledSkillIds=@($DesiredState.InstalledSkillIds)}
+    [string[]]$expectedSkillIds=@(Resolve-SkillsSelection -Catalog $trustedCatalog -Selection $GateContext.configuration.catalog -CapabilityEvidence $storedEvidence -InstalledSkillIds $selectionInstalledSkillIds -WarningAction SilentlyContinue)
     Assert-AgentEnvironmentOrdinalSetEqual -Actual ([string[]]@($DesiredState.SkillIds)) -Expected $expectedSkillIds -Context 'Desired Skill selection'
     [string[]]$manifestSkillIds=@($DesiredState.Manifest.files|ForEach-Object{[string]$_.skillId}|Sort-Object -Unique)
     Assert-AgentEnvironmentOrdinalSetEqual -Actual $manifestSkillIds -Expected $expectedSkillIds -Context 'Desired manifest Skill inventory'
@@ -875,6 +879,14 @@ function Assert-AgentEnvironmentProjectionDesiredStateBinding {
     }
 }
 
+function Get-AgentEnvironmentManifestSkillIds {
+    param([AllowNull()][object]$Manifest)
+    if($null-eq$Manifest){return @()}
+    [string[]]$skillIds=@($Manifest.files|ForEach-Object{[string]$_.skillId}|Sort-Object -Unique)
+    [Array]::Sort($skillIds,[StringComparer]::Ordinal)
+    return $skillIds
+}
+
 function Get-UserSkillsDesiredState {
     [CmdletBinding()]
     param(
@@ -884,6 +896,7 @@ function Get-UserSkillsDesiredState {
         [Parameter(Mandatory = $true)][string] $CatalogCommit,
         [Parameter(Mandatory = $true)][string] $WorkingRoot,
         [string[]] $ProjectionIds,
+        [string] $UserHome,
         [AllowNull()][object] $GateContext,
         [hashtable] $LocalArchiveOverrides = @{}
     )
@@ -940,7 +953,14 @@ function Get-UserSkillsDesiredState {
         }
     }
     else { $ProjectionIds = @('user-agents') }
-    $skillIds = @(Resolve-SkillsSelection -Catalog $catalog -Selection $Configuration.catalog)
+    [string[]]$installedSkillIds=@()
+    if(-not[string]::IsNullOrWhiteSpace($UserHome)){
+        $manifestSnapshot=Get-AgentEnvironmentManifestSnapshot -Root ([IO.Path]::GetFullPath($UserHome).TrimEnd([char[]]@('\','/'))) -RelativePath '.agents/catalog-skills.manifest.json'
+        $installedSkillIds=@(Get-AgentEnvironmentManifestSkillIds -Manifest $manifestSnapshot.Manifest)
+    }
+    [object[]]$storedEvidence=@()
+    if($null-ne$Configuration.PSObject.Properties['capabilityEvidence']){$storedEvidence=@($Configuration.capabilityEvidence)}
+    $skillIds = @(Resolve-SkillsSelection -Catalog $catalog -Selection $Configuration.catalog -CapabilityEvidence $storedEvidence -InstalledSkillIds $installedSkillIds)
     $plan = Resolve-SkillsSourcePlan -Catalog $catalog -Lock $lock -SkillIds $skillIds
     $archiveRoot = Join-Path $WorkingRoot 'archives'
     $sourceRoot = Join-Path $WorkingRoot 'sources'
@@ -1034,11 +1054,13 @@ function Get-UserSkillsDesiredState {
         if([Convert]::ToBase64String($validatedSection)-cne[Convert]::ToBase64String($sectionBytes)){throw 'Verified runtime bootstrap section bytes are not canonical.'}
         $instructionsArtifact=[pscustomobject][ordered]@{targetPath='.claude/CLAUDE.md';sectionBytes=$sectionBytes}
     }
-    return [pscustomobject][ordered]@{
+    $desiredState=[ordered]@{
         RuntimeRoot=$RuntimeRoot; Catalog=$catalog; Lock=$lock; SkillIds=$skillIds; Files=[object[]]$files.ToArray(); Manifest=$manifest
         LicenseWarnings=[string[]]$licenseWarnings.ToArray(); CatalogBytes=$catalogBytes; LockBytes=$lockBytes; ProjectionIds=[string[]]$ProjectionIds
         GateContext=$(if($projectionAware){$GateContext}else{$null}); InstructionsArtifact=$instructionsArtifact
     }
+    if($installedSkillIds.Count-gt0){$desiredState['InstalledSkillIds']=[string[]]$installedSkillIds}
+    return [pscustomobject]$desiredState
 }
 
 function Get-AgentEnvironmentManifest {
@@ -2108,6 +2130,9 @@ function Invoke-UserSkillsReconciliation {
     $manifestPath = Get-AgentEnvironmentFullPath -Root $home -RelativePath $manifestRelative
     $existingManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath $manifestRelative
     $existingManifestIdentity = $existingManifestSnapshot.Identity
+    if($null-ne$DesiredState.PSObject.Properties['InstalledSkillIds']){
+        Assert-AgentEnvironmentOrdinalSetEqual -Actual ([string[]]@($DesiredState.InstalledSkillIds)) -Expected ([string[]]@(Get-AgentEnvironmentManifestSkillIds -Manifest $existingManifestSnapshot.Manifest)) -Context 'Desired-state installed Skill evidence'
+    }
     if ((Test-Path -LiteralPath $journalPath) -and $Mode -ne 'Apply') {
         Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $journalRelative | Out-Null
         if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { throw 'Agent environment recovery journal path must be a file.' }

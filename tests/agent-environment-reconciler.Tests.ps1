@@ -100,6 +100,7 @@ function New-TestProjectionDesiredState {
         [switch]$WithoutClaude,
         [switch]$WithoutCopilot,
         [switch]$WithoutSkill,
+        [AllowNull()][object]$CapabilityRequirement,
         [string]$PayloadText="---`nname: work-with-jira`ndescription: projection test`n---`n"
     )
     $runtimeRoot=Join-Path $Root 'runtime';New-Item -ItemType Directory -Force -Path $runtimeRoot,(Join-Path $runtimeRoot 'catalog')|Out-Null
@@ -108,6 +109,10 @@ function New-TestProjectionDesiredState {
     }
     Copy-TestPlatformRuntimeClosure -Destination $runtimeRoot
     $catalog=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/skills-catalog-v3.example.json')|ConvertFrom-Json
+    if($null-ne$CapabilityRequirement){
+        $workSkill=@($catalog.skills|Where-Object id -ceq 'work-with-jira')[0]
+        $workSkill.compatibility.requiredCapabilities=@($CapabilityRequirement)
+    }
     if(-not$WithoutCopilot){
         $catalog.projections=@($catalog.projections)+@([pscustomobject][ordered]@{id='user-copilot';scope='user';root='.copilot/skills'})
     }
@@ -134,9 +139,11 @@ function New-TestProjectionDesiredState {
     if(-not$WithoutSkill){$selectedSkillIds=@('work-with-jira')}
     [string[]]$excludedSkillIds=@('manage-task-handoff')
     if($WithoutSkill){$excludedSkillIds+=@('work-with-jira')}
+    [object[]]$selectedProfiles=@(if($null-ne$CapabilityRequirement){'core'})
+    [object[]]$explicitSkillIds=@(if($null-eq$CapabilityRequirement){$selectedSkillIds})
     $configuration=[pscustomobject][ordered]@{
         schemaVersion=5;excludedRepositoryUrls=@();excludedRepositoryPaths=@()
-        catalog=[pscustomobject][ordered]@{repository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git';ref='0123456789abcdef0123456789abcdef01234567';profiles=@();includeSkills=$selectedSkillIds;excludeSkills=$excludedSkillIds}
+        catalog=[pscustomobject][ordered]@{repository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git';ref='0123456789abcdef0123456789abcdef01234567';profiles=$selectedProfiles;includeSkills=$explicitSkillIds;excludeSkills=$excludedSkillIds}
         updates=[pscustomobject][ordered]@{mode='notify-only';channel='protected-branch';ref='main';minimumCheckIntervalMinutes=1440}
         projections=[pscustomobject][ordered]@{user=$selectedProjectionIds;project=@()}
     }
@@ -167,7 +174,9 @@ function New-TestProjectionDesiredState {
 function New-TestProjectionSourceArchive {
     param(
         [Parameter(Mandatory=$true)][string]$PayloadPath,
-        [Parameter(Mandatory=$true)][string]$ArchivePath
+        [Parameter(Mandatory=$true)][string]$ArchivePath,
+        [string]$SkillId='work-with-jira',
+        [string]$Commit='0123456789abcdef0123456789abcdef01234567'
     )
     Add-Type -AssemblyName System.IO.Compression
     if([IO.File]::Exists($ArchivePath)){[IO.File]::Delete($ArchivePath)}
@@ -175,7 +184,7 @@ function New-TestProjectionSourceArchive {
     try{
         $archive=New-Object IO.Compression.ZipArchive($stream,[IO.Compression.ZipArchiveMode]::Create,$false)
         try{
-            $entry=$archive.CreateEntry('agent-skills-0123456789abcdef0123456789abcdef01234567/skills/work-with-jira/SKILL.md',[IO.Compression.CompressionLevel]::Optimal)
+            $entry=$archive.CreateEntry("agent-skills-$Commit/skills/$SkillId/SKILL.md",[IO.Compression.CompressionLevel]::Optimal)
             $input=[IO.File]::OpenRead($PayloadPath);$output=$entry.Open()
             try{$input.CopyTo($output)}finally{$output.Dispose();$input.Dispose()}
         }finally{$archive.Dispose()}
@@ -2095,6 +2104,7 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
             catalog=[pscustomobject][ordered]@{repository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git';ref=$commit;profiles=@();includeSkills=@();excludeSkills=$excludedSkillIds}
             updates=[pscustomobject][ordered]@{mode='notify-only';channel='protected-branch';ref='main';minimumCheckIntervalMinutes=1440}
             projections=[pscustomobject][ordered]@{user=@('user-agents','user-claude');project=@()}
+            capabilityEvidence=@([pscustomobject][ordered]@{kind='connector';id='datadog';state='configured'})
         }
         [IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-sync.json'),($configuration|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-install.lock'),'',[Text.UTF8Encoding]::new($false))
@@ -2181,6 +2191,163 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
         (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 3 -CapabilityReceipt ([pscustomobject]@{os='linux'}))|Should Be $false
         (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 3 -CapabilityReceipt ([pscustomobject]@{os='macos'}))|Should Be $false
         (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 2 -CapabilityReceipt ([pscustomobject]@{os='windows'}))|Should Be $false
+    }
+}
+
+Describe 'SYP-511 capability evidence reconciliation' {
+    BeforeEach { Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue }
+    AfterEach { Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue }
+
+    # Scenario: Production Catalog/Lock v3 first installs the Datadog Skill through legacy manifest v2, then upgrades to V3V5 without evidence.
+    # Purpose: Preserve and update the installed Skill into both production USER projections, keep every staged hash bound, and report VerifyOnly current.
+    It 'InterT05_upgrades_the_production_Datadog_Skill_from_manifest_v2_without_drift' {
+        $fixture=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'syp511-production-runtime') -WithoutSkill -WithoutCopilot
+        $runtimeRoot=[string]$fixture.RuntimeRoot
+        $catalogPath=Join-Path $runtimeRoot 'catalog/skills-catalog.json'
+        $lockPath=Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json'
+        [byte[]]$catalogBytes=[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'catalog/skills-catalog.json'))
+        [IO.File]::WriteAllBytes($catalogPath,$catalogBytes)
+        $catalog=[Text.Encoding]::UTF8.GetString($catalogBytes)|ConvertFrom-Json
+        $lock=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog-lock.json')|ConvertFrom-Json
+        $source=@($lock.sources|Where-Object id -ceq 'general')[0]
+        $skillId='investigate-datadog-logs'
+        $payloadPath=Join-Path $TestDrive 'syp511-production-datadog-SKILL.md'
+        [IO.File]::WriteAllText($payloadPath,"---`nname: investigate-datadog-logs`ndescription: isolated production-catalog fixture`n---`n`n# Fixture`n",[Text.UTF8Encoding]::new($false))
+        $payloadSha=(Get-FileHash -Algorithm SHA256 -LiteralPath $payloadPath).Hash.ToLowerInvariant()
+        $contentBytes=[Text.UTF8Encoding]::new($false).GetBytes("skills/$skillId/SKILL.md`t$payloadSha`n")
+        $algorithm=[Security.Cryptography.SHA256]::Create();try{$contentSha=([BitConverter]::ToString($algorithm.ComputeHash($contentBytes))).Replace('-','').ToLowerInvariant()}finally{$algorithm.Dispose()}
+        $archivePath=New-TestProjectionSourceArchive -PayloadPath $payloadPath -ArchivePath (Join-Path $TestDrive 'syp511-production-general.zip') -SkillId $skillId -Commit ([string]$source.resolvedCommit)
+        $source.archiveSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        @($lock.skills|Where-Object id -ceq $skillId)[0].contentSha256=$contentSha
+        [IO.File]::WriteAllText($lockPath,(($lock|ConvertTo-Json -Depth 30)+"`n"),[Text.UTF8Encoding]::new($false))
+        $catalogCommit='cdfdb2ad19d326fc4aeef24bb2130ddc1cf9d2d3'
+        $catalogRepository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
+        $selection=[pscustomobject][ordered]@{repository=$catalogRepository;ref=$catalogCommit;profiles=@('observability');includeSkills=@();excludeSkills=@()}
+        $v4=[pscustomobject][ordered]@{
+            schemaVersion=4;excludedRepositoryUrls=@();excludedRepositoryPaths=@();catalog=$selection
+            updates=[pscustomobject][ordered]@{mode='notify-only';channel='protected-branch';ref='main';minimumCheckIntervalMinutes=1440}
+        }
+        $localArchives=@{'general'=$archivePath}
+        $userHome=Join-Path $TestDrive 'syp511-production-user'
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"configured"}]'
+        $legacy=Get-UserSkillsDesiredState -RuntimeRoot $runtimeRoot -Configuration $v4 -CatalogRepository $catalogRepository -CatalogCommit $catalogCommit -WorkingRoot (Join-Path $TestDrive 'syp511-production-v4') -LocalArchiveOverrides $localArchives
+        (Invoke-UserSkillsReconciliation -DesiredState $legacy -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        [int]((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json')|ConvertFrom-Json).schemaVersion)|Should Be 2
+        Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE
+
+        $v5=[pscustomobject][ordered]@{
+            schemaVersion=5;excludedRepositoryUrls=@();excludedRepositoryPaths=@();catalog=$selection
+            updates=[pscustomobject][ordered]@{mode='notify-only';channel='protected-branch';ref='main';minimumCheckIntervalMinutes=1440}
+            projections=[pscustomobject][ordered]@{user=@('user-agents','user-claude');project=@()}
+        }
+        $platformModule=Import-Module (Join-Path $runtimeRoot 'platform-runtime.psd1') -Force -PassThru
+        $receipt=&$platformModule {Get-PlatformCapabilities -Required @()}
+        $bundle=New-TestAiInstructionsRuntimeBundleV3 -RuntimeRoot $runtimeRoot -Repository $catalogRepository -Commit $catalogCommit -Acquisition git-checkout -CapabilityReceipt $receipt
+        $gate=Assert-UserProjectionRuntimeGate -Bundle $bundle -Configuration $v5 -RuntimeRoot $runtimeRoot -CapabilityReceipt $receipt
+        $warnings=@()
+        $upgrade=Get-UserSkillsDesiredState -RuntimeRoot $runtimeRoot -Configuration $v5 -CatalogRepository $catalogRepository -CatalogCommit $catalogCommit -WorkingRoot (Join-Path $TestDrive 'syp511-production-v5') -GateContext $gate -LocalArchiveOverrides $localArchives -UserHome $userHome -WarningVariable warnings
+        @($upgrade.SkillIds)|Should Contain $skillId
+        ($warnings-join"`n")|Should Match 'connector:datadog'
+        (Invoke-UserSkillsReconciliation -DesiredState $upgrade -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        $manifest=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json')|ConvertFrom-Json
+        [int]$manifest.schemaVersion|Should Be 3
+        foreach($root in @('.agents/skills','.claude/skills')){
+            $relative="$root/$skillId/SKILL.md"
+            $target=Join-Path $userHome $relative
+            Test-Path -LiteralPath $target -PathType Leaf|Should Be $true
+            $expected=@($upgrade.Manifest.files|Where-Object targetPath -ceq $relative)[0]
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()|Should Be ([string]$expected.sha256)
+        }
+        $current=Get-UserSkillsDesiredState -RuntimeRoot $runtimeRoot -Configuration $v5 -CatalogRepository $catalogRepository -CatalogCommit $catalogCommit -WorkingRoot (Join-Path $TestDrive 'syp511-production-current') -GateContext $gate -LocalArchiveOverrides $localArchives -UserHome $userHome -WarningAction SilentlyContinue
+        (Invoke-UserSkillsReconciliation -DesiredState $current -UserHome $userHome -Mode VerifyOnly).outcome|Should Be 'current'
+    }
+
+    # Scenario: A managed USER manifest already contains a connector-gated Skill in the legacy user-agents projection when V2V4 runs without evidence.
+    # Purpose: Treat missing connector evidence as unknown for installed Skills, keep content and manifest current, and still filter a fresh install.
+    It 'InterT10_preserves_an_installed_v2v4_Skill_without_evidence_but_filters_a_fresh_install' {
+        $requirement=[pscustomobject]@{kind='connector';id='datadog';state='configured'}
+        $fixture=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'syp511-v2v4-fixture') -WithoutClaude -WithoutCopilot -CapabilityRequirement $requirement -PayloadText "---`nname: work-with-jira`ndescription: projection test`n---`n`n# Fixture`n"
+        $archivePath=New-TestProjectionSourceArchive -PayloadPath ([string]$fixture.Files[0].stagedPath) -ArchivePath (Join-Path $TestDrive 'syp511-v2v4.zip')
+        $fixture.Lock.sources[0].archiveSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        [IO.File]::WriteAllText((Join-Path $fixture.RuntimeRoot 'catalog/skills-catalog-lock.json'),(($fixture.Lock|ConvertTo-Json -Depth 20)+"`n"),[Text.UTF8Encoding]::new($false))
+        $configuration=$fixture.GateContext.configuration.PSObject.Copy();$configuration.schemaVersion=4;$configuration.PSObject.Properties.Remove('projections')
+        $userHome=Join-Path $TestDrive 'syp511-v2v4-user'
+        $arguments=@{RuntimeRoot=$fixture.RuntimeRoot;Configuration=$configuration;CatalogRepository=[string]$configuration.catalog.repository;CatalogCommit=[string]$configuration.catalog.ref;LocalArchiveOverrides=@{'agent-skills'=$archivePath}}
+
+        $fresh=Get-UserSkillsDesiredState @arguments -WorkingRoot (Join-Path $TestDrive 'syp511-v2v4-fresh')
+        @($fresh.SkillIds).Count|Should Be 0
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"configured"}]'
+        $installed=Get-UserSkillsDesiredState @arguments -WorkingRoot (Join-Path $TestDrive 'syp511-v2v4-install')
+        (Invoke-UserSkillsReconciliation -DesiredState $installed -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE
+
+        $warnings=@()
+        $preserved=Get-UserSkillsDesiredState @arguments -UserHome $userHome -WorkingRoot (Join-Path $TestDrive 'syp511-v2v4-preserve') -WarningVariable warnings
+        @($preserved.SkillIds)|Should Be @('work-with-jira')
+        ($warnings-join"`n")|Should Match 'connector:datadog'
+        (Invoke-UserSkillsReconciliation -DesiredState $preserved -UserHome $userHome -Mode Apply).outcome|Should Be 'current'
+        (Invoke-UserSkillsReconciliation -DesiredState $preserved -UserHome $userHome -Mode VerifyOnly).outcome|Should Be 'current'
+        Test-Path -LiteralPath (Join-Path $userHome '.agents/skills/work-with-jira/SKILL.md')|Should Be $true
+    }
+
+    # Scenario: A v3 manifest manages one connector-gated Skill in the Agents and Claude roots, then no evidence and explicit absent are evaluated in turn.
+    # Purpose: Preserve and update the installed projection pair while unknown, then remove both roots and manifest entries only after explicit revocation.
+    It 'InterT20_preserves_v3v5_projection_content_when_unknown_and_removes_it_when_absent' {
+        $requirement=[pscustomobject]@{kind='connector';id='datadog';state='configured'}
+        $fixture=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'syp511-v3v5-fixture') -WithoutCopilot -CapabilityRequirement $requirement -PayloadText "---`nname: work-with-jira`ndescription: projection test`n---`n`n# Fixture`n"
+        $userHome=Join-Path $TestDrive 'syp511-v3v5-user'
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"configured"}]'
+        (Invoke-UserSkillsReconciliation -DesiredState $fixture -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE
+        $archivePath=New-TestProjectionSourceArchive -PayloadPath ([string]$fixture.Files[0].stagedPath) -ArchivePath (Join-Path $TestDrive 'syp511-v3v5.zip')
+        $fixture.Lock.sources[0].archiveSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        [IO.File]::WriteAllText((Join-Path $fixture.RuntimeRoot 'catalog/skills-catalog-lock.json'),(($fixture.Lock|ConvertTo-Json -Depth 20)+"`n"),[Text.UTF8Encoding]::new($false))
+        $platformModule=Import-Module (Join-Path $fixture.RuntimeRoot 'platform-runtime.psd1') -Force -PassThru
+        $receipt=&$platformModule {Get-PlatformCapabilities -Required @()}
+        $bundle=New-TestAiInstructionsRuntimeBundleV3 -RuntimeRoot $fixture.RuntimeRoot -Repository ([string]$fixture.Manifest.catalogRepository) -Commit ([string]$fixture.Manifest.catalogCommit) -Acquisition git-checkout -CapabilityReceipt $receipt
+        $configuration=$fixture.GateContext.configuration
+        $gate=Assert-UserProjectionRuntimeGate -Bundle $bundle -Configuration $configuration -RuntimeRoot $fixture.RuntimeRoot -CapabilityReceipt $receipt
+        $arguments=@{RuntimeRoot=$fixture.RuntimeRoot;CatalogRepository=[string]$bundle.repository;CatalogCommit=[string]$bundle.commit;LocalArchiveOverrides=@{'agent-skills'=$archivePath};UserHome=$userHome}
+
+        $warnings=@()
+        $preserved=Get-UserSkillsDesiredState @arguments -Configuration $configuration -GateContext $gate -WorkingRoot (Join-Path $TestDrive 'syp511-v3v5-preserve') -WarningVariable warnings
+        @($preserved.SkillIds)|Should Be @('work-with-jira')
+        ($warnings-join"`n")|Should Match 'absent'
+        (Invoke-UserSkillsReconciliation -DesiredState $preserved -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        (Invoke-UserSkillsReconciliation -DesiredState $preserved -UserHome $userHome -Mode VerifyOnly).outcome|Should Be 'current'
+        foreach($root in @('.agents/skills','.claude/skills')){
+            $path=Join-Path $userHome "$root/work-with-jira/SKILL.md"
+            Test-Path -LiteralPath $path|Should Be $true
+            (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()|Should Be ([string]$preserved.Files[0].sha256)
+        }
+
+        $absentConfiguration=$configuration|ConvertTo-Json -Depth 20|ConvertFrom-Json
+        $absentConfiguration|Add-Member -NotePropertyName capabilityEvidence -NotePropertyValue @([pscustomobject]@{kind='connector';id='datadog';state='absent'})
+        $absentGate=Assert-UserProjectionRuntimeGate -Bundle $bundle -Configuration $absentConfiguration -RuntimeRoot $fixture.RuntimeRoot -CapabilityReceipt $receipt
+        $removed=Get-UserSkillsDesiredState @arguments -Configuration $absentConfiguration -GateContext $absentGate -WorkingRoot (Join-Path $TestDrive 'syp511-v3v5-remove')
+        @($removed.SkillIds).Count|Should Be 0
+        (Invoke-UserSkillsReconciliation -DesiredState $removed -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        $removedCurrent=Get-UserSkillsDesiredState @arguments -Configuration $absentConfiguration -GateContext $absentGate -WorkingRoot (Join-Path $TestDrive 'syp511-v3v5-removed-current')
+        (Invoke-UserSkillsReconciliation -DesiredState $removedCurrent -UserHome $userHome -Mode VerifyOnly).outcome|Should Be 'current'
+        Test-Path -LiteralPath (Join-Path $userHome '.agents/skills/work-with-jira')|Should Be $false
+        Test-Path -LiteralPath (Join-Path $userHome '.claude/skills/work-with-jira')|Should Be $false
+        @((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json')|ConvertFrom-Json).files).Count|Should Be 0
+    }
+
+    # Scenario: Config and environment evidence disagree for the same connector while the desired-state planner reads an installed manifest.
+    # Purpose: Apply the environment value for that run without changing the persisted configuration object.
+    It 'InterT30_uses_environment_evidence_as_a_non_persistent_per_run_override' {
+        $catalog=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog.json')|ConvertFrom-Json
+        $selection=[pscustomobject]@{profiles=@('observability');includeSkills=@();excludeSkills=@()}
+        $stored=@([pscustomobject]@{kind='connector';id='datadog';state='absent'})
+        $before=$stored|ConvertTo-Json -Compress
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"configured"}]'
+
+        $selectionModule=Import-Module (Join-Path $script:RuntimeRoot 'skills-selection.psm1') -Force -PassThru
+        $resolved=@(& $selectionModule { param($Catalog,$Selection,$Evidence) Resolve-SkillsSelection -Catalog $Catalog -Selection $Selection -CapabilityEvidence $Evidence } $catalog $selection $stored)
+
+        $resolved|Should Contain 'investigate-datadog-logs'
+        ($stored|ConvertTo-Json -Compress)|Should Be $before
     }
 }
 

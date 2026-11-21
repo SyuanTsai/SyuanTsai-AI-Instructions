@@ -351,6 +351,80 @@ function New-SelectionCatalog {
         } 'not valid JSON'
     }
 
+    # Scenario: A profile-selected connector-gated Skill is present in the managed USER manifest, but no current evidence exists for its capability.
+    # Purpose: Preserve an installed Skill when connector state is unknown and emit actionable evidence guidance without changing fresh-install filtering.
+    It 'UnitT99_preserves_an_installed_Skill_when_connector_evidence_is_unknown' {
+        $catalog = New-SelectionCatalog
+        $catalog.skills = @($catalog.skills | Where-Object { $_.id -ne 'skill-optional' }) + @(
+            (New-TestSkill -Id 'skill-optional' -Compatibility (New-TestCompatibility -RequiredCapabilities @(
+                [pscustomobject]@{ kind='connector'; id='datadog'; state='configured' }
+            )))
+        )
+        $selection = [pscustomobject]@{ profiles=@('optional'); includeSkills=@(); excludeSkills=@() }
+
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection).Count | Should Be 0
+        $warnings = @()
+        $resolved = @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -InstalledSkillIds @('skill-optional') -WarningVariable warnings)
+
+        Assert-StringSequence -Actual $resolved -Expected @('skill-optional')
+        ($warnings -join "`n") | Should Match 'skill-optional'
+        ($warnings -join "`n") | Should Match 'connector:datadog'
+        ($warnings -join "`n") | Should Match '\-CapabilityEvidence'
+        ($warnings -join "`n") | Should Match 'absent'
+    }
+
+    # Scenario: Stored configured evidence is overlaid by an environment declaration, including the explicit absent state in either source.
+    # Purpose: Make the per-run environment declaration authoritative while keeping persisted evidence immutable at selection time.
+    It 'UnitT100_merges_stored_evidence_with_environment_override_and_honors_absent' {
+        $catalog = New-SelectionCatalog
+        $catalog.skills = @($catalog.skills | Where-Object { $_.id -ne 'skill-optional' }) + @(
+            (New-TestSkill -Id 'skill-optional' -Compatibility (New-TestCompatibility -RequiredCapabilities @(
+                [pscustomobject]@{ kind='connector'; id='datadog'; state='configured' }
+            )))
+        )
+        $selection = [pscustomobject]@{ profiles=@('optional'); includeSkills=@(); excludeSkills=@() }
+        $configured = @([pscustomobject]@{kind='connector';id='datadog';state='configured'})
+        $absent = @([pscustomobject]@{kind='connector';id='datadog';state='absent'})
+
+        Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -CapabilityEvidence $configured) -Expected @('skill-optional')
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -CapabilityEvidence $absent -InstalledSkillIds @('skill-optional')).Count | Should Be 0
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"absent"}]'
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -CapabilityEvidence $configured -InstalledSkillIds @('skill-optional')).Count | Should Be 0
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"configured"}]'
+        Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -CapabilityEvidence $absent) -Expected @('skill-optional')
+    }
+
+    # Scenario: Installed Skills fail command, platform, or explicit-exclusion checks while connector evidence is unknown.
+    # Purpose: Limit unknown-state preservation to connector/environment capability gaps and retain all existing hard filters.
+    It 'UnitT101_does_not_preserve_command_platform_or_explicitly_excluded_Skills' {
+        $catalog = [pscustomobject]@{
+            profiles=@([pscustomobject]@{id='core';default=$true;includes=@('connector-skill','command-skill','platform-skill');excludes=@()})
+            skills=@(
+                (New-TestSkill -Id 'connector-skill' -Compatibility (New-TestCompatibility -RequiredCapabilities @([pscustomobject]@{kind='connector';id='datadog';state='configured'}))),
+                (New-TestSkill -Id 'command-skill' -Compatibility (New-TestCompatibility -RequiredCapabilities @([pscustomobject]@{kind='command';id='syp511-command-that-does-not-exist';state='available'}))),
+                (New-TestSkill -Id 'platform-skill' -Compatibility (New-TestCompatibility -Platforms @('syp511-unsupported') -RequiredCapabilities @([pscustomobject]@{kind='connector';id='datadog';state='configured'})))
+            )
+        }
+        $installed=@('connector-skill','command-skill','platform-skill')
+        $selection=[pscustomobject]@{profiles=@('core');includeSkills=@();excludeSkills=@('connector-skill')}
+
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -InstalledSkillIds $installed).Count | Should Be 0
+    }
+
+    # Scenario: Stored or environment capability evidence repeats the same kind and ID tuple.
+    # Purpose: Reject ambiguous precedence within one evidence source before selection can silently collapse it.
+    It 'UnitT102_rejects_duplicate_capability_evidence_tuples' {
+        $catalog=New-SelectionCatalog
+        $selection=[pscustomobject]@{profiles=@('core');includeSkills=@();excludeSkills=@()}
+        $duplicate=@(
+            [pscustomobject]@{kind='connector';id='datadog';state='configured'},
+            [pscustomobject]@{kind='connector';id='datadog';state='absent'}
+        )
+        Assert-ThrowsMessage { Resolve-SkillsSelection -Catalog $catalog -Selection $selection -CapabilityEvidence $duplicate } 'duplicate'
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"configured"},{"kind":"connector","id":"datadog","state":"absent"}]'
+        Assert-ThrowsMessage { Resolve-SkillsSelection -Catalog $catalog -Selection $selection } 'duplicate'
+    }
+
     # Scenario: The approved Atlassian profile resolves its existing setup fallback on Windows and filters platform-specific Skills elsewhere.
     # Purpose: Keep one-off publishing available when Git documentation synchronization is activated on supported platforms.
     It 'InterT97_keeps_publisher_and_docs_as_code_available_together' {

@@ -34,6 +34,11 @@
         { "if": { "properties": { "channel": { "const": "github-release" } } }, "then": { "properties": { "ref": { "const": "latest" } } } }
       ]
     },
+    "capabilityEvidence": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/capabilityEvidence" }
+    },
     "projections": {
       "type": "object", "additionalProperties": false,
       "required": ["user", "project"],
@@ -52,6 +57,16 @@
   },
   "$defs": {
     "stringArray": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
-    "stableIdArray": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$" } }
+    "stableIdArray": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$" } },
+    "capabilityEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "state"],
+      "properties": {
+        "kind": { "enum": ["command", "connector", "environment"] },
+        "id": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$" },
+        "state": { "enum": ["absent", "available", "authenticated", "configured"] }
+      }
+    }
   }
 }

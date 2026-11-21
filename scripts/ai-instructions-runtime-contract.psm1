@@ -1114,6 +1114,38 @@ function ConvertTo-AiInstructionsSyncConfigurationV4 {
     return $configuration
 }
 
+function Get-AiInstructionsNormalizedCapabilityEvidence {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Evidence,
+        [string] $Context = 'AI instruction sync configuration capabilityEvidence'
+    )
+
+    $byKey = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::Ordinal)
+    foreach ($item in $Evidence) {
+        if ($null -eq $item) { throw "$Context must contain only objects." }
+        foreach ($propertyName in @($item.PSObject.Properties.Name)) {
+            if ($propertyName -cnotin @('kind','id','state')) { throw "$Context contains unsupported property '$propertyName'." }
+        }
+        foreach ($name in @('kind','id','state')) {
+            if (-not (Test-AiInstructionsObjectHasProperty -Object $item -Name $name)) { throw "$Context item is missing '$name'." }
+        }
+        $kind = [string]$item.kind
+        $id = [string]$item.id
+        $state = [string]$item.state
+        if ($kind -cnotin @('command','connector','environment') -or
+            $id -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' -or
+            $state -cnotin @('absent','available','authenticated','configured')) {
+            throw "$Context contains invalid capability evidence: kind='$kind' id='$id' state='$state'."
+        }
+        $key = "$kind`n$id"
+        if ($byKey.ContainsKey($key)) { throw "$Context contains duplicate capability evidence for '$kind`:$id'." }
+        $byKey.Add($key,[pscustomobject][ordered]@{kind=$kind;id=$id;state=$state})
+    }
+    [string[]]$keys = @($byKey.Keys)
+    [Array]::Sort($keys,[StringComparer]::Ordinal)
+    return @($keys | ForEach-Object { $byKey[$_] })
+}
+
 function ConvertTo-AiInstructionsSyncConfigurationV5 {
     [CmdletBinding()]
     param(
@@ -1123,9 +1155,12 @@ function ConvertTo-AiInstructionsSyncConfigurationV5 {
         [string[]] $AdditionalExcludedRepositoryUrls = @(),
         [string[]] $AdditionalExcludedRepositoryPaths = @(),
         [AllowNull()][object] $Catalog,
+        [AllowEmptyCollection()][object[]] $CapabilityEvidence = @(),
         [string] $CanonicalRepository = $script:CanonicalRepository
     )
 
+    $capabilityEvidenceSpecified = $PSBoundParameters.ContainsKey('CapabilityEvidence')
+    $existingCapabilityEvidence = @()
     $existingV5 = $null -ne $ExistingConfiguration -and
         (Test-AiInstructionsObjectHasProperty -Object $ExistingConfiguration -Name 'schemaVersion') -and
         ($ExistingConfiguration.schemaVersion -is [int] -or $ExistingConfiguration.schemaVersion -is [long]) -and
@@ -1133,6 +1168,9 @@ function ConvertTo-AiInstructionsSyncConfigurationV5 {
     if ($existingV5) {
         Assert-AiInstructionsSyncConfigurationV5 -Configuration $ExistingConfiguration -CanonicalRepository $CanonicalRepository | Out-Null
         $existingProjections = $ExistingConfiguration.projections
+        if (Test-AiInstructionsObjectHasProperty -Object $ExistingConfiguration -Name 'capabilityEvidence') {
+            $existingCapabilityEvidence = @($ExistingConfiguration.capabilityEvidence)
+        }
         $ExistingConfiguration = [pscustomobject][ordered]@{
             schemaVersion = 4
             excludedRepositoryUrls = @($ExistingConfiguration.excludedRepositoryUrls)
@@ -1150,7 +1188,7 @@ function ConvertTo-AiInstructionsSyncConfigurationV5 {
         -AdditionalExcludedRepositoryPaths $AdditionalExcludedRepositoryPaths `
         -Catalog $Catalog `
         -CanonicalRepository $CanonicalRepository
-    $v5 = [pscustomobject][ordered]@{
+    $v5Data = [ordered]@{
         schemaVersion = 5
         excludedRepositoryUrls = @($v4.excludedRepositoryUrls)
         excludedRepositoryPaths = @($v4.excludedRepositoryPaths)
@@ -1161,6 +1199,14 @@ function ConvertTo-AiInstructionsSyncConfigurationV5 {
         }
         else { [pscustomobject][ordered]@{ user=@('user-agents','user-claude'); project=@() } }
     }
+    [object[]]$effectiveCapabilityEvidence = @(
+        if ($capabilityEvidenceSpecified) {
+            Get-AiInstructionsNormalizedCapabilityEvidence -Evidence @($CapabilityEvidence)
+        }
+        else { Get-AiInstructionsNormalizedCapabilityEvidence -Evidence @($existingCapabilityEvidence) }
+    )
+    if ($effectiveCapabilityEvidence.Count -gt 0) { $v5Data['capabilityEvidence'] = $effectiveCapabilityEvidence }
+    $v5 = [pscustomobject]$v5Data
     Assert-AiInstructionsSyncConfigurationV5 -Configuration $v5 -CanonicalRepository $CanonicalRepository | Out-Null
     return $v5
 }
@@ -1268,7 +1314,7 @@ function Assert-AiInstructionsSyncConfigurationV5 {
         ($Configuration.schemaVersion -isnot [int] -and $Configuration.schemaVersion -isnot [long]) -or
         [int64]$Configuration.schemaVersion -ne 5) { throw 'AI instruction sync configuration must use schemaVersion 5.' }
     foreach ($propertyName in @($Configuration.PSObject.Properties.Name)) {
-        if ($propertyName -cnotin @('schemaVersion','excludedRepositoryUrls','excludedRepositoryPaths','catalog','updates','projections')) {
+        if ($propertyName -cnotin @('schemaVersion','excludedRepositoryUrls','excludedRepositoryPaths','catalog','updates','projections','capabilityEvidence')) {
             throw "AI instruction sync configuration contains unsupported property '$propertyName'."
         }
     }
@@ -1293,6 +1339,10 @@ function Assert-AiInstructionsSyncConfigurationV5 {
     # avoiding an import cycle from the runtime contract into the Catalog contract.
     Assert-AiInstructionsProjectionIdArray -Value $Configuration.projections.user -Allowed @('user-agents','user-claude','user-copilot') -Context 'AI instruction sync configuration projections.user' -RequireUserAgents
     Assert-AiInstructionsProjectionIdArray -Value $Configuration.projections.project -Allowed @('project-agents','project-claude','project-github') -Context 'AI instruction sync configuration projections.project'
+    if (Test-AiInstructionsObjectHasProperty -Object $Configuration -Name 'capabilityEvidence') {
+        if ($Configuration.capabilityEvidence -isnot [System.Array]) { throw 'AI instruction sync configuration capabilityEvidence must be an array.' }
+        [void](Get-AiInstructionsNormalizedCapabilityEvidence -Evidence @($Configuration.capabilityEvidence))
+    }
     return $Configuration
 }
 
@@ -3774,6 +3824,7 @@ Export-ModuleMember -Function @(
     'ConvertFrom-AiInstructionsInstallJournalJson',
     'ConvertTo-AiInstructionsSyncConfigurationV4',
     'ConvertTo-AiInstructionsSyncConfigurationV5',
+    'Get-AiInstructionsNormalizedCapabilityEvidence',
     'Get-AiInstructionsFileSha256',
     'Get-AiInstructionsFullDirectoryPath',
     'Get-AiInstructionsInstallRecoveryDecision',

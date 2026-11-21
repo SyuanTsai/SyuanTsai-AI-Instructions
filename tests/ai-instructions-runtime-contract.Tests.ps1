@@ -4090,4 +4090,28 @@ exit /b %errorlevel%
         Update-TestRuntimeV3Inventory -Fixture $fixture
         (Get-RuntimeContractError {Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configuration -RuntimeRoot $fixture.Root|Out-Null})|Should Match 'bootstrap-section.md'
     }
+
+    # Scenario: Config v5 is created, carried forward, replaced, and cleared with capability evidence while omission remains byte-compatible.
+    # Purpose: Persist deterministic evidence only in v5 and reject duplicate tuples before configuration bytes are written.
+    It 'UnitT235_persists_normalizes_replaces_and_clears_v5_capability_evidence' {
+        $configured=@(
+            [pscustomobject]@{kind='environment';id='jira-cloud-api';state='configured'},
+            [pscustomobject]@{kind='connector';id='datadog';state='configured'}
+        )
+        $created=ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration $null -CatalogRepository $script:CanonicalRepository -CatalogRef ('a'*40) -CapabilityEvidence $configured
+        @($created.capabilityEvidence|ForEach-Object{"$($_.kind):$($_.id):$($_.state)"})|Should Be @('connector:datadog:configured','environment:jira-cloud-api:configured')
+        {Assert-AiInstructionsSyncConfigurationV5 -Configuration $created}|Should Not Throw
+
+        $carried=ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration $created -CatalogRepository $script:CanonicalRepository -CatalogRef ('b'*40)
+        @($carried.capabilityEvidence|ForEach-Object{"$($_.kind):$($_.id):$($_.state)"})|Should Be @('connector:datadog:configured','environment:jira-cloud-api:configured')
+        $replaced=ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration $carried -CatalogRepository $script:CanonicalRepository -CatalogRef ('c'*40) -CapabilityEvidence @([pscustomobject]@{kind='connector';id='datadog';state='absent'})
+        @($replaced.capabilityEvidence|ForEach-Object{"$($_.kind):$($_.id):$($_.state)"})|Should Be @('connector:datadog:absent')
+        $cleared=ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration $replaced -CatalogRepository $script:CanonicalRepository -CatalogRef ('d'*40) -CapabilityEvidence @()
+        $cleared.PSObject.Properties.Name|Should Not Contain 'capabilityEvidence'
+
+        $withoutEvidence=ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration $null -CatalogRepository $script:CanonicalRepository -CatalogRef ('e'*40)
+        $withoutEvidence.PSObject.Properties.Name|Should Not Contain 'capabilityEvidence'
+        $duplicate=@([pscustomobject]@{kind='connector';id='datadog';state='configured'},[pscustomobject]@{kind='connector';id='datadog';state='absent'})
+        (Get-RuntimeContractError {ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration $null -CatalogRepository $script:CanonicalRepository -CatalogRef ('f'*40) -CapabilityEvidence $duplicate})|Should Match 'duplicate'
+    }
 }
