@@ -188,6 +188,19 @@ function Get-TestInstallJournalV1 {
     return $journal
 }
 
+function Convert-TestInstallIdentityToUnixWriterShape {
+    param([AllowNull()][object] $Identity)
+    if ($null -eq $Identity) { return $null }
+
+    $deviceHex = ([string] $Identity.device) -replace '^0[xX]',''
+    $fileIdHex = ([string] $Identity.fileId).Replace(':','')
+    return [pscustomobject][ordered]@{
+        kind='unix-device-inode'
+        device=[string][uint64][Convert]::ToUInt64($deviceHex,16)
+        fileId=[string][uint64][Convert]::ToUInt64($fileIdHex,16)
+    }
+}
+
 function New-TestLargeUserReconcilerJournalJson {
     $examplePath = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json'
     $convertParameters = @{ InputObject=(Get-Content -Raw -Encoding UTF8 -LiteralPath $examplePath) }
@@ -217,11 +230,11 @@ function Get-TestLinuxInstallJournalV1 {
     $journal.lock.primitive = 'flock'
     foreach ($operation in $journal.operations) {
         foreach ($state in @($operation.original,$operation.applied)) {
-            if ($null -ne $state.identity) { $state.identity.kind = 'unix-device-inode' }
+            if ($null -ne $state.identity) { $state.identity = Convert-TestInstallIdentityToUnixWriterShape -Identity $state.identity }
         }
-        if ($null -ne $operation.backupIdentity) { $operation.backupIdentity.kind = 'unix-device-inode' }
+        if ($null -ne $operation.backupIdentity) { $operation.backupIdentity = Convert-TestInstallIdentityToUnixWriterShape -Identity $operation.backupIdentity }
     }
-    $journal.operations[0].permissions = [pscustomobject]@{ kind='unix-mode'; mode='0644'; uid=1000; gid=1000 }
+    $journal.operations[0].permissions = [pscustomobject][ordered]@{ kind='unix-mode'; mode=[string]'0644'; uid=[uint64]1000; gid=[uint64]1000 }
     return (ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20))
 }
 
@@ -233,11 +246,11 @@ function Convert-TestInstallJournalToHostPlatform {
     $Journal.lock.primitive = 'flock'
     foreach ($operation in $Journal.operations) {
         foreach ($state in @($operation.original,$operation.applied)) {
-            if ($null -ne $state.identity) { $state.identity.kind = 'unix-device-inode' }
+            if ($null -ne $state.identity) { $state.identity = Convert-TestInstallIdentityToUnixWriterShape -Identity $state.identity }
         }
-        if ($null -ne $operation.backupIdentity) { $operation.backupIdentity.kind = 'unix-device-inode' }
+        if ($null -ne $operation.backupIdentity) { $operation.backupIdentity = Convert-TestInstallIdentityToUnixWriterShape -Identity $operation.backupIdentity }
         if ($null -ne $operation.permissions) {
-            $operation.permissions = [pscustomobject]@{ kind='unix-mode'; mode='0644'; uid=1000; gid=1000 }
+            $operation.permissions = [pscustomobject][ordered]@{ kind='unix-mode'; mode=[string]'0644'; uid=[uint64]1000; gid=[uint64]1000 }
         }
     }
     return (ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($Journal | ConvertTo-Json -Depth 20))
@@ -1804,6 +1817,31 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $decision.operations[1].action | Should Be 'none'
     }
 
+    if (-not $IsWindows) {
+    # Scenario: Unix rollback restored original content and identity, but mode, uid, or gid differs from the prepared permission snapshot.
+    # Purpose: Resume the incomplete rollback for every Unix permission field instead of treating the operation as complete.
+    It 'UnitT140a_restores_permissions_when_rolling_back_original_content_with_unix_<Field>_drift' -TestCases @(
+        @{ Field='mode'; Value='0600' },
+        @{ Field='uid'; Value=[int64]1001 },
+        @{ Field='gid'; Value=[int64]1002 }
+    ) {
+        param([string] $Field,$Value)
+        $journal = Convert-TestInstallJournalToHostPlatform -Journal (Get-TestInstallJournalV1)
+        $journal.phase = 'rolling-back'
+        $observations = @{
+            1 = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].original
+            2 = New-TestInstallObservation -Operation $journal.operations[1] -State $journal.operations[1].original
+        }
+        $observations[1].permissions.$Field = $Value
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+
+        $decision.action | Should Be 'roll-back'
+        $decision.operations[0].action | Should Be 'restore-permissions'
+        $decision.operations[1].action | Should Be 'none'
+    }
+    }
+
     # Scenario: A rolled-back journal has original content everywhere but one access policy still differs.
     # Purpose: Refuse to accept a terminal rollback whose permissions restoration is incomplete.
     It 'UnitT141_refuses_rolled_back_state_with_permission_drift' {
@@ -1821,6 +1859,32 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $decision.action | Should Be 'refuse'
         ($decision.reasons -join ' ') | Should Match 'sequence 1.*permissions'
         (@($decision.operations.action) -join ',') | Should Be 'keep,keep'
+    }
+
+    if (-not $IsWindows) {
+    # Scenario: A terminal Unix rollback has original content everywhere, but mode, uid, or gid still differs from the prepared snapshot.
+    # Purpose: Refuse every incomplete Unix permission restoration rather than accepting the rolled-back journal.
+    It 'UnitT141a_refuses_rolled_back_state_with_unix_<Field>_drift' -TestCases @(
+        @{ Field='mode'; Value='0600' },
+        @{ Field='uid'; Value=[int64]1001 },
+        @{ Field='gid'; Value=[int64]1002 }
+    ) {
+        param([string] $Field,$Value)
+        $journal = Convert-TestInstallJournalToHostPlatform -Journal (Get-TestInstallJournalV1)
+        $journal.phase = 'rolled-back'
+        foreach ($operation in $journal.operations) { $operation.state = 'rolled-back' }
+        $observations = @{
+            1 = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].original
+            2 = New-TestInstallObservation -Operation $journal.operations[1] -State $journal.operations[1].original
+        }
+        $observations[1].permissions.$Field = $Value
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+
+        $decision.action | Should Be 'refuse'
+        ($decision.reasons -join ' ') | Should Match 'sequence 1.*permissions'
+        (@($decision.operations.action) -join ',') | Should Be 'keep,keep'
+    }
     }
 
     # Scenario: A rolled-back journal has original content, identity, and required permissions everywhere.
@@ -4032,30 +4096,41 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $realGit=(Get-Command git -ErrorAction Stop).Source
         if($IsWindows){
         $shim=Join-Path $TestDrive 'bootstrap-head-error.cmd'
+        $batchRepository=$repository.Replace('%','%%')
+        $batchRealGit=$realGit.Replace('%','%%')
         $shimText=@"
 @echo off
 setlocal
-echo(%*| %SystemRoot%\System32\findstr.exe /L /C:"rev-parse --verify --quiet HEAD" >nul
-if not errorlevel 1 (
+if "%~1"=="-C" if "%~2"=="$batchRepository" if "%~3"=="rev-parse" if "%~4"=="--verify" if "%~5"=="--quiet" if "%~6"=="HEAD" if "%7"=="" (
   1>&2 echo injected initial HEAD query failure
   exit /b 128
 )
-"$realGit" %*
+"$batchRealGit" %*
 exit /b %errorlevel%
 "@
         [IO.File]::WriteAllText($shim,$shimText,[Text.Encoding]::ASCII)
         }else{
             $shim=Join-Path $TestDrive 'bootstrap-head-error'
+            $apostrophe=[string][char]39
+            $doubleQuote=[string][char]34
+            $escapedApostrophe=$apostrophe+$doubleQuote+$apostrophe+$doubleQuote+$apostrophe
+            $quotedRepository=$apostrophe+$repository.Replace($apostrophe,$escapedApostrophe)+$apostrophe
+            $quotedRealGit=$apostrophe+$realGit.Replace($apostrophe,$escapedApostrophe)+$apostrophe
             $shimText=@'
 #!/bin/sh
-case " $* " in
-  *" rev-parse --verify --quiet HEAD "*)
-    echo "injected initial HEAD query failure" >&2
-    exit 128
-    ;;
-esac
-exec git "$@"
+if [ "$#" -eq 6 ] &&
+   [ "$1" = "-C" ] &&
+   [ "$2" = __REPOSITORY__ ] &&
+   [ "$3" = "rev-parse" ] &&
+   [ "$4" = "--verify" ] &&
+   [ "$5" = "--quiet" ] &&
+   [ "$6" = "HEAD" ]; then
+  echo "injected initial HEAD query failure" >&2
+  exit 128
+fi
+exec __REAL_GIT__ "$@"
 '@
+            $shimText=$shimText.Replace('__REPOSITORY__',$quotedRepository).Replace('__REAL_GIT__',$quotedRealGit)
             [IO.File]::WriteAllText($shim,$shimText,[Text.UTF8Encoding]::new($false))
             & chmod u+x -- $shim
             $LASTEXITCODE|Should Be 0
