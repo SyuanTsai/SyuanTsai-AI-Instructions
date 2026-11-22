@@ -807,32 +807,62 @@ function Resolve-StandardValidationInternalUseToolPath {
         return [IO.Path]::GetFullPath($Path)
     }
 
+    $separator = [IO.Path]::DirectorySeparatorChar
+    $pathParts = $Path.Split([char[]]@($separator), [StringSplitOptions]::None)
+    $invalidPath = -not [IO.Path]::IsPathFullyQualified($Path)
+    for ($index = 1; -not $invalidPath -and $index -lt $pathParts.Length; $index++) {
+        if ($pathParts[$index] -ceq '' -or $pathParts[$index] -ceq '.' -or $pathParts[$index] -ceq '..') {
+            $invalidPath = $true
+        }
+    }
+    if ($invalidPath) {
+        throw "INVALID|$Context path must be an absolute path without '.' or '..' components: $Path"
+    }
+
     try { $full = [IO.Path]::GetFullPath($Path) }
     catch { throw "INVALID|$Context path is invalid: $Path. $($_.Exception.Message)" }
+    $anchor = [IO.Path]::GetPathRoot($full)
+    $pending = @($full.Substring($anchor.Length).Split(
+        [char[]]@([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar),
+        [StringSplitOptions]::RemoveEmptyEntries))
+    $current = $anchor
     for ($hop = 0; $hop -lt 40; $hop++) {
-        $anchor = [IO.Path]::GetPathRoot($full)
-        $parts = $full.Substring($anchor.Length).Split(
-            [char[]]@([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar),
-            [StringSplitOptions]::RemoveEmptyEntries)
-        $current = $anchor
         $redirected = $false
-        for ($index = 0; $index -lt $parts.Length; $index++) {
-            $current = Join-Path $current $parts[$index]
-            $entry = if ($index -eq $parts.Length - 1) { [IO.FileInfo]::new($current) } else { [IO.DirectoryInfo]::new($current) }
+        while ($pending.Count -gt 0) {
+            $part = $pending[0]
+            $pending = if ($pending.Count -gt 1) { @($pending[1..($pending.Count - 1)]) } else { @() }
+            if ($part -ceq '.') { continue }
+            if ($part -ceq '..') {
+                $parent = [IO.Directory]::GetParent($current)
+                if ($null -ne $parent) { $current = $parent.FullName }
+                continue
+            }
+            $parentPath = $current
+            $current = Join-Path $current $part
+            $entry = if ($pending.Count -eq 0) { [IO.FileInfo]::new($current) } else { [IO.DirectoryInfo]::new($current) }
             try { $linkTarget = $entry.LinkTarget }
             catch { throw "INVALID|$Context symbolic-link metadata could not be read: $current. $($_.Exception.Message)" }
             if ([string]::IsNullOrEmpty($linkTarget)) { continue }
             Assert-StandardValidationTrustedUnixLinkPath -Path $current -Context $Context
-            try { $target = $entry.ResolveLinkTarget($false) }
-            catch { throw "INVALID|$Context symbolic-link target could not be resolved: $current. $($_.Exception.Message)" }
-            if ($null -eq $target) { throw "INVALID|$Context symbolic-link target could not be resolved: $current" }
-            $full = $target.FullName
-            for ($tail = $index + 1; $tail -lt $parts.Length; $tail++) { $full = Join-Path $full $parts[$tail] }
+            if ([IO.Path]::IsPathFullyQualified($linkTarget)) {
+                $targetAnchor = [IO.Path]::GetPathRoot($linkTarget)
+                $targetPath = $linkTarget.Substring($targetAnchor.Length)
+                $current = $targetAnchor
+            }
+            else {
+                $targetPath = $linkTarget
+                $current = $parentPath
+            }
+            $targetParts = @($targetPath.Split([char[]]@($separator), [StringSplitOptions]::None))
+            if ($targetParts.Count -eq 0 -or @($targetParts | Where-Object { $_ -ceq '' }).Count -gt 0) {
+                throw "INVALID|$Context symbolic-link target path must not contain repeated or trailing separators: $linkTarget"
+            }
+            $pending = @($targetParts) + @($pending)
             $redirected = $true
             break
         }
         if (-not $redirected) {
-            $resolved = [IO.Path]::GetFullPath($full)
+            $resolved = [IO.Path]::GetFullPath($current)
             Assert-StandardValidationTrustedUnixToolPath -Path $resolved -Context $Context
             return $resolved
         }

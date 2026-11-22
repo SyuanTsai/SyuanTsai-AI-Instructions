@@ -470,6 +470,39 @@ Describe 'Internal Skill use approvals' {
 
             { Invoke-InternalUseFixture $fixture } | Should -Throw 'owned by root or the current user'
         }
+
+        # Scenario: An inventory path traverses a parent component after a symbolic-link directory.
+        # Purpose: Reject paths whose lexical normalization would disagree with POSIX symbolic-link traversal.
+        It 'UnitT95_RejectsParentComponentAfterAUnixSymlinkDirectory' {
+            $fixture = New-InternalUseFixture
+            $root = Join-Path $script:InternalUseTrustedUnixRoot 'parent-component'
+            $trusted = Join-Path $root 'trusted'
+            $packageSubdirectory = Join-Path $root 'package/subdirectory'
+            foreach ($directory in @($root, $trusted, (Join-Path $root 'package'), $packageSubdirectory)) {
+                [void][IO.Directory]::CreateDirectory($directory)
+                [IO.File]::SetUnixFileMode($directory, [IO.UnixFileMode]493)
+            }
+            $targetPath = Join-Path (Split-Path -Parent $packageSubdirectory) 'git'
+            Copy-Item -LiteralPath ([string]$fixture.tools[1].path) -Destination $targetPath
+            [IO.File]::SetUnixFileMode($targetPath, [IO.UnixFileMode]384)
+            $linkPath = Join-Path $trusted 'current'
+            New-Item -ItemType SymbolicLink -Path $linkPath -Target $packageSubdirectory | Out-Null
+            $fixture.tools[1].path = "$linkPath/../git"
+
+            { Invoke-InternalUseFixture $fixture } | Should -Throw "INVALID|internal use tool path must be an absolute path without '.' or '..' components: $linkPath/../git"
+        }
+
+        # Scenario: An inventory path contains an explicit current-directory component.
+        # Purpose: Reject non-canonical inventory paths before normalization hides the component.
+        It 'UnitT96_RejectsCurrentDirectoryComponentInAUnixToolPath' {
+            $fixture = New-InternalUseFixture
+            $toolPath = [string]$fixture.tools[1].path
+            $parent = Split-Path -Parent $toolPath
+            $leaf = Split-Path -Leaf $toolPath
+            $fixture.tools[1].path = "$parent/./$leaf"
+
+            { Invoke-InternalUseFixture $fixture } | Should -Throw "INVALID|internal use tool path must be an absolute path without '.' or '..' components: $parent/./$leaf"
+        }
     }
 
     # Scenario: Package bytes change only after the initial inventory, during final authority binding.
