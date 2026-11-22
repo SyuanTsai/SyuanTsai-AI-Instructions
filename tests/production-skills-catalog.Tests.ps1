@@ -410,9 +410,17 @@ Describe 'production Skills Catalog' {
         @($script:catalog.skills | Where-Object { $null -ne $_.source.PSObject.Properties['path'] }).Count | Should Be 0
     }
 
-    # Scenario: The projection-aware production Lock is compared with the immutable v2 Lock from the approved 34366ae baseline.
-    # Purpose: Prove that the v3 format migration changes neither source pins nor per-Skill content hashes.
-    It 'InterT32_preserves_every_v2_source_pin_and_content_hash_in_the_v3_lock' {
+    # Scenario: The first production v3 Lock snapshot is compared with the immutable v2 Lock from its approved 34366ae parent.
+    # Purpose: Prove that the historical v3 format migration changed neither source pins nor per-Skill content hashes.
+    It 'InterT32_preserves_every_v2_source_pin_and_content_hash_in_the_historical_v3_lock_snapshot' {
+        $historicalCommit = 'cdfdb2ad19d326fc4aeef24bb2130ddc1cf9d2d3'
+        $historicalText = @(& git -C $repositoryRoot show "$historicalCommit`:catalog/skills-catalog-lock.json") -join "`n"
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($historicalText)) {
+            throw "The historical $historicalCommit v3 Lock snapshot is unavailable."
+        }
+        $historical = $historicalText | ConvertFrom-Json
+        [int]$historical.schemaVersion | Should Be 3
+
         $baselineText = @(& git -C $repositoryRoot show '34366ae:catalog/skills-catalog-lock.json') -join "`n"
         if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($baselineText)) {
             throw 'The approved 34366ae v2 Lock baseline is unavailable.'
@@ -420,18 +428,18 @@ Describe 'production Skills Catalog' {
         $baseline = $baselineText | ConvertFrom-Json
         [int]$baseline.schemaVersion | Should Be 2
 
-        @($script:lock.sources).Count | Should Be @($baseline.sources).Count
+        @($historical.sources).Count | Should Be @($baseline.sources).Count
         foreach ($expected in @($baseline.sources)) {
-            $actual = @($script:lock.sources | Where-Object { [string]$_.id -ceq [string]$expected.id })
+            $actual = @($historical.sources | Where-Object { [string]$_.id -ceq [string]$expected.id })
             $actual.Count | Should Be 1
             foreach ($property in @('repository','requestedRef','requestedRefType','resolvedCommit','resolvedVersion','archiveSha256')) {
                 [string]$actual[0].$property | Should Be ([string]$expected.$property)
             }
         }
 
-        @($script:lock.skills).Count | Should Be @($baseline.skills).Count
+        @($historical.skills).Count | Should Be @($baseline.skills).Count
         foreach ($expected in @($baseline.skills)) {
-            $actual = @($script:lock.skills | Where-Object { [string]$_.id -ceq [string]$expected.id })
+            $actual = @($historical.skills | Where-Object { [string]$_.id -ceq [string]$expected.id })
             $actual.Count | Should Be 1
             foreach ($property in @('sourceId','sourcePath','contentSha256')) {
                 [string]$actual[0].$property | Should Be ([string]$expected.$property)
@@ -439,21 +447,77 @@ Describe 'production Skills Catalog' {
         }
     }
 
-    # Scenario: The approved v2 Lock is explicitly supplied as the conversion base for the production v3 Lock.
-    # Purpose: Keep the one-time offline production conversion reproducible without treating the output as its own authority.
-    It 'InterT33_generates_the_v3_lock_from_an_explicit_v2_base_with_identical_bytes' {
+    # Scenario: The approved v2 Lock and the catalog inputs from the first production v3 snapshot are supplied to the current generator.
+    # Purpose: Keep the one-time offline conversion reproducible byte-for-byte without binding it to the current production Lock.
+    It 'InterT33_reproduces_the_historical_v3_lock_snapshot_from_its_explicit_v2_base' {
+        $historicalCommit = 'cdfdb2ad19d326fc4aeef24bb2130ddc1cf9d2d3'
         $baselineText = @(& git -C $repositoryRoot show '34366ae:catalog/skills-catalog-lock.json') -join "`n"
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($baselineText)) {
+            throw 'The approved 34366ae v2 Lock baseline is unavailable.'
+        }
         $baselinePath = Join-Path $TestDrive 'skills-catalog-lock-v2.json'
+        $historicalCatalogPath = Join-Path $TestDrive 'skills-catalog-v3.json'
+        $historicalSourcePinsPath = Join-Path $TestDrive 'skills-catalog-sources-v3.json'
+        $historicalLockPath = Join-Path $TestDrive 'skills-catalog-lock-v3-expected.json'
         $generatedPath = Join-Path $TestDrive 'skills-catalog-lock-v3.json'
         [IO.File]::WriteAllText($baselinePath,$baselineText+"`n",[Text.UTF8Encoding]::new($false))
+
+        $gitApplication = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+        $snapshotFiles = [ordered]@{
+            'catalog/skills-catalog.json' = $historicalCatalogPath
+            'catalog/skills-catalog.sources.json' = $historicalSourcePinsPath
+            'catalog/skills-catalog-lock.json' = $historicalLockPath
+        }
+        foreach ($snapshotFile in $snapshotFiles.GetEnumerator()) {
+            $objectSpec = "$historicalCommit`:$($snapshotFile.Key)"
+            $blobId = (@(& git -C $repositoryRoot rev-parse $objectSpec) -join "`n").Trim()
+            if ($LASTEXITCODE -ne 0 -or $blobId -notmatch '^[0-9a-f]{40,64}$') {
+                throw "Unable to resolve historical Git blob $objectSpec."
+            }
+            $blobSize = (@(& git -C $repositoryRoot cat-file -s $blobId) -join "`n").Trim()
+            if ($LASTEXITCODE -ne 0 -or $blobSize -notmatch '^\d+$') {
+                throw "Unable to read the size of historical Git blob $objectSpec."
+            }
+
+            $process = [Diagnostics.Process]::new()
+            $process.StartInfo.FileName = $gitApplication
+            $process.StartInfo.Arguments = "-C `"$repositoryRoot`" cat-file blob $blobId"
+            $process.StartInfo.UseShellExecute = $false
+            $process.StartInfo.CreateNoWindow = $true
+            $process.StartInfo.RedirectStandardOutput = $true
+            $process.StartInfo.RedirectStandardError = $true
+            $stream = $null
+            try {
+                if (-not $process.Start()) {
+                    throw "Unable to start git cat-file for historical Git blob $objectSpec."
+                }
+                $stream = [IO.File]::Open([string]$snapshotFile.Value,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                $process.StandardOutput.BaseStream.CopyTo($stream)
+                $stream.Dispose()
+                $stream = $null
+                $errorText = $process.StandardError.ReadToEnd()
+                $process.WaitForExit()
+                if ($process.ExitCode -ne 0) {
+                    throw "Unable to export historical Git blob $objectSpec. git cat-file exited $($process.ExitCode): $errorText"
+                }
+            }
+            finally {
+                if ($null -ne $stream) {
+                    $stream.Dispose()
+                }
+                $process.Dispose()
+            }
+            [IO.File]::ReadAllBytes([string]$snapshotFile.Value).Length | Should Be ([int64]$blobSize)
+        }
+
         $generator = Join-Path $repositoryRoot 'scripts/update-skills-catalog-lock.ps1'
         $engine = (Get-Process -Id $PID).Path
 
         $generateOutput = @(& $engine -NoProfile -NonInteractive -File $generator `
-            -CatalogPath $catalogPath -SourcePinsPath $sourcePinsPath -OutputPath $generatedPath -BaseLockPath $baselinePath 2>&1)
+            -CatalogPath $historicalCatalogPath -SourcePinsPath $historicalSourcePinsPath -OutputPath $generatedPath -BaseLockPath $baselinePath 2>&1)
         $LASTEXITCODE | Should Be 0
         ($generateOutput -join "`n") | Should Match 'existing immutable pins'
-        [Convert]::ToBase64String([IO.File]::ReadAllBytes($generatedPath)) | Should Be ([Convert]::ToBase64String([IO.File]::ReadAllBytes($lockPath)))
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($generatedPath)) | Should Be ([Convert]::ToBase64String([IO.File]::ReadAllBytes($historicalLockPath)))
     }
 
     # Scenario: A generated v3 Lock has a syntactically valid content hash changed before ordinary -Check uses a local immutable archive.
