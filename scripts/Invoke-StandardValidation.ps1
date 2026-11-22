@@ -830,7 +830,7 @@ function Resolve-StandardValidationInternalUseToolPath {
         $redirected = $false
         while ($pending.Count -gt 0) {
             $part = $pending[0]
-            $pending = if ($pending.Count -gt 1) { @($pending[1..($pending.Count - 1)]) } else { @() }
+            $pending = @(if ($pending.Count -gt 1) { @($pending[1..($pending.Count - 1)]) } else { @() })
             if ($part -ceq '.') { continue }
             if ($part -ceq '..') {
                 $parent = [IO.Directory]::GetParent($current)
