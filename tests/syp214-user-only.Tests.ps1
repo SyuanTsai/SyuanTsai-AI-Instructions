@@ -1166,10 +1166,14 @@ Describe 'SYP214 whole-Skill migration evidence' {
         @{State='customized'}, @{State='extra-file'}, @{State='tracked'}, @{State='staged'},
         @{State='not-ignored'}, @{State='unknown-ownership'}, @{State='incomplete-source'}, @{State='mixed-source'},
         @{State='newer-unverified-user'}, @{State='legacy-unowned-repo'}, @{State='mixed-version'}, @{State='reparse'}
+        $(if (-not $IsWindows) { @{State='reparse-file'}, @{State='reparse-dangling'} })
     ) {
         param($State)
         # Given
         $locked = $null
+        $reparsePath = $null
+        $reparseTarget = $null
+        $repoBytesBefore = @{}
         $repoFile = Join-Path $targetRoot '.agents/skills/syp214-fixture/SKILL.md'
         $userFile = Join-Path $userHome '.agents/skills/syp214-fixture/SKILL.md'
         $userManifestPath = Join-Path $userHome '.agents/catalog-skills.manifest.json'
@@ -1189,16 +1193,42 @@ Describe 'SYP214 whole-Skill migration evidence' {
             'mixed-version' { $manifest.files[0].sourceVersion='different' }
             'reparse' {
                 $linkType = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
-                New-Item -ItemType $linkType -Path (Join-Path (Split-Path $repoFile) 'linked') -Target $userHome | Out-Null
+                $reparsePath = Join-Path (Split-Path $repoFile) 'linked'
+                $reparseTarget = $userHome
+                New-Item -ItemType $linkType -Path $reparsePath -Target $reparseTarget | Out-Null
+            }
+            'reparse-file' {
+                $reparsePath = Join-Path (Split-Path $repoFile) 'linked-file'
+                $reparseTarget = $userFile
+                New-Item -ItemType SymbolicLink -Path $reparsePath -Target $reparseTarget | Out-Null
+            }
+            'reparse-dangling' {
+                $reparsePath = Join-Path (Split-Path $repoFile) 'linked-dangling'
+                $reparseTarget = Join-Path $caseRoot 'missing-link-target'
+                Test-Path -LiteralPath $reparseTarget | Should Be $false
+                New-Item -ItemType SymbolicLink -Path $reparsePath -Target $reparseTarget | Out-Null
             }
             'newer-unverified-user' { $doc=Get-Content -Raw $userManifestPath|ConvertFrom-Json; foreach($entry in $doc.files){$entry.sourceCommit=('d'*40)}; $doc|ConvertTo-Json -Depth 10|Set-Content $userManifestPath }
             'legacy-unowned-repo' { $manifest.schemaVersion=1 }
+        }
+        if ($State -like 'reparse*') {
+            foreach ($entry in $entries) {
+                $repoBytesBefore[[string]$entry.targetPath] = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot $entry.targetPath)))
+            }
         }
         # When / Then
         try {
             $plan = @(Get-RepoSharedSkillsMigrationPlan -Repository $targetRoot -Manifest $manifest -TrustedSkills @($trusted) -UserHome $userHome)
             $plan[0].removable | Should Be $false
-            $plan[0].reason | Should Not BeNullOrEmpty
+            if ($State -like 'reparse*') {
+                $plan[0].reason | Should Be 'Skill tree contains a reparse point.' # scripts/repo-shared-skills-migration.psm1:238
+                ((Get-Item -Force -LiteralPath $reparsePath).Attributes -band [IO.FileAttributes]::ReparsePoint) | Should Not Be 0
+                foreach ($entry in $entries) {
+                    [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot $entry.targetPath))) | Should Be $repoBytesBefore[[string]$entry.targetPath]
+                }
+                if ($State -eq 'reparse-dangling') { Test-Path -LiteralPath $reparseTarget | Should Be $false }
+            }
+            else { $plan[0].reason | Should Not BeNullOrEmpty }
             Test-Path $repoFile | Should Be $true
             @($plan[0].entries).Count | Should Be 2
         }
