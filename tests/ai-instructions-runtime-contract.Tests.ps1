@@ -208,7 +208,7 @@ function New-TestLargeUserReconcilerJournalJson {
     $journal = ConvertFrom-Json @convertParameters
     $manifestOperation = $journal.operations[0]
     $operations = New-Object System.Collections.Generic.List[object]
-    $pathPadding = @(('x' * 120),('y' * 120),('z' * 120)) -join '/'
+    $pathPadding = @(('x' * 124),('y' * 124),('z' * 124)) -join '/'
     for ($index = 1; $index -le 220; $index++) {
         $convertParameters.InputObject = $manifestOperation | ConvertTo-Json -Depth 20
         $operation = ConvertFrom-Json @convertParameters
@@ -4132,13 +4132,13 @@ exec __REAL_GIT__ "$@"
 '@
             $shimText=$shimText.Replace('__REPOSITORY__',$quotedRepository).Replace('__REAL_GIT__',$quotedRealGit)
             [IO.File]::WriteAllText($shim,$shimText,[Text.UTF8Encoding]::new($false))
-            & chmod u+x -- $shim
-            $LASTEXITCODE|Should Be 0
+            [IO.File]::SetUnixFileMode($shim,[IO.UnixFileMode]448)
         }
         $errorOutput=@(& pwsh -NoProfile -File $bootstrapPath -TargetRoot $repository -UserHome $userHome -ConfigurationPath $configuration -RuntimeRoot (Join-Path $script:RepositoryRoot 'scripts') -GitExecutable $shim 2>&1)
         $LASTEXITCODE|Should Not Be 0
-        ($errorOutput-join[Environment]::NewLine)|Should Match 'injected initial HEAD query failure'
-        ($errorOutput-join[Environment]::NewLine)|Should Not Match 'target repository has no commit'
+        $normalizedErrorOutput=(($errorOutput-join[Environment]::NewLine)-replace '(?m)^\s*\|\s?',' ')-replace '\s+',' '
+        $normalizedErrorOutput|Should Match 'injected initial HEAD query failure'
+        $normalizedErrorOutput|Should Not Match 'target repository has no commit'
     }
 
     # Scenario: Existing UTF-8 USER instructions vary encoding details and place headings around CommonMark HTML blocks, containers, fences, or indented code.
