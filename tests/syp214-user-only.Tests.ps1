@@ -1187,7 +1187,10 @@ Describe 'SYP214 whole-Skill migration evidence' {
             'incomplete-source' { $trusted.files=@($entries[0]) }
             'mixed-source' { $manifest.files[0].sourceId='other-source' }
             'mixed-version' { $manifest.files[0].sourceVersion='different' }
-            'reparse' { New-Item -ItemType Junction -Path (Join-Path (Split-Path $repoFile) 'linked') -Target $userHome | Out-Null }
+            'reparse' {
+                $linkType = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+                New-Item -ItemType $linkType -Path (Join-Path (Split-Path $repoFile) 'linked') -Target $userHome | Out-Null
+            }
             'newer-unverified-user' { $doc=Get-Content -Raw $userManifestPath|ConvertFrom-Json; foreach($entry in $doc.files){$entry.sourceCommit=('d'*40)}; $doc|ConvertTo-Json -Depth 10|Set-Content $userManifestPath }
             'legacy-unowned-repo' { $manifest.schemaVersion=1 }
         }
@@ -2257,7 +2260,8 @@ Describe 'SYP214 USER-only bootstrap sync v5 preflight' {
         $result = Invoke-Syp214Bootstrap -RecoverSkillMigration $journalPath -CaptureFailure
 
         $result.exitCode | Should Not Be 0
-        (($result.output -join ' ') -replace '\s+',' ') | Should Match 'AI Instructions sync configuration schema version 5 requires a projection-aware installer\.'
+        $normalizedOutput = (($result.output -join [Environment]::NewLine) -replace '(?m)^\s*\|\s?',' ') -replace '\s+',' '
+        $normalizedOutput | Should Match 'AI Instructions sync configuration schema version 5 requires a projection-aware installer\.'
         (Get-Item -LiteralPath $markerPath).Length | Should Be $markerLength
         (Get-FileHash -LiteralPath $markerPath -Algorithm SHA256).Hash | Should Be $markerHash
         (Get-Item -LiteralPath $journalPath).Length | Should Be $journalLength
