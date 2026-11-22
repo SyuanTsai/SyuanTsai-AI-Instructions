@@ -135,7 +135,7 @@ namespace CodexAiInstructions
         private const int ErrorAccessDenied = 5;
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
-        private static extern SafeFileHandle CreateFile(
+        private static extern SafeFileHandle CreateFileNative(
             string fileName,
             uint desiredAccess,
             uint shareMode,
@@ -143,6 +143,41 @@ namespace CodexAiInstructions
             uint creationDisposition,
             uint flagsAndAttributes,
             IntPtr templateFile);
+
+        private static string ExtendedPath(string path)
+        {
+            string full = Path.GetFullPath(path);
+            if (full.StartsWith(@"\\?\", StringComparison.Ordinal)) return full;
+            if (full.StartsWith(@"\\", StringComparison.Ordinal)) return @"\\?\UNC\" + full.Substring(2);
+            return @"\\?\" + full;
+        }
+
+        private static SafeFileHandle CreateFile(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            IntPtr securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile)
+        {
+            return CreateFileNative(
+                ExtendedPath(fileName),
+                desiredAccess,
+                shareMode,
+                securityAttributes,
+                creationDisposition,
+                flagsAndAttributes,
+                templateFile);
+        }
+
+        private static bool SamePath(string first, string second)
+        {
+            return string.Equals(
+                ExtendedPath(first).TrimEnd('\\'),
+                ExtendedPath(second).TrimEnd('\\'),
+                StringComparison.OrdinalIgnoreCase);
+        }
 
         [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "SetFileInformationByHandle")]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -252,7 +287,7 @@ namespace CodexAiInstructions
             string lexicalRoot = Path.GetFullPath(targetRoot).TrimEnd('\\');
             string lexicalPath = Path.GetFullPath(path);
             string expectedLexicalPath = Path.GetFullPath(Path.Combine(lexicalRoot, safeRelativePath));
-            if (!string.Equals(lexicalPath, expectedLexicalPath, StringComparison.OrdinalIgnoreCase))
+            if (!SamePath(lexicalPath, expectedLexicalPath))
             {
                 throw new IOException("The installer file path did not match its target-root relative path.");
             }
@@ -531,7 +566,7 @@ namespace CodexAiInstructions
                 if (expectedFinalPath != null)
                 {
                     string actualFinalPath = GetFinalPath(handle).TrimEnd('\\');
-                    if (!string.Equals(expectedFinalPath, actualFinalPath, StringComparison.OrdinalIgnoreCase))
+                    if (!SamePath(expectedFinalPath, actualFinalPath))
                     {
                         throw new IOException("An installer mutation directory resolved outside its guarded target-root path.");
                     }
@@ -563,7 +598,7 @@ namespace CodexAiInstructions
             if (expectedFinalPath != null)
             {
                 string actualFinalPath = GetFinalPath(handle).TrimEnd('\\');
-                if (!string.Equals(expectedFinalPath, actualFinalPath, StringComparison.OrdinalIgnoreCase))
+                if (!SamePath(expectedFinalPath, actualFinalPath))
                 {
                     throw new IOException("The " + operation + " handle resolved outside its guarded target-root path.");
                 }
@@ -634,7 +669,7 @@ namespace CodexAiInstructions
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to resolve a complete handle-bound installer path.");
                 }
             }
-            return path.ToString().Replace('/', '\\');
+            return ExtendedPath(path.ToString().Replace('/', '\\'));
         }
 
         private static string NormalizeRelativePath(string relativePath)

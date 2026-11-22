@@ -141,6 +141,13 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         [DllImport("ntdll.dll")] private static extern int NtSetInformationFile(SafeFileHandle handle, out IoStatusBlock status, IntPtr information, uint length, int informationClass);
         [DllImport("ntdll.dll")] private static extern uint RtlNtStatusToDosError(int status);
         private static void Check(bool result, string operation) { if (!result) throw new PlatformWin32Exception(operation, Marshal.GetLastWin32Error()); }
+        private static string ExtendedPath(string path)
+        {
+            string full = Path.GetFullPath(path);
+            if (full.StartsWith(@"\\?\", StringComparison.Ordinal)) return full;
+            if (full.StartsWith(@"\\", StringComparison.Ordinal)) return @"\\?\UNC\" + full.Substring(2);
+            return @"\\?\" + full;
+        }
         private static SafeAccessTokenHandle OpenEffectiveToken()
         {
             SafeAccessTokenHandle token;
@@ -153,7 +160,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         }
         private static SafeFileHandle Open(string path, uint access, uint share, uint disposition)
         {
-            SafeFileHandle handle = CreateFile(path, access, share, IntPtr.Zero, disposition, 0x02200000, IntPtr.Zero);
+            SafeFileHandle handle = CreateFile(ExtendedPath(path), access, share, IntPtr.Zero, disposition, 0x02200000, IntPtr.Zero);
             if (handle.IsInvalid)
             {
                 int error = Marshal.GetLastWin32Error(); handle.Dispose(); throw new PlatformWin32Exception("CreateFileW", error);
@@ -196,7 +203,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             try
             {
                 SecurityAttributes attributes = new SecurityAttributes { Length = Marshal.SizeOf(typeof(SecurityAttributes)), Descriptor = descriptor };
-                if (!CreateDirectory(path, ref attributes))
+                if (!CreateDirectory(ExtendedPath(path), ref attributes))
                 {
                     int error = Marshal.GetLastWin32Error();
                     if (createOnly || error != 183) throw new PlatformWin32Exception("CreateDirectoryW", error);
@@ -960,7 +967,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 // SetFileInformationByHandle does not consistently accept the native
                 // RootDirectory-relative form used by NtSetInformationFile.  Keep the
                 // source handle-bound and supply the destination as an NT DOS-device path.
-                byte[] name = System.Text.Encoding.Unicode.GetBytes(@"\??\" + destinationPath);
+                string extendedDestinationPath = ExtendedPath(destinationPath);
+                byte[] name = System.Text.Encoding.Unicode.GetBytes(@"\??\" + extendedDestinationPath.Substring(4));
                 int rootOffset = IntPtr.Size == 8 ? 8 : 4;
                 int lengthOffset = rootOffset + IntPtr.Size;
                 int nameOffset = lengthOffset + 4;

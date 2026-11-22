@@ -5662,10 +5662,73 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $value=if($null -eq $Hook){$null}else{[Action[string]]{param($Point)& $Hook $Point}.GetNewClosure()}
             $field.SetValue($null,$value)
         }
+        function Invoke-P7WindowsExtendedPath([string]$Path) {
+            $method=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative].GetMethod('ExtendedPath',[Reflection.BindingFlags]'Static,NonPublic')
+            if($null -eq $method){throw 'The internal Windows extended-path helper is unavailable.'}
+            return [string]$method.Invoke($null,@($Path))
+        }
     }
 
     # Register only on the native host; keep this file's Core CI skip count at zero.
     if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    # Scenario: A UNC path is converted to the extended UNC namespace before a pathname-based Win32 call.
+    # Purpose: Preserve the server/share meaning instead of producing an invalid extended local path.
+    It 'UnitT90_converts_UNC_paths_to_the_extended_UNC_namespace' {
+        (Invoke-P7WindowsExtendedPath '\\server\share\a')|Should Be '\\?\UNC\server\share\a'
+    }
+
+    # Scenario: A caller supplies a path that already uses the extended-length namespace.
+    # Purpose: Keep canonical extended paths stable and avoid adding a second prefix.
+    It 'UnitT92_preserves_already_extended_paths' {
+        (Invoke-P7WindowsExtendedPath '\\?\C:\x')|Should Be '\\?\C:\x'
+    }
+
+    # Scenario: A caller supplies an ordinary absolute drive path.
+    # Purpose: Route full local paths through the extended-length namespace used by Win32 path APIs.
+    It 'UnitT94_prefixes_plain_absolute_drive_paths' {
+        (Invoke-P7WindowsExtendedPath 'C:\x')|Should Be '\\?\C:\x'
+    }
+
+    # Scenario: A caller supplies a relative path to the native helper.
+    # Purpose: Resolve relative input with GetFullPath before applying the extended-length prefix.
+    It 'UnitT96_resolves_relative_paths_before_prefixing' {
+        $relative='extended-path-relative-fixture'
+        (Invoke-P7WindowsExtendedPath $relative)|Should Be ('\\?\'+[IO.Path]::GetFullPath($relative))
+    }
+
+    # Scenario: A directory is renamed to a destination pathname longer than 300 characters, then its complete state is read back.
+    # Purpose: Keep owned-directory publication and TryGetDirectoryState readback working beyond MAX_PATH without weakening identity checks.
+    It 'InterT98_moves_and_reads_back_an_owned_directory_beyond_MAX_PATH' {
+        $fixtureBase=Join-Path ([IO.Path]::GetTempPath()) 'syp518-fix15'
+        $root=Join-Path $fixtureBase ([Guid]::NewGuid().ToString('N'))
+        $parent=$null;$transactionRoot=$null;$transaction=$null
+        try{
+            [void][IO.Directory]::CreateDirectory($root)
+            $parent=Open-PlatformDirectory -Root $root -RelativePath 'target' -CreatePrivate
+            $transactionRoot=Open-PlatformDirectory -Root $root -RelativePath '.ai-instructions-txn' -CreatePrivate
+            $transactionId=[Guid]::NewGuid().ToString('N')
+            $transaction=Open-PlatformDirectory -Root (Join-Path $root '.ai-instructions-txn') -RelativePath $transactionId -CreatePrivate
+            $stagePath=Join-Path $root ".ai-instructions-txn/$transactionId/stage"
+            [void][IO.Directory]::CreateDirectory($stagePath)
+            [IO.File]::WriteAllText((Join-Path $stagePath 'marker.txt'),'long-path-content',[Text.UTF8Encoding]::new($false))
+            $stageState=Get-PlatformDirectoryState -ParentLease $transaction -Leaf 'stage'
+            $destinationLeaf='runtime-'+('x'*230)
+            $destinationPath=Join-Path $root "target/$destinationLeaf"
+            $destinationPath.Length|Should BeGreaterThan 300
+
+            $receipt=Move-PlatformOwnedDirectory -ParentLease $parent -Leaf 'stage' -TransactionLease $transaction -DestinationLeaf $destinationLeaf -ExpectedIdentity $stageState.identity -Direction FromTransaction -ExpectedState $stageState
+            $receipt.identity.fileId|Should Be $stageState.identity.fileId
+            $readback=Get-PlatformDirectoryState -ParentLease $parent -Leaf $destinationLeaf
+            $readback.exists|Should Be $true
+            $readback.identity.fileId|Should Be $stageState.identity.fileId
+            $readback.inventorySha256|Should Be $stageState.inventorySha256
+            $readback.entryCount|Should Be $stageState.entryCount
+        }finally{
+            foreach($lease in @($transaction,$transactionRoot,$parent)){if($null-ne$lease){try{$lease.Dispose()}catch{}}}
+            if([IO.Directory]::Exists($root)){[IO.Directory]::Delete($root,$true)}
+        }
+    }
+
     # Scenario: A read-only target with an explicit DACL is replaced through two no-replace renames.
     # Purpose: Preserve DACL/read-only and move the original file to backup without changing identity.
     It 'InterT100_publishes_over_an_existing_target_and_preserves_permissions_and_identity' {
