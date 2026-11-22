@@ -2375,7 +2375,8 @@ function Assert-AiInstructionsInstallJournalV1 {
 
     $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     $leaves = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-    $validatedOperationPaths = New-Object System.Collections.Generic.List[object]
+    $pathInfoByKey = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::Ordinal)
+    $descendantSequenceByAncestor = New-Object 'System.Collections.Generic.Dictionary[string,int64]' ([System.StringComparer]::Ordinal)
     $expectedIdentityKind = if ([string]$Journal.platform.os -ceq 'windows') { 'windows-file-id' } else { 'unix-device-inode' }
     $expectedSequence = 1
     foreach ($operation in @($Journal.operations)) {
@@ -2430,25 +2431,39 @@ function Assert-AiInstructionsInstallJournalV1 {
             throw "$context.targetRelativePath conflicts with lock.leaf after Unicode NFC and invariant case normalization."
         }
         if (-not $paths.Add($pathKey)) { throw "$context.targetRelativePath duplicates another target path after Unicode NFC and invariant case normalization." }
-        foreach ($otherPath in $validatedOperationPaths) {
-            $prefixLength = [Math]::Min($pathSegments.Count,[int]$otherPath.segments.Count)
-            $hasCommonPrefix = $true
-            for ($segmentIndex = 0; $segmentIndex -lt $prefixLength; $segmentIndex++) {
-                if ([string]$pathSegments[$segmentIndex] -cne [string]$otherPath.segments[$segmentIndex]) {
-                    $hasCommonPrefix = $false
-                    break
-                }
-            }
-            $approvedUserManifestAncestor = $hasCommonPrefix -and [string]$Journal.owner.component -ceq 'user-reconciler' -and
-                (([string]$operation.kind -ceq 'create-directory' -and [string]$otherPath.kind -in @('create-file','write-file') -and
-                  [string]$operation.targetRelativePath -ceq '.agents' -and [string]$Journal.operations[[int64]$otherPath.sequence - 1].targetRelativePath -ceq '.agents/catalog-skills.manifest.json') -or
-                 ([string]$otherPath.kind -ceq 'create-directory' -and [string]$operation.kind -in @('create-file','write-file') -and
-                  [string]$Journal.operations[[int64]$otherPath.sequence - 1].targetRelativePath -ceq '.agents' -and [string]$operation.targetRelativePath -ceq '.agents/catalog-skills.manifest.json'))
-            if ($hasCommonPrefix -and -not $approvedUserManifestAncestor) {
-                throw "$context.targetRelativePath conflicts with operation sequence $($otherPath.sequence) because operation targets cannot have an ancestor or descendant relationship."
+        $conflictingSequence = [int64]::MaxValue
+        $ancestorSegments = New-Object System.Collections.Generic.List[string]
+        for ($pathSegmentIndex = 0; $pathSegmentIndex -lt $pathSegments.Count - 1; $pathSegmentIndex++) {
+            $ancestorSegments.Add([string]$pathSegments[$pathSegmentIndex])
+            $ancestorKey = @($ancestorSegments) -join '/'
+            $ancestorInfo = $null
+            if ($pathInfoByKey.TryGetValue($ancestorKey,[ref]$ancestorInfo) -and [int64]$ancestorInfo.sequence -lt $conflictingSequence) {
+                $conflictingSequence = [int64]$ancestorInfo.sequence
             }
         }
-        $validatedOperationPaths.Add([pscustomobject][ordered]@{ sequence=$sequence; kind=[string]$operation.kind; segments=$pathSegments }) | Out-Null
+        $descendantSequence = [int64]0
+        if ($descendantSequenceByAncestor.TryGetValue($pathKey,[ref]$descendantSequence) -and $descendantSequence -lt $conflictingSequence) {
+            $conflictingSequence = $descendantSequence
+        }
+        if ($conflictingSequence -ne [int64]::MaxValue) {
+            $otherPathKey = Get-AiInstructionsInstallJournalPortableNameKey -Value ([string]$Journal.operations[$conflictingSequence - 1].targetRelativePath)
+            $otherPath = $pathInfoByKey[$otherPathKey]
+            $approvedUserManifestAncestor = [string]$Journal.owner.component -ceq 'user-reconciler' -and
+                (([string]$operation.kind -ceq 'create-directory' -and [string]$otherPath.kind -in @('create-file','write-file') -and
+                  [string]$operation.targetRelativePath -ceq '.agents' -and [string]$Journal.operations[$conflictingSequence - 1].targetRelativePath -ceq '.agents/catalog-skills.manifest.json') -or
+                 ([string]$otherPath.kind -ceq 'create-directory' -and [string]$operation.kind -in @('create-file','write-file') -and
+                  [string]$Journal.operations[$conflictingSequence - 1].targetRelativePath -ceq '.agents' -and [string]$operation.targetRelativePath -ceq '.agents/catalog-skills.manifest.json'))
+            if (-not $approvedUserManifestAncestor) {
+                throw "$context.targetRelativePath conflicts with operation sequence $conflictingSequence because operation targets cannot have an ancestor or descendant relationship."
+            }
+        }
+        $pathInfoByKey.Add($pathKey,[pscustomobject][ordered]@{ sequence=$sequence; kind=[string]$operation.kind })
+        $ancestorSegments.Clear()
+        for ($pathSegmentIndex = 0; $pathSegmentIndex -lt $pathSegments.Count - 1; $pathSegmentIndex++) {
+            $ancestorSegments.Add([string]$pathSegments[$pathSegmentIndex])
+            $ancestorKey = @($ancestorSegments) -join '/'
+            if (-not $descendantSequenceByAncestor.ContainsKey($ancestorKey)) { $descendantSequenceByAncestor.Add($ancestorKey,$sequence) }
+        }
         Assert-AiInstructionsInstallJournalLeaf -Value $operation.stageLeaf -Context "$context.stageLeaf" -AllowNull -PortableName
         if ([string]$operation.method -ceq 'stage-rename' -and $null -eq $operation.stageLeaf) {
             throw "$context.stageLeaf must not be null when method is stage-rename."
@@ -3186,6 +3201,72 @@ function Test-AiInstructionsInstallJournalAppliedBindingTransition {
         if ($property.Name -cnotin @('state','observedAfter','displacedAfterMetadata')) { $nextAuthority[$property.Name] = $property.Value }
     }
     return Test-AiInstructionsJsonSemanticEqual -Left ([pscustomobject]$previousAuthority) -Right ([pscustomobject]$nextAuthority)
+}
+
+function Get-AiInstructionsInstallJournalV1TransitionAuthority {
+    param([Parameter(Mandatory = $true)][object] $Journal)
+    $authority = [ordered]@{}
+    foreach ($property in @(Get-AiInstructionsJsonObjectProperties -Value $Journal)) {
+        if ([string]$property.Name -ceq 'phase') {
+            $authority[$property.Name] = '<phase>'
+            continue
+        }
+        if ([string]$property.Name -ceq 'operations') {
+            if ($property.Value -isnot [System.Collections.IList]) { throw 'AI instructions install journal trusted transition operations must remain an array.' }
+            $operations = New-Object System.Collections.Generic.List[object]
+            foreach ($operation in @($property.Value)) {
+                $operationAuthority = [ordered]@{}
+                foreach ($operationProperty in @(Get-AiInstructionsJsonObjectProperties -Value $operation)) {
+                    $operationAuthority[$operationProperty.Name] = if ([string]$operationProperty.Name -ceq 'state') { '<state>' } else { $operationProperty.Value }
+                }
+                $operations.Add([pscustomobject]$operationAuthority)
+            }
+            $authority[$property.Name] = [object[]]$operations.ToArray()
+            continue
+        }
+        $authority[$property.Name] = $property.Value
+    }
+    return [pscustomobject]$authority
+}
+
+function Assert-AiInstructionsInstallJournalV1TrustedTransition {
+    param(
+        [Parameter(Mandatory = $true)][object] $Previous,
+        [Parameter(Mandatory = $true)][object] $Next,
+        [switch] $AuthorityAlreadyBound
+    )
+    if ([int64]$Previous.schemaVersion -ne 1 -or [int64]$Next.schemaVersion -ne 1) { throw 'AI instructions install journal trusted transition requires schemaVersion 1.' }
+    if (-not $AuthorityAlreadyBound) {
+        $previousAuthority = Get-AiInstructionsInstallJournalV1TransitionAuthority -Journal $Previous
+        $nextAuthority = Get-AiInstructionsInstallJournalV1TransitionAuthority -Journal $Next
+        if (-not (Test-AiInstructionsJsonSemanticEqual -Left $previousAuthority -Right $nextAuthority)) {
+            throw 'AI instructions install journal trusted transition cannot change fields other than phase or operation state.'
+        }
+    }
+    $previousOperationCount = @($Previous.operations).Count
+    $nextOperationCount = @($Next.operations).Count
+    if ($previousOperationCount -ne $nextOperationCount) { throw 'AI instructions install journal store transition cannot change operations count after prepared.' }
+    $changedStateCount = 0
+    for ($index = 0; $index -lt $previousOperationCount; $index++) {
+        $fromState = [string]$Previous.operations[$index].state
+        $toState = [string]$Next.operations[$index].state
+        if ($fromState -cne $toState) { $changedStateCount++ }
+        if ($changedStateCount -gt 1) { throw 'AI instructions install journal store transition may change only one operation state per generation.' }
+        $allowedState = $fromState -ceq $toState -or
+            "$fromState>$toState" -cin @('pending>staged','staged>applied','pending>applied','applied>rolled-back','pending>rolled-back','staged>rolled-back')
+        if (-not $allowedState) { throw "AI instructions install journal store transition operation $($index + 1) state transition is invalid." }
+    }
+    $fromPhase = [string]$Previous.phase
+    $toPhase = [string]$Next.phase
+    $allowedPhase = $fromPhase -ceq $toPhase -or
+        "$fromPhase>$toPhase" -cin @('prepared>applying','applying>applied','applied>committed','prepared>rolling-back','applying>rolling-back','applied>rolling-back','rolling-back>rolled-back')
+    if (-not $allowedPhase) { throw 'AI instructions install journal store phase transition is invalid.' }
+    foreach ($operation in @($Next.operations)) {
+        if ($toPhase -ceq 'prepared' -and [string]$operation.state -cnotin @('pending','staged')) { throw "AI instructions install journal operation sequence $($operation.sequence).state is inconsistent with phase prepared." }
+        if ($toPhase -in @('applied','committed') -and [string]$operation.state -cne 'applied') { throw "AI instructions install journal operation sequence $($operation.sequence).state is inconsistent with phase $toPhase." }
+        if ($toPhase -ceq 'rolled-back' -and [string]$operation.state -cnotin @('pending','staged','rolled-back')) { throw "AI instructions install journal operation sequence $($operation.sequence).state is inconsistent with phase rolled-back." }
+    }
+    return $Next
 }
 
 function Assert-AiInstructionsInstallJournalStoreTransition {

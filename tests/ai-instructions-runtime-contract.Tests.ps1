@@ -4196,3 +4196,24 @@ exit /b %errorlevel%
         $journal.owner.processStartIdentity | Should BeExactly ('fixture\path"quoted"-' + [char]::ConvertFromUtf32(0x1F680))
     }
 }
+
+Describe 'SYP-522 install journal path indexing' {
+    # Scenario: The v1 validator indexes every previously accepted target by its normalized path prefixes.
+    # Purpose: Keep ancestor and descendant collision detection linear in total path segments instead of comparing every operation pair.
+    It 'UnitT241_indexes_journal_path_prefixes_without_a_pairwise_operation_loop' {
+        $parseTokens = $null
+        $parseErrors = $null
+        $moduleAst = [Management.Automation.Language.Parser]::ParseFile($script:RuntimeContractModule,[ref]$parseTokens,[ref]$parseErrors)
+        @($parseErrors).Count | Should Be 0
+        $functionAst = $moduleAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Assert-AiInstructionsInstallJournalV1'
+        },$true)
+        $functionAst | Should Not BeNullOrEmpty
+        $functionText = [string]$functionAst.Extent.Text
+        $functionText | Should Match 'pathInfoByKey'
+        $functionText | Should Match 'descendantSequenceByAncestor'
+        $functionText | Should Not Match 'foreach\s*\(\s*\$otherPath\s+in\s+\$validatedOperationPaths\s*\)'
+    }
+}

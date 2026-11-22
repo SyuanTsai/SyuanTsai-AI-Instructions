@@ -3397,3 +3397,148 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
         }
     }
 }
+
+Describe 'SYP-522 USER journal writer validation cache' {
+    BeforeEach {
+        Import-Module $script:ModulePath -Force
+        $script:Syp522ReconcilerModule=Get-Module agent-environment-reconciler
+        & $script:Syp522ReconcilerModule {param($RuntimeRoot)Import-AgentEnvironmentRuntimeModules -RuntimeRoot $RuntimeRoot} $script:RuntimeRoot
+        & $script:Syp522ReconcilerModule {
+            $script:Syp522ValidationCounts=@{AssertV1=0;ParseV1=0}
+            Set-Item -Path Function:script:Assert-AiInstructionsInstallJournalV1 -Value {
+                param([Parameter(Mandatory=$true)][object]$Journal)
+                $script:Syp522ValidationCounts.AssertV1++
+                & 'ai-instructions-runtime-contract\Assert-AiInstructionsInstallJournalV1' -Journal $Journal
+            }
+            Set-Item -Path Function:script:ConvertFrom-AiInstructionsInstallJournalV1Json -Value {
+                param([Parameter(Mandatory=$true)][string]$Json,[string]$ExpectedTransactionId)
+                $script:Syp522ValidationCounts.ParseV1++
+                $parameters=@{Json=$Json}
+                if($PSBoundParameters.ContainsKey('ExpectedTransactionId')){$parameters.ExpectedTransactionId=$ExpectedTransactionId}
+                & 'ai-instructions-runtime-contract\ConvertFrom-AiInstructionsInstallJournalV1Json' @parameters
+            }
+        }
+        $script:Syp522TransactionId=[guid]::NewGuid().ToString('N')
+        $script:Syp522TransactionPath=Join-Path $TestDrive ".ai-instructions-txn/$($script:Syp522TransactionId)"
+        New-Item -ItemType Directory -Path $script:Syp522TransactionPath|Out-Null
+        $convertParameters=@{InputObject=(Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-user-reconciler-journal-v1.example.json'))}
+        if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$convertParameters.DateKind='String'}
+        $script:Syp522Journal=ConvertFrom-Json @convertParameters
+        $script:Syp522Journal.transactionId=$script:Syp522TransactionId
+        $script:Syp522Journal.phase='prepared'
+        foreach($operation in @($script:Syp522Journal.operations)){$operation.state='pending'}
+    }
+
+    AfterEach {
+        Import-Module $script:ModulePath -Force
+    }
+
+    function Invoke-Syp522JournalWrite {
+        param([Parameter(Mandatory=$true)][object]$Journal)
+        & $script:Syp522ReconcilerModule {
+            param($TransactionPath,$Value)
+            $lease=Open-PlatformDirectory -Root $TransactionPath -RootOnly
+            try{Write-AgentEnvironmentInstallJournal -TransactionPath $TransactionPath -TransactionLease $lease -Journal $Value}
+            finally{$lease.Dispose()}
+        } $script:Syp522TransactionPath $Journal
+    }
+
+    function Get-Syp522ValidationCounts {
+        & $script:Syp522ReconcilerModule {$script:Syp522ValidationCounts}
+    }
+
+    # Scenario: One process advances a single transaction through five durable journal generations.
+    # Purpose: Bound full v1 validation to the first generation and eliminate full JSON parsing from hash-matched current, previous, stage, and published readbacks.
+    It 'InterT110_keeps_full_validation_and_parsing_counts_linear_per_transaction' {
+        Invoke-Syp522JournalWrite -Journal $script:Syp522Journal
+        $script:Syp522Journal.phase='applying';Invoke-Syp522JournalWrite -Journal $script:Syp522Journal
+        foreach($operation in @($script:Syp522Journal.operations)){$operation.state='applied'}
+        Invoke-Syp522JournalWrite -Journal $script:Syp522Journal
+        $script:Syp522Journal.phase='applied';Invoke-Syp522JournalWrite -Journal $script:Syp522Journal
+        $script:Syp522Journal.phase='committed';Invoke-Syp522JournalWrite -Journal $script:Syp522Journal
+
+        $counts=Get-Syp522ValidationCounts
+        $counts.AssertV1|Should Be 1
+        $counts.ParseV1|Should Be 0
+    }
+
+    # Scenario: journal.json is externally rewritten after its hash was cached by the writer.
+    # Purpose: Require a cache miss to invoke the full parser and reject invalid disk bytes instead of trusting the transaction identity alone.
+    It 'InterT111_fully_parses_and_rejects_an_externally_rewritten_journal_json' {
+        Invoke-Syp522JournalWrite -Journal $script:Syp522Journal
+        [IO.File]::WriteAllText((Join-Path $script:Syp522TransactionPath 'journal.json'),'{',[Text.UTF8Encoding]::new($false))
+        $script:Syp522Journal.phase='applying'
+
+        {Invoke-Syp522JournalWrite -Journal $script:Syp522Journal}|Should Throw
+        (Get-Syp522ValidationCounts).ParseV1|Should Be 1
+    }
+
+    # Scenario: journal.prev is corrupted after the second durable generation leaves the predecessor beside journal.json.
+    # Purpose: Never let a valid current-generation cache hit conceal damaged fallback crash-consistency evidence.
+    It 'InterT112_fully_parses_and_rejects_a_corrupted_journal_prev' {
+        Invoke-Syp522JournalWrite -Journal $script:Syp522Journal
+        $script:Syp522Journal.phase='applying';Invoke-Syp522JournalWrite -Journal $script:Syp522Journal
+        [IO.File]::WriteAllText((Join-Path $script:Syp522TransactionPath 'journal.prev'),'{',[Text.UTF8Encoding]::new($false))
+        foreach($operation in @($script:Syp522Journal.operations)){$operation.state='applied'}
+
+        {Invoke-Syp522JournalWrite -Journal $script:Syp522Journal}|Should Throw
+        (Get-Syp522ValidationCounts).ParseV1|Should Be 1
+    }
+
+    # Scenario: A caller changes two operation states in one generation or mutates an immutable owner field.
+    # Purpose: Trusted transition derivation must reject broader mutations even though it skips redundant full validation on the normal path.
+    It 'InterT113_rejects_multi_operation_and_immutable_trusted_transitions' {
+        $manifest=$script:Syp522Journal.operations[0]
+        $skill=ConvertFrom-Json -InputObject ($manifest|ConvertTo-Json -Depth 30)
+        $skill.sequence=1;$skill.targetRelativePath='.agents/skills/alpha/SKILL.md';$skill.stageLeaf='file-1.stage'
+        $manifest.sequence=2;$manifest.stageLeaf='file-2.stage'
+        $script:Syp522Journal.operations=[object[]]@($skill,$manifest)
+        Invoke-Syp522JournalWrite -Journal $script:Syp522Journal
+        $script:Syp522Journal.phase='applying';Invoke-Syp522JournalWrite -Journal $script:Syp522Journal
+        foreach($operation in @($script:Syp522Journal.operations)){$operation.state='applied'}
+        {Invoke-Syp522JournalWrite -Journal $script:Syp522Journal}|Should Throw
+
+        $convertParameters=@{InputObject=(Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:Syp522TransactionPath 'journal.json'))}
+        if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$convertParameters.DateKind='String'}
+        $next=ConvertFrom-Json @convertParameters
+        $next.owner.processId=[int64]$next.owner.processId+1
+        {Invoke-Syp522JournalWrite -Journal $next}|Should Throw
+    }
+
+    # Scenario: The stage readback differs by one byte from the serialized and validated journal bytes.
+    # Purpose: Fail closed before publication and make the byte-equality proof explicit in the writer implementation.
+    It 'UnitT114_rejects_nonidentical_journal_stage_readback_bytes' {
+        {& $script:Syp522ReconcilerModule {Assert-AgentEnvironmentJournalBytesEqual -Expected ([byte[]](1,2,3)) -Actual ([byte[]](1,2,4))}}|Should Throw
+        $writerText=& $script:Syp522ReconcilerModule {(Get-Command Write-AgentEnvironmentInstallJournal).ScriptBlock.ToString()}
+        $writerText|Should Match 'Assert-AgentEnvironmentJournalBytesEqual\s+-Expected\s+\$bytes\s+-Actual\s+\$stageBytes'
+    }
+
+    # Scenario: The process writes transaction A, switches to transaction B, and then resumes transaction A.
+    # Purpose: Keep verified generations transaction-local so returning to A must hash-miss and fully parse its durable journal again.
+    It 'InterT115_does_not_reuse_verified_journals_across_transactions' {
+        $firstPath=$script:Syp522TransactionPath;$firstJournal=$script:Syp522Journal
+        Invoke-Syp522JournalWrite -Journal $firstJournal
+        $secondId=[guid]::NewGuid().ToString('N')
+        $script:Syp522TransactionPath=Join-Path $TestDrive ".ai-instructions-txn/$secondId"
+        New-Item -ItemType Directory -Path $script:Syp522TransactionPath|Out-Null
+        $parameters=@{InputObject=($firstJournal|ConvertTo-Json -Depth 30)}
+        if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'}
+        $secondJournal=ConvertFrom-Json @parameters;$secondJournal.transactionId=$secondId
+        Invoke-Syp522JournalWrite -Journal $secondJournal
+
+        $script:Syp522TransactionPath=$firstPath;$firstJournal.phase='applying'
+        Invoke-Syp522JournalWrite -Journal $firstJournal
+        $counts=Get-Syp522ValidationCounts
+        $counts.AssertV1|Should Be 2
+        $counts.ParseV1|Should Be 1
+    }
+
+    # Scenario: Recovery supplies its mutation context to the journal writer in a later process.
+    # Purpose: Keep every recovery generation on the original full validation and parsing path, never the same-process Apply cache.
+    It 'UnitT116_keeps_recovery_writes_on_full_validation_and_parsing' {
+        $writerText=& $script:Syp522ReconcilerModule {(Get-Command Write-AgentEnvironmentInstallJournal).ScriptBlock.ToString()}
+        $writerText|Should Match '\$useValidationCache\s*=\s*\$null\s*-eq\s*\$RecoveryMutationContext'
+        $writerText|Should Match 'if\s*\(\s*-not\s*\$useValidationCache\s*\)\s*\{\s*Assert-AiInstructionsInstallJournalV1'
+        $writerText|Should Match 'else\s*\{\s*ConvertFrom-AiInstructionsInstallJournalV1Json\s+-Json\s+\(\[string\]\$publishedEvidence\.json\)'
+    }
+}
