@@ -749,6 +749,44 @@ function Assert-StandardValidationTrustedUnixToolPath {
     }
 }
 
+function Assert-StandardValidationTrustedUnixLinkPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    try { $link = Get-Item -Force -LiteralPath $Path -ErrorAction Stop }
+    catch { throw "INVALID|$Context symbolic-link metadata could not be inspected: $Path. $($_.Exception.Message)" }
+    $linkPath = [IO.Path]::GetFullPath($link.FullName)
+    $linkUnixMode = [string]$link.UnixMode
+    if ($linkUnixMode.Length -eq 0 -or $linkUnixMode[0] -cne 'l') {
+        throw "INVALID|$Context symbolic-link type could not be verified without following it: $linkPath"
+    }
+
+    $currentUid = Get-StandardValidationUnixCurrentUid -Context $Context
+    $linkOwnerUid = Get-StandardValidationUnixOwnerUid -Path $linkPath -Context $Context
+    if ($linkOwnerUid -ne 0 -and $linkOwnerUid -ne $currentUid) {
+        throw "INVALID|$Context symbolic link must be owned by root or the current user: $linkPath"
+    }
+
+    $parent = [IO.Directory]::GetParent($linkPath)
+    while ($null -ne $parent) {
+        $currentPath = $parent.FullName
+        try { $item = Get-Item -Force -LiteralPath $currentPath -ErrorAction Stop }
+        catch { throw "INVALID|$Context symbolic-link namespace could not be inspected: $currentPath. $($_.Exception.Message)" }
+        $unixMode = [string]$item.UnixMode
+        try { $mode = [IO.File]::GetUnixFileMode($currentPath) }
+        catch { throw "INVALID|$Context Unix permissions could not be determined: $currentPath. $($_.Exception.Message)" }
+        Assert-StandardValidationTrustedUnixMode -UnixMode $unixMode -Mode ([uint32]$mode) `
+            -ExpectedType 'd' -Path $currentPath -Context $Context
+        $ownerUid = Get-StandardValidationUnixOwnerUid -Path $currentPath -Context $Context
+        if ($ownerUid -ne 0 -and $ownerUid -ne $currentUid) {
+            throw "INVALID|$Context symbolic-link namespace must be owned by root or the current user: $currentPath"
+        }
+        $parent = [IO.Directory]::GetParent($currentPath)
+    }
+}
+
 function Resolve-StandardValidationInternalUseToolPath {
     param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
 
@@ -772,6 +810,7 @@ function Resolve-StandardValidationInternalUseToolPath {
             try { $linkTarget = $entry.LinkTarget }
             catch { throw "INVALID|$Context symbolic-link metadata could not be read: $current. $($_.Exception.Message)" }
             if ([string]::IsNullOrEmpty($linkTarget)) { continue }
+            Assert-StandardValidationTrustedUnixLinkPath -Path $current -Context $Context
             try { $target = $entry.ResolveLinkTarget($false) }
             catch { throw "INVALID|$Context symbolic-link target could not be resolved: $current. $($_.Exception.Message)" }
             if ($null -eq $target) { throw "INVALID|$Context symbolic-link target could not be resolved: $current" }

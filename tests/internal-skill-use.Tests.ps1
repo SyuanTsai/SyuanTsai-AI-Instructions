@@ -354,6 +354,122 @@ Describe 'Internal Skill use approvals' {
 
             { Invoke-InternalUseFixture $fixture } | Should -Throw '*link*'
         }
+
+        # Scenario: A Homebrew-style bin link traverses user-owned 0755 directories to a reviewed Cellar executable.
+        # Purpose: Preserve ordinary relative package-manager links while validating every namespace directory.
+        It 'UnitT89_AcceptsAHomebrewStyleUnixToolSymlink' {
+            $fixture = New-InternalUseFixture
+            $root = Join-Path $script:InternalUseTrustedUnixRoot 'homebrew'
+            $bin = Join-Path $root 'bin'
+            $cellarBin = Join-Path $root 'Cellar/git/x/bin'
+            foreach ($directory in @($root, $bin, (Join-Path $root 'Cellar'), (Join-Path $root 'Cellar/git'), (Join-Path $root 'Cellar/git/x'), $cellarBin)) {
+                [void][IO.Directory]::CreateDirectory($directory)
+                [IO.File]::SetUnixFileMode($directory, [IO.UnixFileMode]493)
+            }
+            $targetPath = Join-Path $cellarBin 'git'
+            Copy-Item -LiteralPath ([string]$fixture.tools[1].path) -Destination $targetPath
+            [IO.File]::SetUnixFileMode($targetPath, [IO.UnixFileMode]384)
+            $linkPath = Join-Path $bin 'git'
+            New-Item -ItemType SymbolicLink -Path $linkPath -Target '../Cellar/git/x/bin/git' | Out-Null
+            $fixture.tools[1].path = $linkPath
+
+            (Invoke-InternalUseFixture $fixture).status | Should -Be 'approved'
+        }
+
+        # Scenario: A distro-style usr/bin link and its target analogue are current-user-owned below 0755 directories.
+        # Purpose: Accept the same safe namespace shape as a root-owned system package link without requiring root in tests.
+        It 'UnitT91_AcceptsADistroStyleUnixToolSymlinkAnalogue' {
+            $fixture = New-InternalUseFixture
+            $root = Join-Path $script:InternalUseTrustedUnixRoot 'distro'
+            $usrBin = Join-Path $root 'usr/bin'
+            $libexec = Join-Path $root 'usr/libexec/git-core'
+            foreach ($directory in @($root, (Join-Path $root 'usr'), $usrBin, (Join-Path $root 'usr/libexec'), $libexec)) {
+                [void][IO.Directory]::CreateDirectory($directory)
+                [IO.File]::SetUnixFileMode($directory, [IO.UnixFileMode]493)
+            }
+            $targetPath = Join-Path $libexec 'git'
+            Copy-Item -LiteralPath ([string]$fixture.tools[1].path) -Destination $targetPath
+            [IO.File]::SetUnixFileMode($targetPath, [IO.UnixFileMode]384)
+            $linkPath = Join-Path $usrBin 'git'
+            New-Item -ItemType SymbolicLink -Path $linkPath -Target '../libexec/git-core/git' | Out-Null
+            $fixture.tools[1].path = $linkPath
+
+            (Invoke-InternalUseFixture $fixture).status | Should -Be 'approved'
+        }
+
+        # Scenario: The original reviewed tool link is stored below a group- or world-writable directory while its final target remains trusted.
+        # Purpose: Reject a replaceable inventory namespace even when final target ownership, mode and bytes are valid.
+        It 'UnitT92_RejectsAUnixToolSymlinkBelowA_<PermissionClass>WritableOriginalParent' -TestCases @(
+            @{ PermissionClass = 'Group'; Mode = [IO.UnixFileMode]509 },
+            @{ PermissionClass = 'World'; Mode = [IO.UnixFileMode]495 }
+        ) {
+            param($PermissionClass, $Mode)
+            $fixture = New-InternalUseFixture
+            $root = Join-Path $script:InternalUseTrustedUnixRoot ("original-$PermissionClass".ToLowerInvariant())
+            $targetDirectory = Join-Path $root 'target'
+            $linkDirectory = Join-Path $root 'bin'
+            foreach ($directory in @($root, $targetDirectory, $linkDirectory)) {
+                [void][IO.Directory]::CreateDirectory($directory)
+                [IO.File]::SetUnixFileMode($directory, [IO.UnixFileMode]493)
+            }
+            $targetPath = Join-Path $targetDirectory 'git'
+            Copy-Item -LiteralPath ([string]$fixture.tools[1].path) -Destination $targetPath
+            [IO.File]::SetUnixFileMode($targetPath, [IO.UnixFileMode]384)
+            $linkPath = Join-Path $linkDirectory 'git'
+            New-Item -ItemType SymbolicLink -Path $linkPath -Target '../target/git' | Out-Null
+            [IO.File]::SetUnixFileMode($linkDirectory, $Mode)
+            $fixture.tools[1].path = $linkPath
+
+            { Invoke-InternalUseFixture $fixture } | Should -Throw '*group-write or other-write*'
+        }
+
+        # Scenario: A trusted original link resolves through a second link stored in a writable directory to a valid final target.
+        # Purpose: Validate every intermediate link namespace instead of checking only the first link and final executable.
+        It 'UnitT93_RejectsAnIntermediateUnixToolSymlinkBelowAWritableParent' {
+            $fixture = New-InternalUseFixture
+            $root = Join-Path $script:InternalUseTrustedUnixRoot 'two-hop'
+            $entryDirectory = Join-Path $root 'bin'
+            $hopDirectory = Join-Path $root 'writable-hop'
+            $targetDirectory = Join-Path $root 'target'
+            foreach ($directory in @($root, $entryDirectory, $hopDirectory, $targetDirectory)) {
+                [void][IO.Directory]::CreateDirectory($directory)
+                [IO.File]::SetUnixFileMode($directory, [IO.UnixFileMode]493)
+            }
+            $targetPath = Join-Path $targetDirectory 'git'
+            Copy-Item -LiteralPath ([string]$fixture.tools[1].path) -Destination $targetPath
+            [IO.File]::SetUnixFileMode($targetPath, [IO.UnixFileMode]384)
+            $intermediateLink = Join-Path $hopDirectory 'git-hop'
+            New-Item -ItemType SymbolicLink -Path $intermediateLink -Target '../target/git' | Out-Null
+            $linkPath = Join-Path $entryDirectory 'git'
+            New-Item -ItemType SymbolicLink -Path $linkPath -Target '../writable-hop/git-hop' | Out-Null
+            [IO.File]::SetUnixFileMode($hopDirectory, [IO.UnixFileMode]511)
+            $fixture.tools[1].path = $linkPath
+
+            { Invoke-InternalUseFixture $fixture } | Should -Throw '*group-write or other-write*'
+        }
+
+        # Scenario: The link metadata owner lookup reports an account other than root or the current user while the target remains trusted.
+        # Purpose: Exercise the lstat owner boundary through the existing mockable owner-lookup seam without requiring root.
+        It 'UnitT94_RejectsAUnixToolSymlinkOwnedByAnotherAccount' {
+            $fixture = New-InternalUseFixture
+            $targetPath = Join-Path $script:InternalUseTrustedUnixRoot 'owner-target'
+            Copy-Item -LiteralPath ([string]$fixture.tools[1].path) -Destination $targetPath
+            [IO.File]::SetUnixFileMode($targetPath, [IO.UnixFileMode]384)
+            $linkPath = Join-Path (Split-Path -Parent ([string]$fixture.tools[1].path)) 'owner-link'
+            New-Item -ItemType SymbolicLink -Path $linkPath -Target $targetPath | Out-Null
+            $fixture.tools[1].path = $linkPath
+            $script:InternalUseOwnerLinkPath = [IO.Path]::GetFullPath($linkPath)
+            $script:InternalUseOwnerCurrentUid = Get-StandardValidationUnixCurrentUid -Context 'owner regression'
+            Mock Get-StandardValidationUnixOwnerUid {
+                param($Path, $Context)
+                if ([IO.Path]::GetFullPath($Path) -ceq $script:InternalUseOwnerLinkPath) {
+                    return [uint64]($script:InternalUseOwnerCurrentUid + 1)
+                }
+                return [uint64]$script:InternalUseOwnerCurrentUid
+            }
+
+            { Invoke-InternalUseFixture $fixture } | Should -Throw '*owned by root or the current user*'
+        }
     }
 
     # Scenario: Package bytes change only after the initial inventory, during final authority binding.
