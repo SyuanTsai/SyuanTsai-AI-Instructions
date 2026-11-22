@@ -842,7 +842,15 @@ function Resolve-StandardValidationInternalUseToolPath {
             $entry = if ($pending.Count -eq 0) { [IO.FileInfo]::new($current) } else { [IO.DirectoryInfo]::new($current) }
             try { $linkTarget = $entry.LinkTarget }
             catch { throw "INVALID|$Context symbolic-link metadata could not be read: $current. $($_.Exception.Message)" }
-            if ([string]::IsNullOrEmpty($linkTarget)) { continue }
+            if ($null -eq $linkTarget) {
+                if ($pending.Count -gt 0 -and -not $entry.Exists) {
+                    throw "INVALID|$Context path component is not a directory: $current"
+                }
+                continue
+            }
+            if ($linkTarget.Length -eq 0) {
+                throw "INVALID|$Context symbolic-link target path must not be empty: $current"
+            }
             Assert-StandardValidationTrustedUnixLinkPath -Path $current -Context $Context
             if ([IO.Path]::IsPathFullyQualified($linkTarget)) {
                 $targetAnchor = [IO.Path]::GetPathRoot($linkTarget)
@@ -853,10 +861,7 @@ function Resolve-StandardValidationInternalUseToolPath {
                 $targetPath = $linkTarget
                 $current = $parentPath
             }
-            $targetParts = @($targetPath.Split([char[]]@($separator), [StringSplitOptions]::None))
-            if ($targetParts.Count -eq 0 -or @($targetParts | Where-Object { $_ -ceq '' }).Count -gt 0) {
-                throw "INVALID|$Context symbolic-link target path must not contain repeated or trailing separators: $linkTarget"
-            }
+            $targetParts = @($targetPath.Split([char[]]@($separator), [StringSplitOptions]::RemoveEmptyEntries))
             $pending = @($targetParts) + @($pending)
             $redirected = $true
             break

@@ -503,6 +503,47 @@ Describe 'Internal Skill use approvals' {
 
             { Invoke-InternalUseFixture $fixture } | Should -Throw "INVALID|internal use tool path must be an absolute path without '.' or '..' components: $parent/./$leaf"
         }
+
+        # Scenario: An intermediate directory link has a relative target ending in a separator.
+        # Purpose: Accept a valid POSIX link target while still resolving and validating the reviewed regular file.
+        It 'UnitT97_AcceptsAUnixDirectorySymlinkTargetWithATrailingSeparator' {
+            $fixture = New-InternalUseFixture
+            $root = Join-Path $script:InternalUseTrustedUnixRoot 'trailing-separator'
+            $release = Join-Path $root 'releases/v1'
+            $releaseBin = Join-Path $release 'bin'
+            foreach ($directory in @($root, (Join-Path $root 'releases'), $release, $releaseBin)) {
+                [void][IO.Directory]::CreateDirectory($directory)
+                [IO.File]::SetUnixFileMode($directory, [IO.UnixFileMode]493)
+            }
+            $targetPath = Join-Path $releaseBin 'git'
+            Copy-Item -LiteralPath ([string]$fixture.tools[1].path) -Destination $targetPath
+            [IO.File]::SetUnixFileMode($targetPath, [IO.UnixFileMode]384)
+            $linkPath = Join-Path $root 'current'
+            New-Item -ItemType SymbolicLink -Path $linkPath -Target 'releases/v1/' | Out-Null
+            $fixture.tools[1].path = Join-Path $linkPath 'bin/git'
+
+            (Invoke-InternalUseFixture $fixture).status | Should -Be 'approved'
+        }
+
+        # Scenario: A trusted link target traverses through a regular file before a parent component.
+        # Purpose: Preserve POSIX ENOTDIR semantics instead of allowing later '..' processing to hide the invalid intermediate.
+        It 'UnitT98_RejectsAUnixLinkTargetWithANonDirectoryIntermediate' {
+            $fixture = New-InternalUseFixture
+            $root = Join-Path $script:InternalUseTrustedUnixRoot 'non-directory-intermediate'
+            [void][IO.Directory]::CreateDirectory($root)
+            [IO.File]::SetUnixFileMode($root, [IO.UnixFileMode]493)
+            $blockerPath = Join-Path $root 'blocker'
+            [IO.File]::WriteAllText($blockerPath, 'not a directory', [Text.UTF8Encoding]::new($false))
+            [IO.File]::SetUnixFileMode($blockerPath, [IO.UnixFileMode]384)
+            $targetPath = Join-Path $root 'tool'
+            Copy-Item -LiteralPath ([string]$fixture.tools[1].path) -Destination $targetPath
+            [IO.File]::SetUnixFileMode($targetPath, [IO.UnixFileMode]384)
+            $linkPath = Join-Path $root 'current'
+            New-Item -ItemType SymbolicLink -Path $linkPath -Target 'blocker/../tool' | Out-Null
+            $fixture.tools[1].path = $linkPath
+
+            { Invoke-InternalUseFixture $fixture } | Should -Throw "path component is not a directory: $blockerPath"
+        }
     }
 
     # Scenario: Package bytes change only after the initial inventory, during final authority binding.
