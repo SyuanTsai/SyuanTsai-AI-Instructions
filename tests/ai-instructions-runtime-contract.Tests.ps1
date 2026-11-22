@@ -4136,7 +4136,7 @@ exec __REAL_GIT__ "$@"
         }
         $errorOutput=@(& pwsh -NoProfile -File $bootstrapPath -TargetRoot $repository -UserHome $userHome -ConfigurationPath $configuration -RuntimeRoot (Join-Path $script:RepositoryRoot 'scripts') -GitExecutable $shim 2>&1)
         $LASTEXITCODE|Should Not Be 0
-        $normalizedErrorOutput=(($errorOutput-join[Environment]::NewLine)-replace '(?m)^\s*\|\s?',' ')-replace '\s+',' '
+        $normalizedErrorOutput=((($errorOutput-join[Environment]::NewLine)-replace '\x1b\[[0-9;?]*[ -/]*[@-~]','')-replace '\x1b','')-replace '(?m)^\s*\|\s?',' ' -replace '\s+',' '
         $normalizedErrorOutput|Should Match 'injected initial HEAD query failure'
         $normalizedErrorOutput|Should Not Match 'target repository has no commit'
     }

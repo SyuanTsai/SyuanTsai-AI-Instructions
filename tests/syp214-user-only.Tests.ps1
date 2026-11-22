@@ -2290,7 +2290,7 @@ Describe 'SYP214 USER-only bootstrap sync v5 preflight' {
         $result = Invoke-Syp214Bootstrap -RecoverSkillMigration $journalPath -CaptureFailure
 
         $result.exitCode | Should Not Be 0
-        $normalizedOutput = (($result.output -join [Environment]::NewLine) -replace '(?m)^\s*\|\s?',' ') -replace '\s+',' '
+        $normalizedOutput = ((($result.output -join [Environment]::NewLine) -replace '\x1b\[[0-9;?]*[ -/]*[@-~]','') -replace '\x1b','') -replace '(?m)^\s*\|\s?',' ' -replace '\s+',' '
         $normalizedOutput | Should Match 'AI Instructions sync configuration schema version 5 requires a projection-aware installer\.'
         (Get-Item -LiteralPath $markerPath).Length | Should Be $markerLength
         (Get-FileHash -LiteralPath $markerPath -Algorithm SHA256).Hash | Should Be $markerHash
