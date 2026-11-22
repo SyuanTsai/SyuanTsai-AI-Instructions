@@ -9100,7 +9100,10 @@ Describe 'Platform K15 PowerShell runtime receipt reverification' {
             [IO.File]::WriteAllText($empty,'type-swap')
             try { Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } 'directory|closure' }
             finally { [IO.File]::Delete($empty) }
-        } finally { [void][IO.Directory]::CreateDirectory($empty) }
+        } finally {
+            [void][IO.Directory]::CreateDirectory($empty)
+            if (-not $IsWindows) { [IO.File]::SetUnixFileMode($empty,[IO.UnixFileMode]448) }
+        }
         Assert-K15Baseline
     }
 

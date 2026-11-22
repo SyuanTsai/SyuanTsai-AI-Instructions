@@ -129,7 +129,11 @@ cleanup() {
                 fi
                 run_clean rm -f "$run_tmp/members" "$run_tmp/verbose" 2>/dev/null || :
                 if [ -n "${asset_name-}" ]; then
-                    run_clean rm -f "$run_tmp/$asset_name" "$run_tmp/download/$asset_name" 2>/dev/null || :
+                    # macOS copyfile can materialize an AppleDouble companion for
+                    # the known archive snapshot. Both names are exact derivatives
+                    # of the policy-bound asset; never scan for other dot files.
+                    run_clean rm -f "$run_tmp/$asset_name" "$run_tmp/._$asset_name" \
+                        "$run_tmp/download/$asset_name" "$run_tmp/download/._$asset_name" 2>/dev/null || :
                 fi
                 run_clean rmdir "$run_tmp/download" "$run_tmp" 2>/dev/null || : ;;
         esac

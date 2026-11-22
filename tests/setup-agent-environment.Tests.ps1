@@ -573,6 +573,14 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         }
     }
 
+    # Scenario: macOS copyfile metadata creates a sidecar for the policy-bound archive snapshot or download.
+    # Purpose: Keep cleanup restricted to the two exact inventory-derived AppleDouble leaves without scanning the run tree.
+    It 'UnitT29_cleans_only_the_known_archive_AppleDouble_companions' {
+        $script:SetupShellText | Should Match ([regex]::Escape('"$run_tmp/._$asset_name"'))
+        $script:SetupShellText | Should Match ([regex]::Escape('"$run_tmp/download/._$asset_name"'))
+        $script:SetupShellText | Should Not Match '\$run_tmp/\.\*_'
+    }
+
     # Scenario: The shell edge is read as text on every host.
     # Purpose: Require a POSIX sh shebang, strict mode, umask 077, LF-only ASCII bytes.
     It 'UnitT30_uses_posix_sh_strict_mode_umask_and_lf_ascii_bytes' {
@@ -1461,8 +1469,11 @@ Publish-AgentEnvironmentSetupFile -SetupRoot $SetupRoot -Directory receipts -Lea
                 if ($hookState.PostRenameParent -eq 2) { throw 'injected runtime parent flush failure' }
             }
         }.GetNewClosure())
+        $refusalCode = $null
         try {
-            (Get-SetupTestRefusalCode { Publish-AgentEnvironmentSetupRuntimeDirectory -Layout $fixture.Layout -Attempt $attempt -Receipt $runtimeReceipt -Policy $policyInfo.Policy }) | Should Be 'runtime-verification-failed'
+            try { Publish-AgentEnvironmentSetupRuntimeDirectory -Layout $fixture.Layout -Attempt $attempt -Receipt $runtimeReceipt -Policy $policyInfo.Policy | Out-Null }
+            catch { $refusalCode = Get-AgentEnvironmentSetupRefusalCode $_ }
+            $refusalCode | Should Be 'runtime-verification-failed'
         } finally { Set-WinSetupDurabilityHook $null }
         Test-Path -LiteralPath (Join-Path $fixture.Layout.ReceiptDirectory $fixture.Layout.RuntimeReceiptLeaf) | Should Be $false
         Test-Path -LiteralPath $attempt.RuntimeDirectory -PathType Container | Should Be $true
@@ -1722,6 +1733,21 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
             }
             return (@($lines) -join "`n")
         }
+
+        function Assert-NoUnixSetupRunDirectories {
+            param([Parameter(Mandatory = $true)][string]$TmpRoot,[string]$PreservedPath)
+            $remaining = @(Get-ChildItem -LiteralPath $TmpRoot -Directory -Force | Where-Object {
+                [string]::IsNullOrEmpty($PreservedPath) -or $_.FullName -ne $PreservedPath
+            })
+            if ($remaining.Count -eq 0) { return }
+            $bounded = foreach ($directory in @($remaining | Select-Object -First 4)) {
+                $entries = @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction SilentlyContinue | Select-Object -First 8 | ForEach-Object {
+                    $_.Name + ':' + $(if ($_.PSIsContainer) { 'directory' } elseif ($null -ne $_.LinkType) { 'link' } else { 'file' })
+                })
+                "$($directory.Name)[$($entries -join ',')]"
+            }
+            throw "Expected no current setup run directories under '$TmpRoot'; found $($remaining.Count). Bounded entries: $($bounded -join '; ')"
+        }
     }
 
     AfterAll {
@@ -1749,8 +1775,7 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         Get-UnixMode (Join-Path $runtimeRoot 'pwsh') | Should Be '700'
         Get-UnixMode (Join-Path $setupRoot 'receipts/setup-receipt.json') | Should Be '600'
         Get-UnixMode (Join-Path $setupRoot "receipts/runtime-$($script:UnixVersion)-$($script:UnixRid).json") | Should Be '600'
-        $runDirectories = @(Get-ChildItem -LiteralPath (Join-Path $setupRoot 'tmp') -Directory -Force)
-        $runDirectories.Count | Should Be 0
+        Assert-NoUnixSetupRunDirectories -TmpRoot (Join-Path $setupRoot 'tmp')
         $offline.Stdout.Contains($userHome) | Should Be $false
     }
 
@@ -2138,8 +2163,7 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         $recorded[0] | Should Not BeExactly $recorded[1]
         (Get-UnixTreeSnapshot $old) | Should BeExactly $before
         (Get-Item -LiteralPath $old).LastWriteTimeUtc.Ticks | Should Be $mtime
-        $newRuns = @(Get-ChildItem -LiteralPath $tmpRoot -Directory -Force | Where-Object { $_.FullName -ne $old })
-        $newRuns.Count | Should Be 0
+        Assert-NoUnixSetupRunDirectories -TmpRoot $tmpRoot -PreservedPath $old
     }
 
     # Scenario: The cache directory itself is a symbolic link to an external directory, or a dangling symbolic link.
@@ -2185,8 +2209,8 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         Test-Path -LiteralPath $missingCache | Should Be $false
     }
 
-    # Scenario: A bsdtar-compatible extraction creates an AppleDouble companion for the known pwsh archive member.
-    # Purpose: Cleanup removes only the exact inventory-derived ._pwsh path and still reclaims the current run without scanning unknown entries.
+    # Scenario: macOS-compatible cp and tar shims create AppleDouble companions for the known archive snapshot and pwsh member.
+    # Purpose: Cleanup removes only the exact inventory-derived sidecars and still reclaims the current run without scanning unknown entries.
     It 'InterT50_cleans_inventory_derived_AppleDouble_members_without_tree_deletion' {
         $homePath=New-UnixHome 'appledouble-cleanup'
         $realTar=@(Get-Command tar -CommandType Application | Select-Object -First 1)[0].Source
@@ -2202,11 +2226,20 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
             'done',
             'if [ "$extract" -eq 1 ] && [ -n "$destination" ]; then printf appledouble > "$destination/._pwsh"; fi'
         ) -join "`n"
-        $bin=New-UnixToolShim 'appledouble-cleanup' -Replace @{tar=$tarShim}
+        $realCp=@(Get-Command cp -CommandType Application | Select-Object -First 1)[0].Source
+        $cpShim=@(
+            "'$realCp' `"`$@`" || exit `$?",
+            'destination=',
+            'for argument do destination=$argument; done',
+            'case "$destination" in',
+            '  */*) directory=${destination%/*}; leaf=${destination##*/}; printf appledouble > "$directory/._$leaf" ;;',
+            'esac'
+        ) -join "`n"
+        $bin=New-UnixToolShim 'appledouble-cleanup' -Replace @{tar=$tarShim;cp=$cpShim}
         $run=Invoke-UnixSetup $homePath @('--prepare') -Environment @{PATH=$bin}
         Assert-SetupTestExitCode $run 0
         $tmpRoot=Join-Path $homePath '.local/share/ai-instructions-setup/tmp'
-        @(Get-ChildItem -LiteralPath $tmpRoot -Directory -Force).Count | Should Be 0
+        Assert-NoUnixSetupRunDirectories -TmpRoot $tmpRoot
     }
 
     # Register only when the native test process can create a genuinely foreign-owned cache fixture.
