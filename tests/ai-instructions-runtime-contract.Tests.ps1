@@ -225,6 +225,24 @@ function Get-TestLinuxInstallJournalV1 {
     return (ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20))
 }
 
+function Convert-TestInstallJournalToHostPlatform {
+    param([Parameter(Mandatory = $true)][object] $Journal)
+    if ($IsWindows) { return $Journal }
+
+    $Journal.platform.os = if ($IsMacOS) { 'macos' } else { 'linux' }
+    $Journal.lock.primitive = 'flock'
+    foreach ($operation in $Journal.operations) {
+        foreach ($state in @($operation.original,$operation.applied)) {
+            if ($null -ne $state.identity) { $state.identity.kind = 'unix-device-inode' }
+        }
+        if ($null -ne $operation.backupIdentity) { $operation.backupIdentity.kind = 'unix-device-inode' }
+        if ($null -ne $operation.permissions) {
+            $operation.permissions = [pscustomobject]@{ kind='unix-mode'; mode='0644'; uid=1000; gid=1000 }
+        }
+    }
+    return (ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($Journal | ConvertTo-Json -Depth 20))
+}
+
 function Get-TestInstallJournalV2 {
     param([string] $Owner = 'repo-bootstrap')
     $root = [IO.Path]::GetFullPath((Join-Path $TestDrive 'repo-v2'))
@@ -1808,7 +1826,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     # Scenario: A rolled-back journal has original content, identity, and required permissions everywhere.
     # Purpose: Preserve the terminal no-op decision when rollback is fully complete.
     It 'UnitT142_accepts_fully_matching_rolled_back_state' {
-        $journal = Get-TestInstallJournalV1
+        $journal = Convert-TestInstallJournalToHostPlatform -Journal (Get-TestInstallJournalV1)
         $journal.phase = 'rolled-back'
         foreach ($operation in $journal.operations) { $operation.state = 'rolled-back' }
         $observations = @{
@@ -1911,7 +1929,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     # Scenario: A rolled-back remove-file has restored original content, identity, and permissions.
     # Purpose: Accept the terminal rollback only after the restored target and its access policy both match.
     It 'UnitT148_accepts_rolled_back_remove_file_with_matching_permissions' {
-        $journal = Get-TestInstallJournalV1
+        $journal = Convert-TestInstallJournalToHostPlatform -Journal (Get-TestInstallJournalV1)
         $journal.phase = 'rolled-back'
         $journal.operations = @($journal.operations[0])
         $journal.operations[0].kind = 'remove-file'
@@ -1950,7 +1968,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     # Scenario: A remove-file rollback renames its same-identity tombstone back into place.
     # Purpose: Accept the restored tombstone identity without weakening byte or permission checks.
     It 'UnitT150_accepts_restored_remove_file_with_tombstone_identity' {
-        $journal = Get-TestInstallJournalV1
+        $journal = Convert-TestInstallJournalToHostPlatform -Journal (Get-TestInstallJournalV1)
         $journal.operations = @($journal.operations[0])
         $journal.operations[0].kind = 'remove-file'
         $journal.operations[0].method = 'tombstone-rename'
@@ -2330,7 +2348,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     # Scenario: Rollback restored every target and all transaction backups were already cleaned up.
     # Purpose: Keep the fully completed rolled-back terminal state an empty-reason no-op.
     It 'UnitT169_accepts_rolled_back_state_with_null_backups' {
-        $journal = Get-TestInstallJournalV1
+        $journal = Convert-TestInstallJournalToHostPlatform -Journal (Get-TestInstallJournalV1)
         $journal.phase = 'rolled-back'
         foreach ($operation in $journal.operations) { $operation.state = 'rolled-back' }
         $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
@@ -2427,7 +2445,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     # Scenario: Applying recovery sees every target in its original state and no residual backup remains.
     # Purpose: Preserve the safe no-op rollback decision when the global backup precondition succeeds.
     It 'UnitT174_rolls_back_with_none_when_original_state_has_no_residual_backup' {
-        $journal = Get-TestInstallJournalV1
+        $journal = Convert-TestInstallJournalToHostPlatform -Journal (Get-TestInstallJournalV1)
         $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
         $observations = @{}
         foreach ($operation in $journal.operations) {
@@ -2633,11 +2651,11 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     # Scenario: D1 swap-directory recovery observes original, applied, and foreign directory states.
     # Purpose: Select none, commit, rollback, or refusal using inventory, entry count, and identity evidence.
     It 'UnitT183_decides_all_swap_directory_recovery_outcomes' {
-        $journal = Get-TestSwapDirectoryInstallJournalV1
+        $journal = Convert-TestInstallJournalToHostPlatform -Journal (Get-TestSwapDirectoryInstallJournalV1)
         $noneDecision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1=(New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].original -Backup $null) }
         $noneDecision.action | Should Be 'roll-back'
         $noneDecision.operations[0].action | Should Be 'none'
-        $terminal=Get-TestSwapDirectoryInstallJournalV1; $terminal.phase='rolled-back'; $terminal.operations[0].state='rolled-back'
+        $terminal=Convert-TestInstallJournalToHostPlatform -Journal (Get-TestSwapDirectoryInstallJournalV1); $terminal.phase='rolled-back'; $terminal.operations[0].state='rolled-back'
         (Get-AiInstructionsInstallRecoveryDecision -Journal $terminal -Observations @{1=(New-TestInstallObservation -Operation $terminal.operations[0] -State $terminal.operations[0].original -Backup $null)}).action | Should Be 'none'
 
         $journal.phase = 'applied'; $journal.operations[0].state = 'applied'
@@ -3123,6 +3141,8 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         }
     }
 
+    # Register only on the native host; ACE payload and DACL protection semantics are intrinsically Windows-only.
+    if ($IsWindows) {
     # Scenario: A Windows rollback journal records AI while readback clears only AI, then separate observations change an ACE or P.
     # Purpose: Ignore the informational AI control bit but keep ACE sequence/flags/mask/SID and DACL protection authoritative.
     It 'UnitT204_ignores_AI_only_and_rejects_ACE_or_protection_drift_in_recovery' {
@@ -3172,6 +3192,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (& $compare -FirstSddl 'D:(A;;GR;;;WD)' -SecondSddl 'D:(A;;FR;;;WD)') | Should Be $true
         (& $compare -FirstSddl 'D:AI(A;;FR;;;WD)' -SecondSddl 'D:(A;;FR;;;WD)') | Should Be $true
         (& $compare -FirstSddl 'D:(A;;FR;;;WD)(A;;FA;;;SY)' -SecondSddl 'D:(A;;FA;;;SY)(A;;FR;;;WD)') | Should Be $false
+    }
     }
 
     # Scenario: A runtime bundle declares directory-publication as a target-host requirement.
@@ -3310,10 +3331,10 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $singleOperationJournal = {
             param([Parameter(Mandatory = $true)][ValidateSet('write-file','create-file','swap-directory','create-directory')][string] $Kind,[Parameter(Mandatory = $true)][string] $State)
             $journal = switch($Kind){
-                'write-file' { Get-TestInstallJournalV1 }
-                'create-file' { Get-TestInstallJournalV1 }
-                'swap-directory' { Get-TestSwapDirectoryInstallJournalV1 }
-                'create-directory' { Get-TestCreateDirectoryInstallJournalV1 }
+                'write-file' { Convert-TestInstallJournalToHostPlatform -Journal (Get-TestInstallJournalV1) }
+                'create-file' { Convert-TestInstallJournalToHostPlatform -Journal (Get-TestInstallJournalV1) }
+                'swap-directory' { Convert-TestInstallJournalToHostPlatform -Journal (Get-TestSwapDirectoryInstallJournalV1) }
+                'create-directory' { Convert-TestInstallJournalToHostPlatform -Journal (Get-TestCreateDirectoryInstallJournalV1) }
             }
             if($Kind -in @('write-file','create-file')){
                 $operationIndex=if($Kind -ceq 'create-file'){1}else{0}
@@ -4008,7 +4029,9 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $LASTEXITCODE|Should Be 0
         ($unbornOutput-join[Environment]::NewLine)|Should Match 'target repository has no commit'
 
-        $realGit=(Get-Command git -ErrorAction Stop).Source;$shim=Join-Path $TestDrive 'bootstrap-head-error.cmd'
+        $realGit=(Get-Command git -ErrorAction Stop).Source
+        if($IsWindows){
+        $shim=Join-Path $TestDrive 'bootstrap-head-error.cmd'
         $shimText=@"
 @echo off
 setlocal
@@ -4021,6 +4044,22 @@ if not errorlevel 1 (
 exit /b %errorlevel%
 "@
         [IO.File]::WriteAllText($shim,$shimText,[Text.Encoding]::ASCII)
+        }else{
+            $shim=Join-Path $TestDrive 'bootstrap-head-error'
+            $shimText=@'
+#!/bin/sh
+case " $* " in
+  *" rev-parse --verify --quiet HEAD "*)
+    echo "injected initial HEAD query failure" >&2
+    exit 128
+    ;;
+esac
+exec git "$@"
+'@
+            [IO.File]::WriteAllText($shim,$shimText,[Text.UTF8Encoding]::new($false))
+            & chmod u+x -- $shim
+            $LASTEXITCODE|Should Be 0
+        }
         $errorOutput=@(& pwsh -NoProfile -File $bootstrapPath -TargetRoot $repository -UserHome $userHome -ConfigurationPath $configuration -RuntimeRoot (Join-Path $script:RepositoryRoot 'scripts') -GitExecutable $shim 2>&1)
         $LASTEXITCODE|Should Not Be 0
         ($errorOutput-join[Environment]::NewLine)|Should Match 'injected initial HEAD query failure'
