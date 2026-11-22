@@ -688,6 +688,23 @@ function Get-StandardValidationUnixOwnerUid {
     return [uint64]::Parse($value, [Globalization.CultureInfo]::InvariantCulture)
 }
 
+function Get-StandardValidationUnixFileTypeMode {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $statPath = Get-StandardValidationUnixNativeToolPath -Name stat -Context $Context
+    $useBsdStatFormat = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)
+    $output = if ($useBsdStatFormat) { @(& $statPath -f '%Xp' $Path 2>$null) } else { @(& $statPath -c '%f' -- $Path 2>$null) }
+    $value = ($output -join '').Trim()
+    if ($LASTEXITCODE -ne 0 -or $value -cnotmatch '^(?:0[xX])?[0-9a-fA-F]+$') {
+        throw "INVALID|$Context Unix file type could not be determined: $Path"
+    }
+    $hexValue = $value -replace '^0[xX]', ''
+    return [uint32]::Parse($hexValue, [Globalization.NumberStyles]::HexNumber, [Globalization.CultureInfo]::InvariantCulture)
+}
+
 function Assert-StandardValidationTrustedUnixMode {
     param(
         [Parameter(Mandatory = $true)][string] $UnixMode,
@@ -713,18 +730,13 @@ function Assert-StandardValidationTrustedUnixToolPath {
         [Parameter(Mandatory = $true)][string] $Context
     )
 
-    try { $target = Get-Item -Force -LiteralPath $Path -ErrorAction Stop }
-    catch { throw "INVALID|$Context file is missing or inaccessible: $Path. $($_.Exception.Message)" }
-    $targetUnixMode = [string]$target.UnixMode
-    if ($targetUnixMode.Length -eq 0) {
-        throw "INVALID|$Context Unix file type could not be determined: $Path"
-    }
-    if ($targetUnixMode[0] -cne '-') {
+    $targetMode = Get-StandardValidationUnixFileTypeMode -Path $Path -Context $Context
+    if (($targetMode -band [uint32]0xF000) -ne [uint32]0x8000) {
         throw "INVALID|$Context must resolve to a regular file: $Path"
     }
 
     $currentUid = Get-StandardValidationUnixCurrentUid -Context $Context
-    $currentPath = [IO.Path]::GetFullPath($target.FullName)
+    $currentPath = [IO.Path]::GetFullPath($Path)
     $isTarget = $true
     while ($true) {
         try { $item = Get-Item -Force -LiteralPath $currentPath -ErrorAction Stop }
