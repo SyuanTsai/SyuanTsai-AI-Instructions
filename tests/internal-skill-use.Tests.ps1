@@ -274,7 +274,7 @@ Describe 'Internal Skill use approvals' {
             New-Item -ItemType SymbolicLink -Path $linkPath -Target $directoryPath | Out-Null
             $fixture.tools[1].path = $linkPath
 
-            { Invoke-InternalUseFixture $fixture } | Should -Throw '*regular file*'
+            { Invoke-InternalUseFixture $fixture } | Should -Throw 'regular file'
         }
 
         # Scenario: A frozen tool link resolves to a FIFO that would block a pathname hash.
@@ -285,7 +285,7 @@ Describe 'Internal Skill use approvals' {
             if ([string]::IsNullOrWhiteSpace($mkfifo)) { throw 'A native mkfifo executable is required for this Unix regression.' }
             & $mkfifo $fifoPath
             if ($LASTEXITCODE -ne 0) { throw 'The FIFO fixture could not be created.' }
-            $linkPath = Join-Path $TestDrive 'fifo-link'
+            $linkPath = Join-Path $script:InternalUseTrustedUnixRoot 'fifo-link'
             New-Item -ItemType SymbolicLink -Path $linkPath -Target $fifoPath | Out-Null
             $scriptPath = Join-Path $script:InternalUseRoot 'scripts/Invoke-StandardValidation.ps1'
             $job = Start-Job -ScriptBlock {
@@ -321,7 +321,7 @@ Describe 'Internal Skill use approvals' {
             New-Item -ItemType SymbolicLink -Path $linkPath -Target $targetPath | Out-Null
             $fixture.tools[1].path = $linkPath
 
-            { Invoke-InternalUseFixture $fixture } | Should -Throw '*group-write or other-write*'
+            { Invoke-InternalUseFixture $fixture } | Should -Throw 'group-write or other-write'
         }
 
         # Scenario: A frozen tool link resolves below a group/world-writable ancestor directory.
@@ -338,7 +338,7 @@ Describe 'Internal Skill use approvals' {
             New-Item -ItemType SymbolicLink -Path $linkPath -Target $targetPath | Out-Null
             $fixture.tools[1].path = $linkPath
 
-            { Invoke-InternalUseFixture $fixture } | Should -Throw '*group-write or other-write*'
+            { Invoke-InternalUseFixture $fixture } | Should -Throw 'group-write or other-write'
         }
 
         # Scenario: A frozen tool path is a symbolic-link cycle.
@@ -352,7 +352,7 @@ Describe 'Internal Skill use approvals' {
             New-Item -ItemType SymbolicLink -Path $secondLink -Target $firstLink | Out-Null
             $fixture.tools[1].path = $firstLink
 
-            { Invoke-InternalUseFixture $fixture } | Should -Throw '*link*'
+            { Invoke-InternalUseFixture $fixture } | Should -Throw 'symbolic-link chain'
         }
 
         # Scenario: A Homebrew-style bin link traverses user-owned 0755 directories to a reviewed Cellar executable.
@@ -420,7 +420,7 @@ Describe 'Internal Skill use approvals' {
             [IO.File]::SetUnixFileMode($linkDirectory, $Mode)
             $fixture.tools[1].path = $linkPath
 
-            { Invoke-InternalUseFixture $fixture } | Should -Throw '*group-write or other-write*'
+            { Invoke-InternalUseFixture $fixture } | Should -Throw 'group-write or other-write'
         }
 
         # Scenario: A trusted original link resolves through a second link stored in a writable directory to a valid final target.
@@ -445,7 +445,7 @@ Describe 'Internal Skill use approvals' {
             [IO.File]::SetUnixFileMode($hopDirectory, [IO.UnixFileMode]511)
             $fixture.tools[1].path = $linkPath
 
-            { Invoke-InternalUseFixture $fixture } | Should -Throw '*group-write or other-write*'
+            { Invoke-InternalUseFixture $fixture } | Should -Throw 'group-write or other-write'
         }
 
         # Scenario: The link metadata owner lookup reports an account other than root or the current user while the target remains trusted.
@@ -468,7 +468,7 @@ Describe 'Internal Skill use approvals' {
                 return [uint64]$script:InternalUseOwnerCurrentUid
             }
 
-            { Invoke-InternalUseFixture $fixture } | Should -Throw '*owned by root or the current user*'
+            { Invoke-InternalUseFixture $fixture } | Should -Throw 'owned by root or the current user'
         }
     }
 
