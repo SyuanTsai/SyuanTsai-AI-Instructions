@@ -9,6 +9,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Security.Cryptography;
 using System.Security.AccessControl;
+using System.Security.Principal;
 using Microsoft.Win32.SafeHandles;
 
 namespace SyuanTsai.AIInstructions.PlatformRuntime
@@ -108,6 +109,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private struct SecurityAttributes { public int Length; public IntPtr Descriptor; public int Inherit; }
         [StructLayout(LayoutKind.Sequential)]
         private struct GenericMapping { public uint Read, Write, Execute, All; }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TokenOwnerInformation { public IntPtr Owner; }
         [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out Information information);
@@ -131,12 +134,20 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint information, IntPtr descriptor);
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenProcessToken(IntPtr process, uint desiredAccess, out SafeAccessTokenHandle token);
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenThreadToken(IntPtr thread, uint desiredAccess, bool openAsSelf, out SafeAccessTokenHandle token);
+        [DllImport("advapi32.dll", SetLastError = true)] private static extern bool GetTokenInformation(SafeAccessTokenHandle token, int informationClass, IntPtr information, uint informationLength, out uint returnLength);
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool CreatePrivateObjectSecurityEx(IntPtr parentDescriptor, IntPtr creatorDescriptor, out IntPtr newDescriptor, IntPtr objectType, bool isContainerObject, uint autoInheritFlags, IntPtr token, ref GenericMapping genericMapping);
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool DestroyPrivateObjectSecurity(ref IntPtr descriptor);
         [DllImport("ntdll.dll")] private static extern int NtOpenFile(out SafeFileHandle handle, uint access, ref ObjectAttributes attributes, out IoStatusBlock status, uint share, uint options);
         [DllImport("ntdll.dll")] private static extern int NtSetInformationFile(SafeFileHandle handle, out IoStatusBlock status, IntPtr information, uint length, int informationClass);
         [DllImport("ntdll.dll")] private static extern uint RtlNtStatusToDosError(int status);
         private static void Check(bool result, string operation) { if (!result) throw new PlatformWin32Exception(operation, Marshal.GetLastWin32Error()); }
+        private static string ExtendedPath(string path)
+        {
+            string full = Path.GetFullPath(path);
+            if (full.StartsWith(@"\\?\", StringComparison.Ordinal)) return full;
+            if (full.StartsWith(@"\\", StringComparison.Ordinal)) return @"\\?\UNC\" + full.Substring(2);
+            return @"\\?\" + full;
+        }
         private static SafeAccessTokenHandle OpenEffectiveToken()
         {
             SafeAccessTokenHandle token;
@@ -149,7 +160,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         }
         private static SafeFileHandle Open(string path, uint access, uint share, uint disposition)
         {
-            SafeFileHandle handle = CreateFile(path, access, share, IntPtr.Zero, disposition, 0x02200000, IntPtr.Zero);
+            SafeFileHandle handle = CreateFile(ExtendedPath(path), access, share, IntPtr.Zero, disposition, 0x02200000, IntPtr.Zero);
             if (handle.IsInvalid)
             {
                 int error = Marshal.GetLastWin32Error(); handle.Dispose(); throw new PlatformWin32Exception("CreateFileW", error);
@@ -192,7 +203,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             try
             {
                 SecurityAttributes attributes = new SecurityAttributes { Length = Marshal.SizeOf(typeof(SecurityAttributes)), Descriptor = descriptor };
-                if (!CreateDirectory(path, ref attributes))
+                if (!CreateDirectory(ExtendedPath(path), ref attributes))
                 {
                     int error = Marshal.GetLastWin32Error();
                     if (createOnly || error != 183) throw new PlatformWin32Exception("CreateDirectoryW", error);
@@ -321,6 +332,52 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 if (!String.IsNullOrEmpty(readbackOverride)) sddl = readbackOverride;
                 return new WindowsPermissions { Sddl = sddl, ReadOnly = (observed.Mode & 1) != 0 };
             }
+        }
+        public static string GetOwnerSid(WindowsLease lease)
+        {
+            lock (lease.Sync)
+            {
+                AssertIdentity(lease, lease.Observation, lease.Observation.Kind == "file");
+                IntPtr owner, group, dacl, sacl, descriptor;
+                uint error = GetSecurityInfo(lease.Handle, 1, 1, out owner, out group, out dacl, out sacl, out descriptor);
+                if (error != 0) throw new PlatformWin32Exception("GetSecurityInfo(owner)", (int)error);
+                try
+                {
+                    if (owner == IntPtr.Zero) throw new IOException("The object has no owner SID.");
+                    return new SecurityIdentifier(owner).Value;
+                }
+                finally { LocalFree(descriptor); }
+            }
+        }
+        public static string GetCurrentProcessTokenOwnerSid()
+        {
+            SafeAccessTokenHandle token;
+            Check(OpenProcessToken(GetCurrentProcess(), 0x0008u, out token), "OpenProcessToken(TokenOwner)");
+            using (token)
+            {
+                uint length;
+                bool measured = GetTokenInformation(token, 4, IntPtr.Zero, 0, out length); // TokenOwner
+                int measurementError = Marshal.GetLastWin32Error();
+                if (measured || measurementError != 122 || length < (uint)IntPtr.Size)
+                    throw new PlatformWin32Exception("GetTokenInformation(TokenOwner size)", measurementError);
+                IntPtr buffer = Marshal.AllocHGlobal(checked((int)length));
+                try
+                {
+                    Check(GetTokenInformation(token, 4, buffer, length, out length), "GetTokenInformation(TokenOwner)");
+                    TokenOwnerInformation owner = (TokenOwnerInformation)Marshal.PtrToStructure(buffer, typeof(TokenOwnerInformation));
+                    if (owner.Owner == IntPtr.Zero) throw new IOException("The current process token has no TokenOwner SID.");
+                    return new SecurityIdentifier(owner.Owner).Value;
+                }
+                finally { Marshal.FreeHGlobal(buffer); }
+            }
+        }
+        public static bool IsAcceptedOwnerSid(string ownerSid, string currentUserSid, string tokenOwnerSid)
+        {
+            if (String.IsNullOrWhiteSpace(ownerSid)) throw new ArgumentException("An observed owner SID is required.", "ownerSid");
+            if (String.IsNullOrWhiteSpace(currentUserSid)) throw new ArgumentException("The current user SID is required.", "currentUserSid");
+            if (String.IsNullOrWhiteSpace(tokenOwnerSid)) throw new ArgumentException("The process TokenOwner SID is required.", "tokenOwnerSid");
+            SecurityIdentifier owner = new SecurityIdentifier(ownerSid);
+            return owner.Equals(new SecurityIdentifier(currentUserSid)) || owner.Equals(new SecurityIdentifier(tokenOwnerSid));
         }
         public static WindowsPermissions GetInheritedFilePermissions(WindowsLease parent)
         {
@@ -910,7 +967,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 // SetFileInformationByHandle does not consistently accept the native
                 // RootDirectory-relative form used by NtSetInformationFile.  Keep the
                 // source handle-bound and supply the destination as an NT DOS-device path.
-                byte[] name = System.Text.Encoding.Unicode.GetBytes(@"\??\" + destinationPath);
+                string extendedDestinationPath = ExtendedPath(destinationPath);
+                byte[] name = System.Text.Encoding.Unicode.GetBytes(@"\??\" + extendedDestinationPath.Substring(4));
                 int rootOffset = IntPtr.Size == 8 ? 8 : 4;
                 int lengthOffset = rootOffset + IntPtr.Size;
                 int nameOffset = lengthOffset + 4;

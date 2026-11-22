@@ -87,6 +87,13 @@ function Assert-WindowsPlatformFileIdentity {
 
 function Open-WindowsPlatformFile { param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)][string] $Access, [Parameter(Mandatory = $true)][string] $CreateMode) [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenFile($ParentLease,$Leaf,$Access,$CreateMode) }
 function Enter-WindowsPlatformLock { param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [ValidateSet('Shared','Exclusive')][string] $Mode, [TimeSpan] $Timeout) [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::EnterLock($ParentLease,$Leaf,$Mode,$Timeout) }
+function Confirm-WindowsPlatformDirectoryDurability {
+    param([Parameter(Mandatory = $true)] $DirectoryLease)
+    Invoke-WindowsPlatformDirectoryFlush $DirectoryLease 'setup-directory-durability' 'setup-directory' 'directory'
+    $observed=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::AssertIdentity($DirectoryLease,$DirectoryLease.Observation,$false)
+    [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetVerifiedPath($DirectoryLease)
+    return [pscustomobject][ordered]@{capability='directory-durability';durability='confirmed';identity=(Get-WindowsPlatformIdentity $observed);readback=$true}
+}
 function New-WindowsPlatformVerificationError {
     param([string]$Capability,[string]$Message)
     return [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]::new($Capability,'windows',$Message)

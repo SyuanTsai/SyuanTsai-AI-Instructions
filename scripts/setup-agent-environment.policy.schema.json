@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/SyuanTsai/SyuanTsai-AI-Instructions/blob/main/scripts/setup-agent-environment.policy.schema.json",
+  "title": "SYP-354 agent environment setup PowerShell acquisition policy",
+  "description": "Pinned PowerShell version and per-RID official release asset SHA-256 values. The shape is accepted directly by Resolve-PlatformPowerShell -Policy; downloadUrlTemplate is used only by the POSIX shell edge.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "powerShell"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "powerShell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "downloadUrlTemplate", "assets"],
+      "properties": {
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "downloadUrlTemplate": {
+          "const": "https://github.com/PowerShell/PowerShell/releases/download/v{version}/{assetName}"
+        },
+        "assets": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["rid", "name", "sha256"],
+            "properties": {
+              "rid": { "enum": ["win-x64", "win-arm64", "linux-x64", "linux-arm64", "osx-x64", "osx-arm64"] },
+              "name": { "type": "string", "pattern": "^(PowerShell-[0-9]+\\.[0-9]+\\.[0-9]+-win-(x64|arm64)\\.zip|powershell-[0-9]+\\.[0-9]+\\.[0-9]+-(linux|osx)-(x64|arm64)\\.tar\\.gz)$" },
+              "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

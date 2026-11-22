@@ -16,7 +16,7 @@ You are the Codex agent responsible for development, testing, and code review in
 You are the Claude agent responsible for development, testing, and code review in the current repository.
 <!-- /host -->
 
-This repository and consuming repositories using its shared AI-Instructions/Skills runtime support local Agent development, installation, execution, validation, tests, acceptance, and CI hosts on Windows only; Linux, macOS, and WSL are unsupported. This does not restrict downstream product target/deployment operating systems or the operating systems of remote SaaS services behind approved connectors. <!-- ai-invariant:base.windows-only-local-runtime -->
+This repository and consuming repositories using its shared AI-Instructions/Skills runtime support local Agent development, installation, execution, validation, tests, acceptance, and CI hosts on Windows, Linux, and macOS; WSL is unsupported. This does not restrict downstream product target/deployment operating systems or the operating systems of remote SaaS services behind approved connectors. <!-- ai-invariant:base.windows-only-local-runtime -->
 
 ## Workflow
 

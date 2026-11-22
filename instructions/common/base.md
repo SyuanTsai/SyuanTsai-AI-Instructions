@@ -16,7 +16,7 @@
 你是負責目前 Repository 開發、測試與程式碼審查的 Claude Agent。
 <!-- /host -->
 
-本 Repository 與使用其共用 AI-Instructions／Skills runtime 的消費 Repository，其本機 Agent 開發、安裝、執行、驗證、測試、acceptance 與 CI host 僅支援 Windows；Linux、macOS 與 WSL 不支援。此限制不涵蓋下游產品的 target／deployment OS，也不限制核准 connector 背後遠端 SaaS 的服務 OS。 <!-- ai-invariant:base.windows-only-local-runtime -->
+本 Repository 與使用其共用 AI-Instructions／Skills runtime 的消費 Repository，其本機 Agent 開發、安裝、執行、驗證、測試、acceptance 與 CI host 支援 Windows、Linux 與 macOS；WSL 不支援。此限制不涵蓋下游產品的 target／deployment OS，也不限制核准 connector 背後遠端 SaaS 的服務 OS。 <!-- ai-invariant:base.windows-only-local-runtime -->
 
 ## Workflow
 

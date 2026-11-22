@@ -1665,6 +1665,36 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             throw Errno(operation, error);
         }
 
+        public static FileObservation FlushFile(UnixLease lease)
+        {
+            if (lease == null) throw new ArgumentNullException("lease");
+            lock (lease.Sync)
+            {
+                lease.Check();
+                FileObservation observed = AssertIdentity(lease, lease.Observation, true);
+                if (observed.Kind != "file") throw new ArgumentException("A regular-file lease is required.");
+                RunMutationTestHook("setup-file-before-fsync");
+                Sync(lease.Fd, false, "fsync-setup-file");
+                GetVerifiedPath(lease);
+                return AssertIdentity(lease, lease.Observation, true);
+            }
+        }
+
+        public static FileObservation FlushDirectoryAndVerify(UnixLease lease)
+        {
+            if (lease == null) throw new ArgumentNullException("lease");
+            lock (lease.Sync)
+            {
+                lease.Check();
+                FileObservation observed = AssertIdentity(lease, lease.Observation, false);
+                if (observed.Kind != "directory") throw new ArgumentException("A directory lease is required.");
+                RunMutationTestHook("setup-directory-before-fsync");
+                Sync(lease.Fd, true, "fsync-setup-directory");
+                GetVerifiedPath(lease);
+                return AssertIdentity(lease, lease.Observation, false);
+            }
+        }
+
         private static bool HasLinuxXattr(SafeFd fd, string name)
         {
             long result = Linux.fgetxattr(fd, name, IntPtr.Zero, UIntPtr.Zero).ToInt64();
@@ -1855,6 +1885,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         }
 
         private static uint EffectiveUid() { return Mac ? Darwin.geteuid() : Linux.geteuid(); }
+        public static uint GetEffectiveUserId() { ValidateAbi(); return EffectiveUid(); }
 
         private static void ChangeOwnership(SafeFd fd, uint uid, uint gid, string operation)
         {

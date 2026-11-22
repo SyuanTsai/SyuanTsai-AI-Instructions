@@ -207,6 +207,8 @@ Rollback 不是把版本數字減一：新 state 已發布時，舊 launcher 應
 
 雲端 setup 是否支援 persistence、rootless namespaces、安裝系統依賴、固定工作目錄、網路階段及 Claude 的實際 Skill discovery 都是未驗證項目。驗收應使用 disposable cloud fixture，不把工作環境 secrets、site 或帳號映射寫入 repository。依 Standard §15.1，未來連外 Skill 仍須先確定環境及 site；setup 本身不推論或寫入這些設定。D4 只提供 shell persistence 的手動指引，不自動修改 profile 或實作 Atlassian 設定。
 
+**P10 補記（K2，pinned 偏離）：** 上述第 2 點與 §3.2 的「取得最新穩定版並在一次 run 內 freeze」，在 P10 改為 pinned version 加上各 RID 的 SHA-256：取得規格寫在 policy 檔 `scripts/setup-agent-environment.policy.json`（schema 為 `scripts/setup-agent-environment.policy.schema.json`，shell 讀的是由它衍生的 `scripts/setup-agent-environment.policy.tsv`），目前 pin PowerShell 7.6.6，hash 與 `standards-conformance.yml` 同步。升版走一般 PR，setup 執行時不解析 latest-stable。理由是 shell edge 沒有可信管道驗證 latest-stable 的 hash；policy 與 setup 一起由 `--expected-commit` 綁定的 immutable revision 分發。
+
 ## 8. 實作拆解
 
 C1–C4 是本設計對所需實作能力的估計，**不是 Standard conformance 等級**：C1 為機械式文件/接線；C2 為單模組契約與測試；C3 為跨模組／平台整合；C4 為 native ABI、安全競態、程序監督或 transaction recovery。不是工時或指定模型。

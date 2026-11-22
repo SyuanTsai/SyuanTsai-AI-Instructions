@@ -105,6 +105,87 @@ Describe 'SYP353 preparation process and private-root delegation' {
     }
 }
 
+Describe 'Platform setup directory durability close' {
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+        function Set-SetupDirectoryDurabilityFailure([bool]$Enabled) {
+            if($IsWindows){
+                $runtimeModule=@(Get-Module platform-runtime)[0]
+                & $runtimeModule {
+                    param($Enable)
+                    $windowsModule=@(Get-Module -All Windows)[0]
+                    $hook=if($Enable){{param($point,$operation,$role,$lease)if($point -ceq 'setup-directory'){throw 'injected setup directory flush failure'}}}else{$null}
+                    & $windowsModule {param($Value)$script:WindowsPublicationDurabilityTestHook=$Value} $hook
+                } $Enabled
+                return
+            }
+            $field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+            $value=if($Enabled){[Action[string]]{param($point)if($point -ceq 'setup-directory-before-fsync'){throw 'injected setup directory fsync failure'}}}else{$null}
+            $field.SetValue($null,$value)
+        }
+    }
+    AfterAll { Set-SetupDirectoryDurabilityFailure $false }
+
+    # Scenario: A physical private directory lease is flushed and identity/path-read back on the native host.
+    # Purpose: Expose the additive D15 primitive used to close setup marker dependencies without changing existing mutation primitives.
+    It 'InterT10_confirms_directory_flush_and_readback' {
+        $root=Join-Path $TestDrive 'setup-directory-durability-success'
+        [void][IO.Directory]::CreateDirectory($root)
+        $lease=Open-PlatformDirectory -Root $root -RootOnly
+        try{
+            $receipt=Confirm-PlatformDirectoryDurability -DirectoryLease $lease
+            $receipt.capability | Should BeExactly 'directory-durability'
+            $receipt.durability | Should BeExactly 'confirmed'
+            $receipt.readback | Should Be $true
+            $receipt.identity | Should Not BeNullOrEmpty
+        }finally{$lease.Dispose()}
+    }
+
+    # Scenario: The native directory flush primitive is forced to fail before durability can be confirmed.
+    # Purpose: A caller must not publish its receipt, pointer, or journal marker after an unconfirmed parent flush.
+    It 'InterT20_propagates_injected_directory_flush_failure_before_marker_publication' {
+        $root=Join-Path $TestDrive 'setup-directory-durability-failure'
+        [void][IO.Directory]::CreateDirectory($root)
+        $lease=Open-PlatformDirectory -Root $root -RootOnly
+        Set-SetupDirectoryDurabilityFailure $true
+        try { { Confirm-PlatformDirectoryDurability -DirectoryLease $lease } | Should Throw }
+        finally { Set-SetupDirectoryDurabilityFailure $false; $lease.Dispose() }
+        Test-Path -LiteralPath $root -PathType Container | Should Be $true
+    }
+}
+
+if ($IsWindows) {
+Describe 'Windows process token owner acceptance' {
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+    }
+
+    # Scenario: An elevated process creates an object whose owner is the process token's BUILTIN\Administrators TokenOwner.
+    # Purpose: Accept the Windows default owner used by elevated tokens without requiring a real elevated test process.
+    It 'UnitT10_accepts_the_injected_process_token_owner' {
+        $userSid = 'S-1-5-21-1000-1000-1000-1001'
+        $administratorsSid = 'S-1-5-32-544'
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::IsAcceptedOwnerSid($administratorsSid,$userSid,$administratorsSid) | Should Be $true
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::IsAcceptedOwnerSid($userSid,$userSid,$administratorsSid) | Should Be $true
+    }
+
+    # Scenario: A non-elevated token has the user SID as TokenOwner while an object is owned by Administrators or another SID.
+    # Purpose: Keep the accepted owner set limited to the actual TokenOwner and user SID instead of broadly trusting Administrators.
+    It 'UnitT20_rejects_administrators_and_unrelated_owners_when_the_token_owner_is_the_user' {
+        $userSid = 'S-1-5-21-1000-1000-1000-1001'
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::IsAcceptedOwnerSid('S-1-5-32-544',$userSid,$userSid) | Should Be $false
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::IsAcceptedOwnerSid('S-1-5-18',$userSid,$userSid) | Should Be $false
+    }
+
+    # Scenario: Production queries the current process token owner on the native Windows host.
+    # Purpose: Prove the injected decision helper is backed by a real TokenOwner primitive in the production path.
+    It 'UnitT30_reads_the_current_process_token_owner_sid' {
+        $tokenOwnerSid = [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetCurrentProcessTokenOwnerSid()
+        $tokenOwnerSid | Should Match '^S-1-\d+(?:-\d+)+$'
+    }
+}
+}
+
 Describe 'Platform stdin transport primitives' {
     BeforeAll {
         Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
@@ -5581,10 +5662,73 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $value=if($null -eq $Hook){$null}else{[Action[string]]{param($Point)& $Hook $Point}.GetNewClosure()}
             $field.SetValue($null,$value)
         }
+        function Invoke-P7WindowsExtendedPath([string]$Path) {
+            $method=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative].GetMethod('ExtendedPath',[Reflection.BindingFlags]'Static,NonPublic')
+            if($null -eq $method){throw 'The internal Windows extended-path helper is unavailable.'}
+            return [string]$method.Invoke($null,@($Path))
+        }
     }
 
     # Register only on the native host; keep this file's Core CI skip count at zero.
     if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    # Scenario: A UNC path is converted to the extended UNC namespace before a pathname-based Win32 call.
+    # Purpose: Preserve the server/share meaning instead of producing an invalid extended local path.
+    It 'UnitT90_converts_UNC_paths_to_the_extended_UNC_namespace' {
+        (Invoke-P7WindowsExtendedPath '\\server\share\a')|Should Be '\\?\UNC\server\share\a'
+    }
+
+    # Scenario: A caller supplies a path that already uses the extended-length namespace.
+    # Purpose: Keep canonical extended paths stable and avoid adding a second prefix.
+    It 'UnitT92_preserves_already_extended_paths' {
+        (Invoke-P7WindowsExtendedPath '\\?\C:\x')|Should Be '\\?\C:\x'
+    }
+
+    # Scenario: A caller supplies an ordinary absolute drive path.
+    # Purpose: Route full local paths through the extended-length namespace used by Win32 path APIs.
+    It 'UnitT94_prefixes_plain_absolute_drive_paths' {
+        (Invoke-P7WindowsExtendedPath 'C:\x')|Should Be '\\?\C:\x'
+    }
+
+    # Scenario: A caller supplies a relative path to the native helper.
+    # Purpose: Resolve relative input with GetFullPath before applying the extended-length prefix.
+    It 'UnitT96_resolves_relative_paths_before_prefixing' {
+        $relative='extended-path-relative-fixture'
+        (Invoke-P7WindowsExtendedPath $relative)|Should Be ('\\?\'+[IO.Path]::GetFullPath($relative))
+    }
+
+    # Scenario: A directory is renamed to a destination pathname longer than 300 characters, then its complete state is read back.
+    # Purpose: Keep owned-directory publication and TryGetDirectoryState readback working beyond MAX_PATH without weakening identity checks.
+    It 'InterT98_moves_and_reads_back_an_owned_directory_beyond_MAX_PATH' {
+        $fixtureBase=Join-Path ([IO.Path]::GetTempPath()) 'syp518-fix15'
+        $root=Join-Path $fixtureBase ([Guid]::NewGuid().ToString('N'))
+        $parent=$null;$transactionRoot=$null;$transaction=$null
+        try{
+            [void][IO.Directory]::CreateDirectory($root)
+            $parent=Open-PlatformDirectory -Root $root -RelativePath 'target' -CreatePrivate
+            $transactionRoot=Open-PlatformDirectory -Root $root -RelativePath '.ai-instructions-txn' -CreatePrivate
+            $transactionId=[Guid]::NewGuid().ToString('N')
+            $transaction=Open-PlatformDirectory -Root (Join-Path $root '.ai-instructions-txn') -RelativePath $transactionId -CreatePrivate
+            $stagePath=Join-Path $root ".ai-instructions-txn/$transactionId/stage"
+            [void][IO.Directory]::CreateDirectory($stagePath)
+            [IO.File]::WriteAllText((Join-Path $stagePath 'marker.txt'),'long-path-content',[Text.UTF8Encoding]::new($false))
+            $stageState=Get-PlatformDirectoryState -ParentLease $transaction -Leaf 'stage'
+            $destinationLeaf='runtime-'+('x'*230)
+            $destinationPath=Join-Path $root "target/$destinationLeaf"
+            $destinationPath.Length|Should BeGreaterThan 300
+
+            $receipt=Move-PlatformOwnedDirectory -ParentLease $parent -Leaf 'stage' -TransactionLease $transaction -DestinationLeaf $destinationLeaf -ExpectedIdentity $stageState.identity -Direction FromTransaction -ExpectedState $stageState
+            $receipt.identity.fileId|Should Be $stageState.identity.fileId
+            $readback=Get-PlatformDirectoryState -ParentLease $parent -Leaf $destinationLeaf
+            $readback.exists|Should Be $true
+            $readback.identity.fileId|Should Be $stageState.identity.fileId
+            $readback.inventorySha256|Should Be $stageState.inventorySha256
+            $readback.entryCount|Should Be $stageState.entryCount
+        }finally{
+            foreach($lease in @($transaction,$transactionRoot,$parent)){if($null-ne$lease){try{$lease.Dispose()}catch{}}}
+            if([IO.Directory]::Exists($root)){[IO.Directory]::Delete($root,$true)}
+        }
+    }
+
     # Scenario: A read-only target with an explicit DACL is replaced through two no-replace renames.
     # Purpose: Preserve DACL/read-only and move the original file to backup without changing identity.
     It 'InterT100_publishes_over_an_existing_target_and_preserves_permissions_and_identity' {
@@ -8810,4 +8954,417 @@ Describe 'Platform owned process probe failure cleanup' {
     # Purpose: An available path probe must not claim lease binding capability.
     It 'UnitT60_does_not_claim_unmeasured_executable_lease_binding' { Invoke-P3ProbeFailureFixture success }
 
+}
+
+Describe 'Platform K15 PowerShell runtime receipt reverification' {
+    $k15IsWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
+    $k15IsUnix =
+        [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Linux) -or
+        [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)
+    # The fixture archive is built from this host's own PSHOME; policy versions
+    # accept only x.y.z, so a prerelease host has no truthful fixture identity.
+    $k15ReleaseHost = $PSVersionTable.PSVersion.ToString() -cmatch '^[0-9]+\.[0-9]+\.[0-9]+$'
+
+    BeforeAll {
+        $script:K15RepositoryRoot = Split-Path -Parent $PSScriptRoot
+        $script:K15Manifest = Join-Path $script:K15RepositoryRoot 'scripts/platform-runtime.psd1'
+        Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+        if(-not $IsWindows){Add-Type -AssemblyName System.Formats.Tar -ErrorAction Stop}
+        Import-Module $script:K15Manifest -Force
+        $script:K15Preparation = @(Get-Module -All RuntimePreparation | Where-Object { $_.Path -ceq (Join-Path $script:K15RepositoryRoot 'scripts/platform/RuntimePreparation.psm1') })[-1]
+        if ($null -eq $script:K15Preparation) { throw 'K15 could not locate the imported RuntimePreparation module.' }
+        $script:K15Platform = if ($IsWindows) { 'windows' } elseif ($IsLinux) { 'linux' } elseif ($IsMacOS) { 'macos' } else { throw 'Unsupported test platform.' }
+        $script:K15Architecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant()
+        $script:K15Version = $PSVersionTable.PSVersion.ToString()
+        $script:K15Root = [IO.Path]::GetFullPath($TestDrive)
+        if (-not $IsWindows) {
+            # Resolve only the trusted fixture anchor (macOS /var), as in P2/P4.
+            $physical = '/'
+            foreach ($part in $script:K15Root.Trim('/').Split('/')) {
+                $item = [IO.DirectoryInfo]::new((Join-Path $physical $part))
+                $target = $item.ResolveLinkTarget($true)
+                $physical = if ($null -eq $target) { $item.FullName } else { $target.FullName }
+            }
+            $script:K15Root = $physical
+        }
+        $script:K15Resolved = $null
+
+        function New-K15RuntimeArchive {
+            param([string]$Directory)
+            # Fixture archive: this host's PSHOME bytes in the native official
+            # format. Links are read through; the archive itself has none.
+            $token = if ($IsWindows) { "win-$script:K15Architecture" } elseif ($IsLinux) { "linux-$script:K15Architecture" } else { "osx-$script:K15Architecture" }
+            $name = if ($IsWindows) { "PowerShell-$script:K15Version-$token.zip" } else { "powershell-$script:K15Version-$token.tar.gz" }
+            [void][IO.Directory]::CreateDirectory($Directory)
+            $path = Join-Path $Directory $name
+            $source = [IO.Path]::GetFullPath($PSHOME).TrimEnd([IO.Path]::DirectorySeparatorChar)
+            $directories = @(@(Get-ChildItem -LiteralPath $source -Directory -Recurse -Force | ForEach-Object { $_.FullName.Substring($source.Length+1).Replace('\','/') }) + @('k15-empty') | Sort-Object -Unique)
+            $files = @(Get-ChildItem -LiteralPath $source -File -Recurse -Force | ForEach-Object { $_.FullName.Substring($source.Length+1).Replace('\','/') } | Sort-Object)
+            if ($IsWindows) {
+                $archive = [IO.Compression.ZipFile]::Open($path,[IO.Compression.ZipArchiveMode]::Create)
+                try {
+                    foreach ($relative in $directories) { [void]$archive.CreateEntry($relative+'/') }
+                    foreach ($relative in $files) {
+                        $entry = $archive.CreateEntry($relative,[IO.Compression.CompressionLevel]::NoCompression)
+                        $stream = $entry.Open()
+                        try { $bytes = [IO.File]::ReadAllBytes((Join-Path $source $relative)); $stream.Write($bytes,0,$bytes.Length) } finally { $stream.Dispose() }
+                    }
+                } finally { $archive.Dispose() }
+            } else {
+                $file = [IO.File]::Create($path); $gzip = [IO.Compression.GZipStream]::new($file,[IO.Compression.CompressionLevel]::Fastest,$false); $writer = [System.Formats.Tar.TarWriter]::new($gzip,$false)
+                try {
+                    foreach ($relative in $directories) { $writer.WriteEntry([System.Formats.Tar.PaxTarEntry]::new([System.Formats.Tar.TarEntryType]::Directory,$relative)) }
+                    foreach ($relative in $files) {
+                        $entry = [System.Formats.Tar.PaxTarEntry]::new([System.Formats.Tar.TarEntryType]::RegularFile,$relative)
+                        $entry.DataStream = [IO.MemoryStream]::new([IO.File]::ReadAllBytes((Join-Path $source $relative)))
+                        $writer.WriteEntry($entry)
+                    }
+                } finally { $writer.Dispose(); $gzip.Dispose(); $file.Dispose() }
+            }
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            return [pscustomobject]@{ Path=$path; Name=$name; Sha256=$hash }
+        }
+
+        function New-K15Policy {
+            param($Archive,[string]$Version=$script:K15Version)
+            return @{ powerShell=@{ version=$Version; assets=@(@{ name=$Archive.Name; sha256=$Archive.Sha256 }) } }
+        }
+
+        function Get-K15ResolvedRuntime {
+            # One fixture extraction serves every case; each mutation restores the
+            # canonical runtime and re-proves the baseline before returning.
+            if ($null -ne $script:K15Resolved) { return $script:K15Resolved }
+            $archive = New-K15RuntimeArchive (Join-Path $script:K15Root 'k15-cache')
+            $policy = New-K15Policy $archive
+            $lease = Open-PlatformDirectory -Root $script:K15Root -RelativePath 'k15-runtime' -CreatePrivate
+            try { $receipt = Resolve-PlatformPowerShell -Policy $policy -DestinationLease $lease -OfflineCache $archive.Path }
+            finally { $lease.Dispose() }
+            $script:K15Resolved = [pscustomobject]@{ Archive=$archive; Policy=$policy; Receipt=$receipt; Root=[IO.Path]::GetDirectoryName($receipt.executablePath) }
+            return $script:K15Resolved
+        }
+
+        function Copy-K15Receipt {
+            param($Receipt)
+            return ($Receipt | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+        }
+
+        function Assert-K15TypedRefusal {
+            param([scriptblock]$Action,[string]$Pattern)
+            $caught = $null
+            try { & $Action | Out-Null } catch { $caught = $_ }
+            $caught | Should Not BeNullOrEmpty
+            $caught.Exception.GetType().Name | Should Be 'PlatformVerificationException'
+            $caught.Exception.Capability | Should Be 'powershell-runtime'
+            if ($Pattern) { $caught.Exception.Message | Should Match $Pattern }
+        }
+
+        function Get-K15DiskState {
+            param([string]$Root)
+            # Directory timestamps are excluded: NTFS may flush a parent's time
+            # lazily after the fixture archive was closed. Entries and file
+            # bytes/timestamps are what an extraction or write would change.
+            return (@(Get-ChildItem -LiteralPath $Root -Recurse -Force | Sort-Object FullName | ForEach-Object {
+                if ($_.PSIsContainer) { "$($_.FullName.Substring($Root.Length))|directory" }
+                else { "$($_.FullName.Substring($Root.Length))|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" }
+            }) -join "`n")
+        }
+
+        function Assert-K15Baseline {
+            $runtime = Get-K15ResolvedRuntime
+            $verified = Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt
+            [object]::ReferenceEquals($verified,$runtime.Receipt) | Should Be $true
+        }
+    }
+
+    AfterAll {
+        Remove-Module platform-runtime -Force -ErrorAction SilentlyContinue
+    }
+
+    # Scenario: The manifest, imported module, and runtime-contract allowlist all name the K15 API.
+    # Purpose: Keep FunctionsToExport, the callable surface, and the bundle validator allowlist synchronized.
+    It 'UnitT706_exports_the_runtime_reverification_api_exactly_once' {
+        $manifest = Import-PowerShellDataFile -LiteralPath $script:K15Manifest
+        $module = @(Get-Module platform-runtime)[0]
+        @($manifest.FunctionsToExport | Where-Object { [string]$_ -ceq 'Assert-PlatformPowerShellRuntime' }).Count | Should Be 1
+        @($module.ExportedCommands.Keys | Where-Object { [string]$_ -ceq 'Assert-PlatformPowerShellRuntime' }).Count | Should Be 1
+        $command = Get-Command Assert-PlatformPowerShellRuntime -Module platform-runtime
+        foreach ($parameter in @('Policy','Receipt')) {
+            $command.Parameters[$parameter].Attributes.Where({ $_ -is [Parameter] })[0].Mandatory | Should Be $true
+        }
+        $contract = Import-Module (Join-Path $script:K15RepositoryRoot 'scripts/ai-instructions-runtime-contract.psm1') -PassThru -Force -Scope Local
+        try { (@(& $contract { $script:ExpectedPlatformRuntimeFunctionsToExport }) -join ',') | Should Be (@($manifest.FunctionsToExport) -join ',') }
+        finally { Remove-Module $contract -Force }
+    }
+
+    if ($k15ReleaseHost) {
+    # Scenario: A native fixture archive is resolved, then its receipt is reverified in memory and after a JSON round trip.
+    # Purpose: Prove Assert accepts an untouched Resolve receipt, returns it unchanged, and neither expands nor writes.
+    # Not registered on a prerelease host, whose version cannot be bound by an x.y.z policy.
+    It 'InterT861_reverifies_a_resolved_native_fixture_runtime_without_writing' {
+        $runtime = Get-K15ResolvedRuntime
+        $before = Get-K15DiskState $script:K15Root
+        Assert-K15Baseline
+        $roundTrip = Copy-K15Receipt $runtime.Receipt
+        $verified = Assert-PlatformPowerShellRuntime -Policy ($runtime.Policy | ConvertTo-Json -Depth 8 | ConvertFrom-Json) -Receipt $roundTrip
+        [object]::ReferenceEquals($verified,$roundTrip) | Should Be $true
+        $verified.executablePath | Should Be $runtime.Receipt.executablePath
+        $verified.runtimeClosure.sha256 | Should Be $runtime.Receipt.runtimeClosure.sha256
+        Get-K15DiskState $script:K15Root | Should Be $before
+    }
+
+    # Scenario: One closure member's bytes change after the receipt was issued.
+    # Purpose: Reject per-file SHA-256 drift with a typed failure, then accept the restored runtime.
+    # Not registered on a prerelease host, whose version cannot be bound by an x.y.z policy.
+    It 'InterT862_rejects_a_changed_closure_file_with_a_typed_failure' {
+        $runtime = Get-K15ResolvedRuntime
+        $target = Join-Path $runtime.Root 'System.Management.Automation.dll'
+        $original = [IO.File]::ReadAllBytes($target)
+        try {
+            [IO.File]::WriteAllBytes($target,[byte[]]($original + [byte]0))
+            Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } 'closure'
+        } finally { [IO.File]::WriteAllBytes($target,$original) }
+        Assert-K15Baseline
+    }
+
+    # Scenario: A file is added to the runtime directory, at the root and in a nested directory.
+    # Purpose: Reject members absent from the receipt with a typed failure.
+    # Not registered on a prerelease host, whose version cannot be bound by an x.y.z policy.
+    It 'InterT863_rejects_an_extra_closure_file_with_a_typed_failure' {
+        $runtime = Get-K15ResolvedRuntime
+        foreach ($relative in @('k15-extra.dll',(Join-Path 'Modules' 'k15-extra.psm1'))) {
+            $extra = Join-Path $runtime.Root $relative
+            try {
+                [IO.File]::WriteAllText($extra,'unapproved')
+                Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } 'closure'
+            } finally { [IO.File]::Delete($extra) }
+        }
+        Assert-K15Baseline
+    }
+
+    # Scenario: An empty directory is added after Resolve issued the runtime receipt.
+    # Purpose: G8 binds directory type and inventory on the K15 verification path, including otherwise invisible empty directories.
+    It 'InterT863a_rejects_an_extra_empty_runtime_directory' {
+        $runtime = Get-K15ResolvedRuntime
+        $extra = Join-Path $runtime.Root 'k15-extra-empty'
+        [void][IO.Directory]::CreateDirectory($extra)
+        try { Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } 'directory|closure' }
+        finally { [IO.Directory]::Delete($extra) }
+        Assert-K15Baseline
+    }
+
+    # Scenario: A receipt-bound empty directory is removed, then replaced by a regular file at the same path.
+    # Purpose: G8 rejects both missing directories and file/directory type swaps without changing legacy closure semantics.
+    It 'InterT863b_rejects_missing_and_type_swapped_empty_runtime_directories' {
+        $runtime = Get-K15ResolvedRuntime
+        $empty = Join-Path $runtime.Root 'k15-empty'
+        [IO.Directory]::Delete($empty)
+        try {
+            Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } 'directory|closure'
+            [IO.File]::WriteAllText($empty,'type-swap')
+            try { Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } 'directory|closure' }
+            finally { [IO.File]::Delete($empty) }
+        } finally {
+            [void][IO.Directory]::CreateDirectory($empty)
+            if (-not $IsWindows) { [IO.File]::SetUnixFileMode($empty,[IO.UnixFileMode]448) }
+        }
+        Assert-K15Baseline
+    }
+
+    # Scenario: A closure member disappears after the receipt was issued.
+    # Purpose: Reject a missing member with a typed failure, then accept the restored runtime.
+    # Not registered on a prerelease host, whose version cannot be bound by an x.y.z policy.
+    It 'InterT864_rejects_a_missing_closure_file_with_a_typed_failure' {
+        $runtime = Get-K15ResolvedRuntime
+        $target = Join-Path $runtime.Root 'System.Management.Automation.dll'
+        $aside = Join-Path $script:K15Root 'k15-missing-aside.dll'
+        [IO.File]::Move($target,$aside)
+        try { Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } }
+        finally { [IO.File]::Move($aside,$target) }
+        Assert-K15Baseline
+    }
+
+    # Scenario: The policy pins another version, or the receipt claims another version, asset, or archive hash.
+    # Purpose: Bind the receipt to the exact policy version and official asset with a typed failure.
+    # Not registered on a prerelease host, whose version cannot be bound by an x.y.z policy.
+    It 'UnitT707_rejects_a_version_or_asset_mismatch_with_a_typed_failure' {
+        $runtime = Get-K15ResolvedRuntime
+        $parts = $script:K15Version.Split('.')
+        $otherVersion = "$($parts[0]).$($parts[1]).$([int]$parts[2]+1)"
+        $otherName = $runtime.Archive.Name.Replace($script:K15Version,$otherVersion)
+        $otherPolicy = @{ powerShell=@{ version=$otherVersion; assets=@(@{ name=$otherName; sha256=$runtime.Archive.Sha256 }) } }
+        Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $otherPolicy -Receipt $runtime.Receipt } 'version or asset'
+        foreach ($mutation in @(
+            @{ Name='version'; Value=$otherVersion },
+            @{ Name='assetName'; Value=$otherName },
+            @{ Name='archiveSha256'; Value=('0'*64) })) {
+            $receipt = Copy-K15Receipt $runtime.Receipt
+            $receipt.($mutation.Name) = $mutation.Value
+            Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $receipt } 'version or asset'
+        }
+    }
+
+    # Scenario: The receipt names another OS or architecture than the current host RID.
+    # Purpose: Refuse a relabeled receipt before any disk or process work, with a typed failure.
+    # Not registered on a prerelease host, whose version cannot be bound by an x.y.z policy.
+    It 'UnitT708_rejects_a_rid_mismatch_with_a_typed_failure' {
+        $runtime = Get-K15ResolvedRuntime
+        $otherOs = if ($script:K15Platform -ceq 'windows') { 'linux' } else { 'windows' }
+        $otherArchitecture = if ($script:K15Architecture -ceq 'x64') { 'arm64' } else { 'x64' }
+        foreach ($mutation in @(@{ Name='os'; Value=$otherOs },@{ Name='architecture'; Value=$otherArchitecture })) {
+            $receipt = Copy-K15Receipt $runtime.Receipt
+            $receipt.($mutation.Name) = $mutation.Value
+            Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $receipt } 'RID'
+        }
+    }
+
+    # Scenario: Each required receipt field is absent, or the closure/executable binding is incomplete or inconsistent.
+    # Purpose: Refuse partial or self-inconsistent receipts with a typed failure instead of trusting a default.
+    # Not registered on a prerelease host, whose version cannot be bound by an x.y.z policy.
+    It 'UnitT709_rejects_missing_or_inconsistent_receipt_fields_with_a_typed_failure' {
+        $runtime = Get-K15ResolvedRuntime
+        foreach ($name in @('apiVersion','version','assetName','archiveSha256','executablePath','executableSha256','runtimeClosure','os','architecture')) {
+            $receipt = Copy-K15Receipt $runtime.Receipt
+            $receipt.PSObject.Properties.Remove($name)
+            Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $receipt } "lacks '$name'"
+        }
+        $cases = @(
+            @{ Pattern='apiVersion'; Mutate={ param($r) $r.apiVersion='2.0' } },
+            @{ Pattern='closure is incomplete'; Mutate={ param($r) $r.runtimeClosure.PSObject.Properties.Remove('files') } },
+            @{ Pattern='closure is incomplete'; Mutate={ param($r) $r.runtimeClosure.PSObject.Properties.Remove('sha256') } },
+            @{ Pattern='directory inventory'; Mutate={ param($r) $r.runtimeClosure.PSObject.Properties.Remove('directories') } },
+            @{ Pattern='incomplete member'; Mutate={ param($r) $r.runtimeClosure.files[0].PSObject.Properties.Remove('sha256') } },
+            @{ Pattern='digest is inconsistent'; Mutate={ param($r) $r.runtimeClosure.files=@($r.runtimeClosure.files | Select-Object -Skip 1) } },
+            @{ Pattern='executable hash'; Mutate={ param($r) $r.executableSha256=('0'*64) } },
+            @{ Pattern='canonical pwsh'; Mutate={ param($r) $r.executablePath=Join-Path $r.runtimeClosure.rootPath 'System.Management.Automation.dll' } },
+            @{ Pattern='not canonical'; Mutate={ param($r) $r.executablePath=[IO.Path]::Combine($r.runtimeClosure.rootPath,'.',[IO.Path]::GetFileName($r.executablePath)) } }
+        )
+        foreach ($case in $cases) {
+            $receipt = Copy-K15Receipt $runtime.Receipt
+            & $case.Mutate $receipt
+            Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $receipt } $case.Pattern
+        }
+        Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt @{} } "lacks 'apiVersion'"
+    }
+
+    # Scenario: executablePath is redirected to a second physical copy of the same-version pwsh while runtimeClosure still names the original runtime root.
+    # Purpose: J3 binds the executable to runtimeClosure.rootPath before the identity probe can launch any closure-external process.
+    It 'InterT870_rejects_a_same_version_pwsh_outside_the_runtime_closure_before_launch' {
+        $runtime = Get-K15ResolvedRuntime
+        $externalRoot = Join-Path $script:K15Root 'k15-external-runtime'
+        [void][IO.Directory]::CreateDirectory($externalRoot)
+        $external = Join-Path $externalRoot $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+        Copy-Item -LiteralPath $runtime.Receipt.executablePath -Destination $external
+        if (-not $IsWindows) { [IO.File]::SetUnixFileMode($external,[IO.UnixFileMode]448) }
+        $receipt = Copy-K15Receipt $runtime.Receipt
+        $receipt.executablePath = [IO.Path]::GetFullPath($external)
+        $originalProbe = & $script:K15Preparation { (Get-Command Test-PlatformPowerShellIdentity -CommandType Function).ScriptBlock }
+        & $script:K15Preparation {
+            $script:K15ExternalProbeReached = $false
+            Set-Item Function:script:Test-PlatformPowerShellIdentity -Value {
+                $script:K15ExternalProbeReached = $true
+                throw 'J3 identity probe must not be reached.'
+            }
+        }
+        try {
+            Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $receipt } 'closure root|executable path'
+            (& $script:K15Preparation { $script:K15ExternalProbeReached }) | Should Be $false
+        } finally {
+            & $script:K15Preparation {
+                param($Probe)
+                Set-Item Function:script:Test-PlatformPowerShellIdentity -Value $Probe
+                Remove-Variable K15ExternalProbeReached -Scope Script -ErrorAction SilentlyContinue
+            } $originalProbe
+        }
+        Assert-K15Baseline
+    }
+
+    # Scenario: A closure member gains a hard-link alias outside the runtime directory.
+    # Purpose: Refuse a runtime whose bytes can be changed through another name, with a typed failure.
+    # Not registered on a prerelease host, whose version cannot be bound by an x.y.z policy.
+    It 'InterT865_rejects_a_hard_link_alias_of_a_closure_file_with_a_typed_failure' {
+        $runtime = Get-K15ResolvedRuntime
+        $target = Join-Path $runtime.Root 'System.Management.Automation.dll'
+        $alias = Join-Path $script:K15Root 'k15-hard-link-alias.dll'
+        New-Item -ItemType HardLink -Path $alias -Target $target -ErrorAction Stop | Out-Null
+        try { Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } }
+        finally { [IO.File]::Delete($alias) }
+        Assert-K15Baseline
+    }
+
+    # Scenario: The resolved runtime root keeps the same bytes and identity but its private directory permissions drift.
+    # Purpose: H5 makes K15 re-check A6 directory ownership/mode or the Windows private DACL before executing pwsh.
+    It 'InterT868_rejects_runtime_root_permission_drift_with_a_typed_failure' {
+        $runtime = Get-K15ResolvedRuntime
+        $lease = Open-PlatformDirectory -Root $runtime.Root -RootOnly
+        $snapshot = $null
+        try {
+            $snapshot = Get-PlatformPermissions -Lease $lease
+            $policy = if ($IsWindows) {
+                $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                @{ Sddl = "D:P(A;OICI;FA;;;$sid)(A;OICI;FA;;;WD)"; ReadOnly = $false }
+            } else { @{ Mode = 493 } }
+            [void](Set-PlatformPermissions -Lease $lease -Policy $policy)
+            Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } 'permission|owner|ACL|mode'
+        } finally {
+            if ($null -ne $snapshot) { [void](Set-PlatformPermissions -Lease $lease -Snapshot $snapshot) }
+            $lease.Dispose()
+        }
+        Assert-K15Baseline
+    }
+
+    # Scenario: A non-executable closure file keeps its approved bytes but becomes broadly writable.
+    # Purpose: H5 binds regular runtime files to A6 mode 0600 or the reviewed Windows private DACL.
+    It 'InterT869_rejects_runtime_file_permission_drift_with_a_typed_failure' {
+        $runtime = Get-K15ResolvedRuntime
+        $leaf = 'System.Management.Automation.dll'
+        $parent = Open-PlatformDirectory -Root $runtime.Root -RootOnly
+        $file = Open-PlatformFile -ParentLease $parent -Leaf $leaf -Access Read -CreateMode OpenExisting
+        $snapshot = $null
+        try {
+            $snapshot = Get-PlatformPermissions -Lease $file
+            $policy = if ($IsWindows) {
+                $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                @{ Sddl = "D:P(A;;FA;;;$sid)(A;;FA;;;WD)"; ReadOnly = $false }
+            } else { @{ Mode = 438 } }
+            [void](Set-PlatformPermissions -Lease $file -Policy $policy)
+            Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } 'permission|owner|ACL|mode'
+        } finally {
+            if ($null -ne $snapshot) { [void](Set-PlatformPermissions -Lease $file -Snapshot $snapshot) }
+            $file.Dispose(); $parent.Dispose()
+        }
+        Assert-K15Baseline
+    }
+    }
+
+    if ($k15ReleaseHost -and $k15IsUnix) {
+    # Scenario: A symbolic link is added inside the Unix runtime directory, as a file alias and as a directory alias.
+    # Purpose: Never follow links during reverification; refuse them with a typed failure.
+    # Register only on the native host; keep this file's Core CI skip count at zero.
+    It 'InterT866_rejects_unix_symlinks_inside_the_runtime_with_a_typed_failure' {
+        $runtime = Get-K15ResolvedRuntime
+        foreach ($pair in @(@('k15-file-link','System.Management.Automation.dll'),@('k15-directory-link','Modules'))) {
+            $link = Join-Path $runtime.Root $pair[0]
+            New-Item -ItemType SymbolicLink -Path $link -Target (Join-Path $runtime.Root $pair[1]) -ErrorAction Stop | Out-Null
+            try { Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } 'link' }
+            finally { [IO.File]::Delete($link) }
+        }
+        Assert-K15Baseline
+    }
+    }
+
+    if ($k15ReleaseHost -and $k15IsWindows) {
+    # Scenario: A directory junction is added inside the Windows runtime directory.
+    # Purpose: Never traverse reparse points during reverification; refuse them with a typed failure.
+    # Register only on the native host; keep this file's Core CI skip count at zero.
+    It 'InterT867_rejects_a_windows_junction_inside_the_runtime_with_a_typed_failure' {
+        $runtime = Get-K15ResolvedRuntime
+        $outside = Join-Path $script:K15Root 'k15-junction-target'
+        [void][IO.Directory]::CreateDirectory($outside)
+        $link = Join-Path $runtime.Root 'k15-junction'
+        New-Item -ItemType Junction -Path $link -Target $outside -ErrorAction Stop | Out-Null
+        try { Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } 'link' }
+        finally { [IO.Directory]::Delete($link) }
+        Assert-K15Baseline
+    }
+    }
 }

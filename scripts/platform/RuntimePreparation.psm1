@@ -9,7 +9,7 @@ $bundle = Import-PowerShellDataFile -LiteralPath (Join-Path (Split-Path -Parent 
 $script:PesterResolverSha256 = [string](@($bundle.PrivateData.PlatformRuntime.Inventory | Where-Object Path -CEQ 'Resolve-StandardValidationTool.ps1')[0].Sha256)
 
 function New-PlatformPreparationSession {
-    return [pscustomobject]@{ Guards=[Collections.Generic.List[IDisposable]]::new(); Files=[Collections.Generic.List[object]]::new() }
+    return [pscustomobject]@{ Guards=[Collections.Generic.List[IDisposable]]::new(); Files=[Collections.Generic.List[object]]::new(); Directories=[Collections.Generic.List[string]]::new() }
 }
 
 # Resolve only caller-selected entry paths. P2 subsequently walks the physical
@@ -179,6 +179,47 @@ function New-PlatformExpectedClosure {
     try { $digest=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical))).Replace('-','').ToLowerInvariant() }
     finally { $sha.Dispose() }
     return [pscustomobject]@{rootPath=[IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar);sha256=$digest;files=@($ordered.Values)}
+}
+
+# K15 additive verification metadata. Existing file-closure primitives retain
+# their exact shape and digest semantics; only the new Assert-* path consumes
+# this directory inventory.
+function New-PlatformRuntimeDirectoryReceipt {
+    param($Files,$Directories,[string]$Platform)
+    $ordered=[Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
+    foreach($directory in @($Directories)){
+        $relative=([string]$directory).TrimEnd('/')
+        if([string]::IsNullOrWhiteSpace($relative)){continue}
+        [void](Assert-SafePlatformArchivePath $relative $Platform)
+        [void]$ordered.Add($relative)
+    }
+    foreach($file in @($Files)){
+        $relative=[string]$file.path
+        [void](Assert-SafePlatformArchivePath $relative $Platform)
+        $parts=$relative.Split('/')
+        for($i=1;$i -lt $parts.Length;$i++){[void]$ordered.Add(($parts[0..($i-1)] -join '/'))}
+    }
+    $canonical=(@($ordered) | ForEach-Object { "directory`t$_`n" }) -join ''
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{$digest=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical))).Replace('-','').ToLowerInvariant()}
+    finally{$sha.Dispose()}
+    return [pscustomobject]@{directories=[string[]]@($ordered);directorySha256=$digest}
+}
+
+function Get-PlatformRuntimeDirectoryInventory {
+    param([string]$Root,[string]$Platform)
+    $rootPath=[IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+    $pending=[Collections.Generic.Queue[string]]::new();$pending.Enqueue($rootPath)
+    $directories=[Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
+    while($pending.Count -gt 0){
+        $directory=$pending.Dequeue()
+        foreach($child in @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)){
+            $relative=$child.FullName.Substring($rootPath.Length+1).Replace('\','/')
+            if(($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $null -ne $child.LinkType){throw "Runtime directory inventory contains a link: '$relative'."}
+            if($child.PSIsContainer){[void](Assert-SafePlatformArchivePath $relative $Platform);[void]$directories.Add($relative);$pending.Enqueue($child.FullName)}
+        }
+    }
+    return [string[]]@($directories)
 }
 
 function Open-PlatformClosureGuards {
@@ -496,11 +537,22 @@ function Resolve-VerifiedPlatformPowerShell {
         $executable = Join-Path $destination $(if ($Platform -ceq 'windows') { 'pwsh.exe' } else { 'pwsh' })
         if ($Platform -cne 'windows') {
             $lease = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenFile($DestinationLease,'pwsh','Read','OpenExisting')
-            try { [void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::SetPermissions($lease,448) } finally { $lease.Dispose() }
+            try {
+                [void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::SetPermissions($lease,448)
+                [void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::FlushFile($lease)
+            } finally { $lease.Dispose() }
         }
         # The trust baseline consists exclusively of hashes computed from member
         # bytes in the approved archive snapshot, NEVER the post-extraction disk.
         $runtimeClosure = New-PlatformExpectedClosure $destination $session.Files
+        $directoryReceipt=New-PlatformRuntimeDirectoryReceipt $session.Files $session.Directories $Platform
+        # Unix fsync can use the retained directory fd. Windows keeps the
+        # existing deny-write/delete extraction lease semantics; its setup
+        # caller closes that lease and durably flushes the receipt inventory
+        # before any runtime rename or pointer marker.
+        if($Platform -cne 'windows'){Confirm-PlatformPreparationDirectoryDurability $DestinationLease $directoryReceipt.directories $Platform}
+        $runtimeClosure | Add-Member -NotePropertyName directories -NotePropertyValue $directoryReceipt.directories
+        $runtimeClosure | Add-Member -NotePropertyName directorySha256 -NotePropertyValue $directoryReceipt.directorySha256
         Assert-PlatformRuntimeClosure $executable $runtimeClosure $Platform
         $identity=Test-PlatformPowerShellIdentity $executable $asset.Version $Platform $architecture $runtimeClosure
         [void](Get-VerifiedPlatformLeasePath $DestinationLease $Platform)
@@ -514,6 +566,151 @@ function Resolve-VerifiedPlatformPowerShell {
         throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform $_.Exception.Message)
     }
     finally { Close-PlatformPreparationSession $session }
+}
+
+# K15: re-verify a runtime receipt issued by Resolve-VerifiedPlatformPowerShell.
+# Read-only: no extraction, no writes beyond the existing verified identity probe,
+# and no network. The receipt must still match policy, the host RID, the physical
+# closure on disk (regular files and directories only, no links or hard-link
+# aliases, no extra or missing members), and the physical pwsh identity.
+function Open-PlatformRuntimeDirectoryLease {
+    param([string]$RootPath,[string]$RelativePath,[string]$Platform)
+    if ($Platform -cne 'windows') {
+        if ([string]::IsNullOrEmpty($RelativePath)) { return [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenDirectoryRoot($RootPath) }
+        return [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenDirectory($RootPath,$RelativePath,$false)
+    }
+    $current=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenPreparationRoot($RootPath)
+    try {
+        if (-not [string]::IsNullOrEmpty($RelativePath)) {
+            foreach($part in [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Segments($RelativePath)) {
+                $next=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenPreparationDirectory($current,$part)
+                $current.Dispose();$current=$next
+            }
+        }
+        $result=$current;$current=$null;return $result
+    } finally { if($null -ne $current){$current.Dispose()} }
+}
+
+function Assert-PlatformRuntimePrivateLease {
+    param($Lease,[string]$Platform,[string]$Context,[uint32]$UnixMode,[uint32]$EffectiveUid,[string]$CurrentSid,[string]$TokenOwnerSid)
+    if($Platform -cne 'windows'){
+        $permissions=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetPermissionSnapshot($Lease)
+        if([Convert]::ToUInt32([string]$permissions.Mode,8) -ne $UnixMode -or [uint64]$permissions.Uid -ne [uint64]$EffectiveUid){
+            throw "$Context must be owned by the effective uid with mode $([Convert]::ToString($UnixMode,8).PadLeft(3,'0'))."
+        }
+        return
+    }
+    $permissions=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetPermissions($Lease)
+    $owner=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetOwnerSid($Lease)
+    if(-not [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::IsAcceptedOwnerSid($owner,$CurrentSid,$TokenOwnerSid) -or [bool]$permissions.ReadOnly){throw "$Context must be owned by the current SID or process TokenOwner and writable by that owner."}
+    $descriptor=[Security.AccessControl.RawSecurityDescriptor]::new([string]$permissions.Sddl)
+    $acl=$descriptor.DiscretionaryAcl
+    if($null -eq $acl -or $acl.Count -eq 0){throw "$Context must have a non-empty private DACL."}
+    foreach($ace in $acl){
+        $known=$ace -as [Security.AccessControl.KnownAce]
+        if($null -eq $known -or $known.SecurityIdentifier.Value -cne $CurrentSid -or [string]$known.AceType -cnotin @('AccessAllowed','AccessAllowedObject')){
+            throw "$Context ACL grants access outside the current SID."
+        }
+    }
+}
+
+function Assert-PlatformRuntimePrivatePermissions {
+    param([string]$RootPath,[string]$ExecutablePath,$Closure,[string[]]$Directories,[string]$Platform)
+    $effectiveUid=[uint32]0;$currentSid=$null;$tokenOwnerSid=$null
+    if($Platform -ceq 'windows'){
+        $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+        try{$currentSid=$identity.User.Value}finally{$identity.Dispose()}
+        $tokenOwnerSid=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetCurrentProcessTokenOwnerSid()
+    }else{$effectiveUid=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetEffectiveUserId()}
+    $lease=Open-PlatformRuntimeDirectoryLease $RootPath '' $Platform
+    try{Assert-PlatformRuntimePrivateLease $lease $Platform 'Runtime root' 448 $effectiveUid $currentSid $tokenOwnerSid}finally{$lease.Dispose()}
+    foreach($relative in @($Directories)){
+        $lease=Open-PlatformRuntimeDirectoryLease $RootPath $relative $Platform
+        try{Assert-PlatformRuntimePrivateLease $lease $Platform "Runtime directory '$relative'" 448 $effectiveUid $currentSid $tokenOwnerSid}finally{$lease.Dispose()}
+    }
+    foreach($file in @($Closure.files)){
+        $relative=[string]$file.path
+        $parts=[SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Segments($relative)
+        $parentRelative=if($parts.Length -gt 1){[string]::Join([IO.Path]::DirectorySeparatorChar,$parts,0,$parts.Length-1)}else{''}
+        $parent=Open-PlatformRuntimeDirectoryLease $RootPath $parentRelative $Platform
+        try{
+            $lease=if($Platform -ceq 'windows'){
+                [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenFile($parent,$parts[$parts.Length-1],'Read','OpenExisting')
+            }else{
+                [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenFile($parent,$parts[$parts.Length-1],'Read','OpenExisting')
+            }
+            try{
+                $expectedMode=if([string]::Equals([IO.Path]::GetFullPath((Join-Path $RootPath $relative)),[IO.Path]::GetFullPath($ExecutablePath),$(if($Platform -ceq 'windows'){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}))){448}else{384}
+                Assert-PlatformRuntimePrivateLease $lease $Platform "Runtime file '$relative'" $expectedMode $effectiveUid $currentSid $tokenOwnerSid
+            }finally{$lease.Dispose()}
+        }finally{$parent.Dispose()}
+    }
+}
+
+function Assert-VerifiedPlatformPowerShellRuntime {
+    param($Policy,$Receipt,[string]$Platform)
+    $guards=$null
+    try {
+        if ($Platform -cnotin @('windows','linux','macos')) { throw 'The current platform is unsupported.' }
+        if ($null -eq $Receipt) { throw 'A runtime receipt is required.' }
+        if ($null -eq $Policy) { throw 'A PowerShell policy is required.' }
+        $fields=[ordered]@{}
+        foreach ($name in @('apiVersion','version','assetName','archiveSha256','executablePath','executableSha256','runtimeClosure','os','architecture')) {
+            $value=Get-PlatformPreparationProperty $Receipt $name
+            if ($null -eq $value -or ($value -is [string] -and [string]::IsNullOrWhiteSpace($value))) { throw "Runtime receipt lacks '$name'." }
+            $fields[$name]=$value
+        }
+        if ([string]$fields.apiVersion -cne '1.0') { throw 'Runtime receipt apiVersion is unsupported.' }
+        $architecture=[SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetArchitecture()
+        if ([string]$fields.os -cne $Platform -or [string]$fields.architecture -cne $architecture) { throw 'Runtime receipt RID does not match the current host.' }
+        $asset=Get-PlatformPowerShellAsset $Policy $Platform $architecture $null
+        if ([string]$fields.version -cne $asset.Version -or [string]$fields.assetName -cne $asset.Name -or [string]$fields.archiveSha256 -cne $asset.Sha256) {
+            throw 'Runtime receipt version or asset does not match policy.'
+        }
+        $closureValue=$fields.runtimeClosure
+        $rootPath=[string](Get-PlatformPreparationProperty $closureValue 'rootPath')
+        $closureSha=[string](Get-PlatformPreparationProperty $closureValue 'sha256')
+        $closureFiles=Get-PlatformPreparationProperty $closureValue 'files'
+        $closureDirectories=Get-PlatformPreparationProperty $closureValue 'directories'
+        $directorySha=[string](Get-PlatformPreparationProperty $closureValue 'directorySha256')
+        if ([string]::IsNullOrWhiteSpace($rootPath) -or $closureSha -cnotmatch '^[a-f0-9]{64}$' -or $null -eq $closureFiles) { throw 'Runtime receipt closure is incomplete.' }
+        if($null -eq $closureDirectories -or $directorySha -cnotmatch '^[a-f0-9]{64}$'){throw 'Runtime receipt directory inventory is incomplete.'}
+        $files=foreach ($file in @($closureFiles)) {
+            $path=[string](Get-PlatformPreparationProperty $file 'path'); $sha=[string](Get-PlatformPreparationProperty $file 'sha256')
+            if ([string]::IsNullOrWhiteSpace($path) -or $sha -cnotmatch '^[a-f0-9]{64}$') { throw 'Runtime receipt closure has an incomplete member.' }
+            [void](Assert-SafePlatformArchivePath $path $Platform)
+            [pscustomobject]@{path=$path;sha256=$sha}
+        }
+        # The receipt digest must bind its own member list before disk comparison.
+        $closure=New-PlatformExpectedClosure $rootPath @($files)
+        if ($closure.sha256 -cne $closureSha -or @($closure.files).Count -ne @($files).Count) { throw 'Runtime receipt closure digest is inconsistent.' }
+        $directoryReceipt=New-PlatformRuntimeDirectoryReceipt @($files) @($closureDirectories) $Platform
+        if($directoryReceipt.directorySha256 -cne $directorySha -or @($directoryReceipt.directories).Count -ne @($closureDirectories).Count){throw 'Runtime receipt directory inventory digest is inconsistent.'}
+        for($i=0;$i -lt @($closureDirectories).Count;$i++){if([string]$closureDirectories[$i] -cne [string]$directoryReceipt.directories[$i]){throw 'Runtime receipt directory inventory is not ordinal or contains duplicates.'}}
+        $executable=[string]$fields.executablePath
+        if (-not [IO.Path]::IsPathFullyQualified($executable) -or [IO.Path]::GetFullPath($executable) -cne $executable) { throw 'Runtime receipt executable path is not canonical.' }
+        $leaf=if ($Platform -ceq 'windows') { 'pwsh.exe' } else { 'pwsh' }
+        if ([IO.Path]::GetFileName($executable) -cne $leaf) { throw 'Runtime receipt executable is not the canonical pwsh.' }
+        $expectedExecutable=[IO.Path]::GetFullPath((Join-Path $rootPath $leaf))
+        $pathComparison=if($Platform -ceq 'windows'){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}
+        if(-not [string]::Equals($executable,$expectedExecutable,$pathComparison)){
+            throw 'Runtime receipt executable path is outside the runtime closure root.'
+        }
+        $bound=@($closure.files | Where-Object { [string]$_.path -ceq $leaf })
+        if ($bound.Count -ne 1 -or [string]$bound[0].sha256 -cne [string]$fields.executableSha256) { throw 'Runtime receipt executable hash is not bound by its closure.' }
+        $guards=Open-PlatformClosureGuards $closure $Platform
+        Assert-PlatformRuntimeClosure $executable $closure $Platform
+        $actualDirectories=Get-PlatformRuntimeDirectoryInventory $rootPath $Platform
+        if(@($actualDirectories).Count -ne @($directoryReceipt.directories).Count -or (@($actualDirectories) -join "`n") -cne (@($directoryReceipt.directories) -join "`n")){throw 'Runtime directory inventory differs from its receipt.'}
+        Assert-PlatformRuntimePrivatePermissions $rootPath $executable $closure @($directoryReceipt.directories) $Platform
+        [void](Test-PlatformPowerShellIdentity $executable $asset.Version $Platform $architecture $closure)
+        return $Receipt
+    }
+    catch {
+        if ($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]) { throw }
+        throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform ('Runtime receipt verification failed: '+$_.Exception.Message))
+    }
+    finally { Close-PlatformPreparationSession $guards }
 }
 
 function Import-VerifiedPesterResolverModule {
@@ -580,6 +777,7 @@ function Open-WindowsPreparationDirectoryGuards {
 
 function New-PlatformPreparationDirectory {
     param($DestinationLease,[string]$RelativePath,[string]$Platform,$Session)
+    if($null -ne $Session -and -not [string]::IsNullOrWhiteSpace($RelativePath)){[void]$Session.Directories.Add($RelativePath.Replace('\','/').TrimEnd('/'))}
     if ($Platform -cne 'windows') {
         [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::CreatePreparationDirectory($DestinationLease,$RelativePath)
     } else {
@@ -589,6 +787,33 @@ function New-PlatformPreparationDirectory {
             if ($null -ne $Session) { foreach($guard in $owned.Guards) { $Session.Guards.Add($guard) }; $owned.Guards.Clear() }
         }
         finally { for ($i=$owned.Guards.Count-1; $i -ge 0; $i--) { $owned.Guards[$i].Dispose() } }
+    }
+}
+
+# Additive P10 setup durability close: every extracted file is flushed by its
+# writer, then every physical directory in the receipt inventory is flushed and
+# identity/path-read back before Resolve can return a receipt to its caller.
+function Confirm-PlatformPreparationDirectoryDurability {
+    param($DestinationLease,$Directories,[string]$Platform)
+    $ordered=[Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
+    foreach($relative in @($Directories)){if(-not [string]::IsNullOrWhiteSpace([string]$relative)){[void]$ordered.Add(([string]$relative).Replace('/',[IO.Path]::DirectorySeparatorChar))}}
+    if($Platform -ceq 'windows'){
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::FlushDirectory($DestinationLease)
+        [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetVerifiedPath($DestinationLease)
+        foreach($relative in $ordered){
+            $owned=Open-WindowsPreparationDirectoryGuards $DestinationLease $relative
+            try{
+                [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::FlushDirectory($owned.Parent)
+                [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetVerifiedPath($owned.Parent)
+            }finally{for($i=$owned.Guards.Count-1;$i -ge 0;$i--){$owned.Guards[$i].Dispose()}}
+        }
+        return
+    }
+    [void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::FlushDirectoryAndVerify($DestinationLease)
+    $root=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetVerifiedPath($DestinationLease)
+    foreach($relative in $ordered){
+        $lease=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenDirectory($root,$relative,$false)
+        try{[void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::FlushDirectoryAndVerify($lease)}finally{$lease.Dispose()}
     }
 }
 
@@ -612,7 +837,7 @@ function Write-PlatformPreparationFile {
         } else {
             $target = Join-Path $owned.Path $parts[$parts.Length-1]
             $output = [IO.File]::Open($target,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
-            try { $snapshot.CopyTo($output) } finally { $output.Dispose() }
+            try { $snapshot.CopyTo($output); $output.Flush($true) } finally { $output.Dispose() }
             # Read-only guards allow the loader's ordinary read sharing. The
             # writer-to-reader handoff is NOT trusted: acquire deny-write/delete,
             # then compare to the input hash. A racing writer either blocks the
@@ -1009,4 +1234,4 @@ function Initialize-VerifiedPlatformPester {
     finally { Close-PlatformPesterSnapshot $payloadSnapshot; Close-PlatformPreparationSession $session; Close-PlatformPreparationSession $runtimeGuards }
 }
 
-Export-ModuleMember -Function Resolve-VerifiedPlatformPowerShell,Initialize-VerifiedPlatformPester,Test-PlatformPowerShellIdentity,New-PlatformVerifiedProcessEnvironment,Start-PlatformVerifiedProcess,Resolve-PlatformPhysicalPath,New-PlatformPrivateRoot,Invoke-PlatformPreparationCommand,Initialize-PlatformAuthorityPester,Assert-PlatformAuthorityPester
+Export-ModuleMember -Function Resolve-VerifiedPlatformPowerShell,Assert-VerifiedPlatformPowerShellRuntime,Initialize-VerifiedPlatformPester,Test-PlatformPowerShellIdentity,New-PlatformVerifiedProcessEnvironment,Start-PlatformVerifiedProcess,Resolve-PlatformPhysicalPath,New-PlatformPrivateRoot,Invoke-PlatformPreparationCommand,Initialize-PlatformAuthorityPester,Assert-PlatformAuthorityPester

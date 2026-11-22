@@ -145,6 +145,70 @@ function Get-AiInvariantIds {
     return @($matches | ForEach-Object { $_.Groups['id'].Value })
 }
 
+function ConvertFrom-AiUnicodeEscape {
+    param([Parameter(Mandatory = $true)][string] $Value)
+
+    return [regex]::Replace($Value, '\\u(?<hex>[0-9A-F]{4})', { param($match) [string][char][Convert]::ToInt32($match.Groups['hex'].Value, 16) })
+}
+
+function Get-AiLocalRuntimeSupportMatrixExpectation {
+    param([Parameter(Mandatory = $true)][string] $LocaleId)
+
+    # Pinned wording: Windows, Linux, and macOS local runtimes are supported; WSL is unsupported.
+    # Non-ASCII text is escaped so this file stays ASCII-only for every PowerShell lane.
+    if ($LocaleId -ceq 'zh-TW') {
+        $text = ConvertFrom-AiUnicodeEscape -Value '\u672C Repository \u8207\u4F7F\u7528\u5176\u5171\u7528 AI-Instructions\uFF0FSkills runtime \u7684\u6D88\u8CBB Repository\uFF0C\u5176\u672C\u6A5F Agent \u958B\u767C\u3001\u5B89\u88DD\u3001\u57F7\u884C\u3001\u9A57\u8B49\u3001\u6E2C\u8A66\u3001acceptance \u8207 CI host \u652F\u63F4 Windows\u3001Linux \u8207 macOS\uFF1BWSL \u4E0D\u652F\u63F4\u3002\u6B64\u9650\u5236\u4E0D\u6DB5\u84CB\u4E0B\u6E38\u7522\u54C1\u7684 target\uFF0Fdeployment OS\uFF0C\u4E5F\u4E0D\u9650\u5236\u6838\u51C6 connector \u80CC\u5F8C\u9060\u7AEF SaaS \u7684\u670D\u52D9 OS\u3002'
+    }
+    elseif ($LocaleId -ceq 'en') {
+        $text = 'This repository and consuming repositories using its shared AI-Instructions/Skills runtime support local Agent development, installation, execution, validation, tests, acceptance, and CI hosts on Windows, Linux, and macOS; WSL is unsupported. This does not restrict downstream product target/deployment operating systems or the operating systems of remote SaaS services behind approved connectors.'
+    }
+    else {
+        throw "No pinned local runtime support matrix wording for locale '$LocaleId'."
+    }
+
+    return $text
+}
+
+function Get-AiOrdinalOccurrenceCount {
+    param([Parameter(Mandatory = $true)][string] $Text, [Parameter(Mandatory = $true)][string] $Value)
+
+    $count = 0
+    $index = $Text.IndexOf($Value, [System.StringComparison]::Ordinal)
+    while ($index -ge 0) {
+        $count++
+        $index = $Text.IndexOf($Value, $index + $Value.Length, [System.StringComparison]::Ordinal)
+    }
+    return $count
+}
+
+function Assert-AiLocalRuntimeSupportMatrix {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][string] $Expectation,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $marker = '<!-- ai-invariant:base.windows-only-local-runtime -->'
+    $expectedLine = $Expectation + ' ' + $marker
+    $lines = @($Text.Split([char]"`n"))
+    $markerLines = @($lines | Where-Object { $_.Contains($marker) })
+    if ($markerLines.Count -ne 1) {
+        throw "${Context}: expected exactly one local runtime support matrix invariant line, found $($markerLines.Count)."
+    }
+    if (-not [string]::Equals([string]$markerLines[0], $expectedLine, [System.StringComparison]::Ordinal)) {
+        throw "${Context}: the local runtime support matrix invariant line drifted from the pinned wording."
+    }
+    $occurrences = Get-AiOrdinalOccurrenceCount -Text $Text -Value $Expectation
+    if ($occurrences -ne 1) {
+        throw "${Context}: pinned local runtime support matrix wording occurs $occurrences times instead of exactly once."
+    }
+    foreach ($line in @($lines | Where-Object { -not $_.Contains($marker) })) {
+        if ($line -match '(?i)\b(?:linux|macos|wsl)\b') {
+            throw "${Context}: a Linux/macOS/WSL support statement appears outside the single authoritative invariant line."
+        }
+    }
+}
+
 function Get-AiRoutes {
     param([Parameter(Mandatory = $true)][string] $Text)
 
@@ -838,6 +902,61 @@ function New-AiInstructionFixture {
         $maintenanceInstructions | Should Match 'instructions/common/base\.en\.md'
         $maintenanceInstructions | Should Match 'base\.shared-skills-user-only'
         $maintenanceInstructions | Should Not Match 'consumer bootstrap 不安裝／更新／重建共用 Skills'
+    }
+
+    # Scenario: The Windows/Linux/macOS-supported and WSL-unsupported local runtime matrix is generated into every Base variant.
+    # Purpose: Require the support matrix exactly once per platform and locale, identical to the authoritative common source.
+    It 'InterT55_keeps_the_local_runtime_support_matrix_single_sourced_in_every_base_variant' {
+        $contract = Get-AiInstructionContract
+        $identity = 'base.windows-only-local-runtime'
+        $declaration = @($contract.baseInvariants | Where-Object { $_.id -ceq $identity })
+        $declaration.Count | Should Be 1
+        Assert-OrdinalStringSet -Actual @($declaration[0].platforms) -Expected @('codex','github-copilot','claude') -Context 'local runtime support matrix invariant platforms'
+        foreach ($locale in @($contract.locales)) {
+            $localeId = [string]$locale.id
+            $expectation = Get-AiLocalRuntimeSupportMatrixExpectation -LocaleId $localeId
+            $sourceRelative = 'instructions/common/base' + [string]$locale.ruleSuffix
+            $sourceText = Get-AiInstructionText -Path (Get-ContractFullPath -RelativePath $sourceRelative)
+            Assert-AiLocalRuntimeSupportMatrix -Text $sourceText -Expectation $expectation -Context "authoritative source '$sourceRelative'"
+            $sourceLine = @($sourceText.Split([char]"`n") | Where-Object { $_.Contains('<!-- ai-invariant:base.windows-only-local-runtime -->') })[0]
+            foreach ($platform in @($contract.platforms)) {
+                $relative = Get-PlatformBaseRelativePath -Platform $platform -LocaleId $localeId
+                $text = Get-AiInstructionText -Path (Get-ContractFullPath -RelativePath $relative)
+                @((Get-AiInvariantIds -Text $text) | Where-Object { $_ -ceq $identity }).Count | Should Be 1
+                Assert-AiLocalRuntimeSupportMatrix -Text $text -Expectation $expectation -Context "platform '$($platform.id)' locale '$localeId'"
+                $generatedLine = @($text.Split([char]"`n") | Where-Object { $_.Contains('<!-- ai-invariant:base.windows-only-local-runtime -->') })[0]
+                [string]::Equals([string]$generatedLine, [string]$sourceLine, [System.StringComparison]::Ordinal) | Should Be $true
+            }
+        }
+    }
+
+    # Scenario: A supported OS is removed, WSL is enabled, or the local runtime support matrix is moved or duplicated.
+    # Purpose: Prove every narrowing, widening, deletion, relocation, or duplication of the generated Base invariant is rejected.
+    It 'InterT56_rejects_narrowed_widened_or_relocated_local_runtime_support_matrix_variants' {
+        $contract = Get-AiInstructionContract
+        $marker = '<!-- ai-invariant:base.windows-only-local-runtime -->'
+        foreach ($locale in @($contract.locales)) {
+            $localeId = [string]$locale.id
+            $expectation = Get-AiLocalRuntimeSupportMatrixExpectation -LocaleId $localeId
+            foreach ($platform in @($contract.platforms)) {
+                $relative = Get-PlatformBaseRelativePath -Platform $platform -LocaleId $localeId
+                $text = Get-AiInstructionText -Path (Get-ContractFullPath -RelativePath $relative)
+                $context = "platform '$($platform.id)' locale '$localeId'"
+                Assert-AiLocalRuntimeSupportMatrix -Text $text -Expectation $expectation -Context $context
+
+                $mutations = @(
+                    [pscustomobject]@{ name = 'Linux support removed'; text = $text.Replace('Windows, Linux, and macOS', 'Windows and macOS').Replace((ConvertFrom-AiUnicodeEscape -Value 'Windows\u3001Linux \u8207 macOS'), (ConvertFrom-AiUnicodeEscape -Value 'Windows \u8207 macOS')) },
+                    [pscustomobject]@{ name = 'WSL support enabled'; text = $text.Replace('WSL is unsupported', 'WSL is supported').Replace((ConvertFrom-AiUnicodeEscape -Value 'WSL \u4E0D\u652F\u63F4'), (ConvertFrom-AiUnicodeEscape -Value 'WSL \u652F\u63F4')) },
+                    [pscustomobject]@{ name = 'invariant line removed'; text = [regex]::Replace($text, '(?m)^.*<!-- ai-invariant:base\.windows-only-local-runtime -->.*\n?', '') },
+                    [pscustomobject]@{ name = 'support matrix duplicated'; text = $text.Replace($expectation, $expectation + ' ' + $expectation) },
+                    [pscustomobject]@{ name = 'support matrix moved to a separate line'; text = $text.Replace($expectation + ' ' + $marker, $marker + "`n" + $expectation) }
+                )
+                foreach ($mutation in $mutations) {
+                    [string]::Equals([string]$mutation.text, $text, [System.StringComparison]::Ordinal) | Should Be $false
+                    Assert-Throws -Action { Assert-AiLocalRuntimeSupportMatrix -Text ([string]$mutation.text) -Expectation $expectation -Context $context } -Context "$context mutation '$($mutation.name)'"
+                }
+            }
+        }
     }
 
     # Scenario: A common rule changes on only one platform while each localized pair remains present.

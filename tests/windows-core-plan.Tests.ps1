@@ -494,6 +494,7 @@ if ($IsWindows) {
             'ai-instructions-writer-gate.part7.Tests.ps1' = 5
             'ai-instructions-writer-gate.part8.Tests.ps1' = 18
             'ai-instructions-writer-gate.part9.Tests.ps1' = 19
+            'setup-agent-environment.Tests.ps1' = 5
         }
         @($configuration.weights.PSObject.Properties).Count | Should Be $expectedWeights.Count
         foreach ($entry in $expectedWeights.GetEnumerator()) {
@@ -501,20 +502,20 @@ if ($IsWindows) {
         }
 
         $expectedShards = @(
-            @('bootstrap-ai-instructions.Tests.ps1','skills-source-routing.Tests.ps1','third-party-source-envelope.Tests.ps1'),
-            @('ai-instructions-writer-gate.part2.Tests.ps1','routine-semantic-scan.Tests.ps1','source-merge-exception-draft.Tests.ps1','windows-core-plan.Tests.ps1'),
-            @('agent-environment-reconciler.Tests.ps1','platform-runtime.Tests.ps1','safe-zip.Tests.ps1','standard-core-progress.Tests.ps1'),
-            @('ai-instructions-contract.Tests.ps1','cleanup-ai-instructions-pollution.Tests.ps1','consumer-gate-workflow.Tests.ps1','install-ai-instructions-bootstrap.part3.Tests.ps1','skill-tools-core-path-patch.Tests.ps1','standard-process-discovery.Tests.ps1'),
-            @('ai-instructions-launcher-recovery.Tests.ps1','ai-instructions-writer-gate.part9.Tests.ps1','internal-skill-use.Tests.ps1','skills-catalog-contract.Tests.ps1','standard-semantic-bridge.Tests.ps1','standard-validation-runner.Tests.ps1'),
-            @('bootstrap-ai-instructions-multisource.Tests.ps1','install-ai-instructions-bootstrap.part2.Tests.ps1','invoke-ai-instructions-rollout.Tests.ps1','skills-catalog-source-host.Tests.ps1','standard-validation-resolver-hardening.Tests.ps1','trust-anchor-tools.Tests.ps1'),
-            @('ai-instructions-writer-gate.part8.Tests.ps1','consumer-bootstrap.Tests.ps1','license-delivery.Tests.ps1','skills-selection.Tests.ps1','standard-validation-skillspector-probe.Tests.ps1','update-ai-instructions.Tests.ps1'),
-            @('ai-instructions-runtime-contract.Tests.ps1','consumer-source-gate.Tests.ps1','install-ai-instructions-bootstrap.part4.Tests.ps1','licensing-scope.Tests.ps1','skills-source-acquisition.Tests.ps1','static-approved-exceptions.Tests.ps1'),
-            @('agent-artifact-remediation.Tests.ps1','ai-instructions-writer-gate.part7.Tests.ps1','bootstrap-ai-instructions-multisource-lock-arrays.Tests.ps1','install-ai-instructions-bootstrap.part1.Tests.ps1','production-skills-catalog.Tests.ps1','skills-source-composition.Tests.ps1','static-parser-coverage.Tests.ps1'),
-            @('ai-instructions-writer-gate.part1.Tests.ps1','syp101-production-smoke-contract.Tests.ps1','syp214-user-only.Tests.ps1'),
+            @('bootstrap-ai-instructions.Tests.ps1','skills-catalog-source-host.Tests.ps1','standard-validation-skillspector-probe.Tests.ps1'),
+            @('ai-instructions-writer-gate.part2.Tests.ps1','internal-skill-use.Tests.ps1','skills-selection.Tests.ps1','static-approved-exceptions.Tests.ps1'),
+            @('agent-environment-reconciler.Tests.ps1','cleanup-ai-instructions-pollution.Tests.ps1','invoke-ai-instructions-rollout.Tests.ps1','skills-source-acquisition.Tests.ps1','static-parser-coverage.Tests.ps1'),
+            @('bootstrap-ai-instructions-multisource.Tests.ps1','install-ai-instructions-bootstrap.part3.Tests.ps1','license-delivery.Tests.ps1','skills-source-composition.Tests.ps1','syp101-production-smoke-contract.Tests.ps1','trust-anchor-tools.Tests.ps1'),
+            @('ai-instructions-writer-gate.part9.Tests.ps1','consumer-bootstrap.Tests.ps1','licensing-scope.Tests.ps1','skills-source-retrieval.Tests.ps1','third-party-skill-source.Tests.ps1','update-ai-instructions.Tests.ps1'),
+            @('ai-instructions-launcher-recovery.Tests.ps1','install-ai-instructions-bootstrap.part2.Tests.ps1','platform-runtime.Tests.ps1','production-skills-catalog.Tests.ps1','skills-source-routing.Tests.ps1','third-party-source-envelope.Tests.ps1'),
+            @('agent-artifact-remediation.Tests.ps1','ai-instructions-runtime-contract.Tests.ps1','ai-instructions-writer-gate.part8.Tests.ps1','routine-semantic-scan.Tests.ps1','setup-agent-environment.Tests.ps1','source-merge-exception-draft.Tests.ps1','windows-core-plan.Tests.ps1'),
+            @('ai-instructions-contract.Tests.ps1','bootstrap-ai-instructions-multisource-lock-arrays.Tests.ps1','consumer-source-gate.Tests.ps1','install-ai-instructions-bootstrap.part4.Tests.ps1','safe-zip.Tests.ps1','standard-core-progress.Tests.ps1'),
+            @('ai-instructions-writer-gate.part7.Tests.ps1','consumer-gate-workflow.Tests.ps1','install-ai-instructions-bootstrap.part1.Tests.ps1','skill-tools-core-path-patch.Tests.ps1','standard-process-discovery.Tests.ps1','standard-validation-runner.Tests.ps1'),
+            @('ai-instructions-writer-gate.part1.Tests.ps1','standard-semantic-bridge.Tests.ps1','syp214-user-only.Tests.ps1'),
             @('ai-instructions-writer-gate.part3.Tests.ps1','ai-instructions-writer-gate.part5.Tests.ps1'),
-            @('ai-instructions-writer-gate.part4.Tests.ps1','ai-instructions-writer-gate.part6.Tests.ps1','skills-source-retrieval.Tests.ps1','third-party-skill-source.Tests.ps1')
+            @('ai-instructions-writer-gate.part4.Tests.ps1','ai-instructions-writer-gate.part6.Tests.ps1','skills-catalog-contract.Tests.ps1','standard-validation-resolver-hardening.Tests.ps1')
         )
-        $expectedLoads = @(28,28,27,27,27,27,27,27,27,27,27,27)
+        $expectedLoads = @(28,28,28,28,28,28,28,27,27,27,27,27)
         $script:ActualPlan.Plan.shards.Count | Should Be 12
         for ($index = 0; $index -lt $expectedShards.Count; $index++) {
             $shard = $script:ActualPlan.Plan.shards[$index]
@@ -581,6 +582,25 @@ if ($IsWindows) {
             $owner.Count | Should Be 1
             @($owner[0].files) -ccontains $skipFile | Should Be $true
         }
+    }
+
+    # Scenario: A weights fixture requests fewer, more, or unreasonably many partitions than the reviewed production count.
+    # Purpose: G6 rejects every partitionCount other than twelve before a Windows Core matrix can be produced.
+    It 'UnitT41_rejects_unreviewed_partition_counts_before_planning' {
+        foreach ($count in @(9,10,10000)) {
+            $weightsPath = Join-Path $TestDrive "weights-$count.json"
+            $weights = [ordered]@{ schemaVersion=1; partitionCount=$count; weights=[ordered]@{} }
+            Set-WindowsCoreTestText $weightsPath ($weights | ConvertTo-Json -Depth 6)
+            { New-WindowsCoreShards -SelectedTestFiles @('alpha.Tests.ps1') -ExpectedSkippedTests @() -ConfigurationPath $weightsPath } | Should Throw
+        }
+    }
+
+    # Scenario: A matrix contains more entries than the reviewed twelve-partition upper bound.
+    # Purpose: G6 keeps the matrix validator independently fail closed even if an upstream planner regresses.
+    It 'UnitT42_rejects_a_matrix_above_the_reviewed_partition_upper_bound' {
+        $shards = @(1..13 | ForEach-Object { [pscustomobject]@{ id=('{0:D2}' -f $_); files=@('alpha.Tests.ps1'); expectedSkippedTests=@() } })
+        $matrix = [pscustomobject]@{ include=@($shards | ForEach-Object { [pscustomobject]@{ id=$_.id; filesBase64='YQ=='; skipsBase64='Cg==' } }) } | ConvertTo-Json -Depth 6 -Compress
+        { Assert-WindowsCoreMatrix -MatrixJson $matrix -ExpectedShards $shards } | Should Throw
     }
 
     # Scenario: A workflow shard selects one tiny fixture test and explicitly disables the runner's repository-wide isolated defaults.

@@ -1082,6 +1082,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/agent-environment-setup.psm1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/ai-instructions-install-transaction.psm1",
       "license": "Apache-2.0"
     },
@@ -1231,6 +1235,26 @@
     },
     {
       "path": "scripts/semantic-scan-preflight.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/setup-agent-environment.policy.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/setup-agent-environment.policy.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/setup-agent-environment.policy.tsv",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/setup-agent-environment.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/setup-agent-environment.sh",
       "license": "Apache-2.0"
     },
     {
@@ -1567,6 +1591,14 @@
     },
     {
       "path": "tests/semantic-raw-graph-normalizer-unit.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/setup-agent-environment.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/setup-agent-environment.UnixFixture.ps1",
       "license": "Apache-2.0"
     },
     {
