@@ -648,6 +648,239 @@ function Assert-StandardValidationRegularFile {
     }
 }
 
+function Get-StandardValidationUnixNativeToolPath {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('id','stat')][string] $Name,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    foreach ($candidate in @("/usr/bin/$Name", "/bin/$Name")) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    throw "INVALID|$Context cannot determine Unix ownership because '$Name' is unavailable."
+}
+
+function Get-StandardValidationUnixCurrentUid {
+    param([Parameter(Mandatory = $true)][string] $Context)
+
+    $idPath = Get-StandardValidationUnixNativeToolPath -Name id -Context $Context
+    $output = @(& $idPath -u 2>$null)
+    $value = ($output -join '').Trim()
+    if ($LASTEXITCODE -ne 0 -or $value -cnotmatch '^[0-9]+$') {
+        throw "INVALID|$Context could not determine the current Unix user id."
+    }
+    return [uint64]::Parse($value, [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-StandardValidationUnixOwnerUid {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $statPath = Get-StandardValidationUnixNativeToolPath -Name stat -Context $Context
+    $useBsdStatFormat = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)
+    $output = if ($useBsdStatFormat) { @(& $statPath -f '%u' $Path 2>$null) } else { @(& $statPath -c '%u' -- $Path 2>$null) }
+    $value = ($output -join '').Trim()
+    if ($LASTEXITCODE -ne 0 -or $value -cnotmatch '^[0-9]+$') {
+        throw "INVALID|$Context could not determine the Unix owner id: $Path"
+    }
+    return [uint64]::Parse($value, [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-StandardValidationUnixFileTypeMode {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $statPath = Get-StandardValidationUnixNativeToolPath -Name stat -Context $Context
+    $useBsdStatFormat = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)
+    $output = if ($useBsdStatFormat) { @(& $statPath -f '%Xp' $Path 2>$null) } else { @(& $statPath -c '%f' -- $Path 2>$null) }
+    $value = ($output -join '').Trim()
+    if ($LASTEXITCODE -ne 0 -or $value -cnotmatch '^(?:0[xX])?[0-9a-fA-F]+$') {
+        throw "INVALID|$Context Unix file type could not be determined: $Path"
+    }
+    $hexValue = $value -replace '^0[xX]', ''
+    return [uint32]::Parse($hexValue, [Globalization.NumberStyles]::HexNumber, [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Assert-StandardValidationTrustedUnixMode {
+    param(
+        [Parameter(Mandatory = $true)][string] $UnixMode,
+        [Parameter(Mandatory = $true)][uint32] $Mode,
+        [Parameter(Mandatory = $true)][ValidateSet('-','d')][string] $ExpectedType,
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($UnixMode.Length -eq 0 -or $UnixMode[0] -cne $ExpectedType) {
+        throw "INVALID|$Context trusted Unix path type could not be verified: $Path"
+    }
+    $groupWrite = [uint32][IO.UnixFileMode]::GroupWrite
+    $otherWrite = [uint32][IO.UnixFileMode]::OtherWrite
+    if (($Mode -band $groupWrite) -ne 0 -or ($Mode -band $otherWrite) -ne 0) {
+        throw "INVALID|$Context trusted Unix path must not grant group-write or other-write permission: $Path"
+    }
+}
+
+function Assert-StandardValidationTrustedUnixToolPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $targetMode = Get-StandardValidationUnixFileTypeMode -Path $Path -Context $Context
+    if (($targetMode -band [uint32]0xF000) -ne [uint32]0x8000) {
+        throw "INVALID|$Context must resolve to a regular file: $Path"
+    }
+
+    $currentUid = Get-StandardValidationUnixCurrentUid -Context $Context
+    $currentPath = [IO.Path]::GetFullPath($Path)
+    $isTarget = $true
+    while ($true) {
+        try { $item = Get-Item -Force -LiteralPath $currentPath -ErrorAction Stop }
+        catch { throw "INVALID|$Context trusted Unix path could not be inspected: $currentPath. $($_.Exception.Message)" }
+        $expectedType = if ($isTarget) { '-' } else { 'd' }
+        $unixMode = [string]$item.UnixMode
+        if ($unixMode.Length -eq 0 -or $unixMode[0] -cne $expectedType) {
+            throw "INVALID|$Context trusted Unix path type could not be verified: $currentPath"
+        }
+        try { $mode = [IO.File]::GetUnixFileMode($currentPath) }
+        catch { throw "INVALID|$Context Unix permissions could not be determined: $currentPath. $($_.Exception.Message)" }
+        Assert-StandardValidationTrustedUnixMode -UnixMode $unixMode -Mode ([uint32]$mode) `
+            -ExpectedType $expectedType -Path $currentPath -Context $Context
+        $ownerUid = Get-StandardValidationUnixOwnerUid -Path $currentPath -Context $Context
+        if ($ownerUid -ne 0 -and $ownerUid -ne $currentUid) {
+            throw "INVALID|$Context trusted Unix path must be owned by root or the current user: $currentPath"
+        }
+        $parent = [IO.Directory]::GetParent($currentPath)
+        if ($null -eq $parent) { break }
+        $currentPath = $parent.FullName
+        $isTarget = $false
+    }
+}
+
+function Assert-StandardValidationTrustedUnixLinkPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    try { $link = Get-Item -Force -LiteralPath $Path -ErrorAction Stop }
+    catch { throw "INVALID|$Context symbolic-link metadata could not be inspected: $Path. $($_.Exception.Message)" }
+    $linkPath = [IO.Path]::GetFullPath($link.FullName)
+    $linkUnixMode = [string]$link.UnixMode
+    if ($linkUnixMode.Length -eq 0 -or $linkUnixMode[0] -cne 'l') {
+        throw "INVALID|$Context symbolic-link type could not be verified without following it: $linkPath"
+    }
+
+    $currentUid = Get-StandardValidationUnixCurrentUid -Context $Context
+    $linkOwnerUid = Get-StandardValidationUnixOwnerUid -Path $linkPath -Context $Context
+    if ($linkOwnerUid -ne 0 -and $linkOwnerUid -ne $currentUid) {
+        throw "INVALID|$Context symbolic link must be owned by root or the current user: $linkPath"
+    }
+
+    $parent = [IO.Directory]::GetParent($linkPath)
+    while ($null -ne $parent) {
+        $currentPath = $parent.FullName
+        try { $item = Get-Item -Force -LiteralPath $currentPath -ErrorAction Stop }
+        catch { throw "INVALID|$Context symbolic-link namespace could not be inspected: $currentPath. $($_.Exception.Message)" }
+        $unixMode = [string]$item.UnixMode
+        try { $mode = [IO.File]::GetUnixFileMode($currentPath) }
+        catch { throw "INVALID|$Context Unix permissions could not be determined: $currentPath. $($_.Exception.Message)" }
+        Assert-StandardValidationTrustedUnixMode -UnixMode $unixMode -Mode ([uint32]$mode) `
+            -ExpectedType 'd' -Path $currentPath -Context $Context
+        $ownerUid = Get-StandardValidationUnixOwnerUid -Path $currentPath -Context $Context
+        if ($ownerUid -ne 0 -and $ownerUid -ne $currentUid) {
+            throw "INVALID|$Context symbolic-link namespace must be owned by root or the current user: $currentPath"
+        }
+        $parent = [IO.Directory]::GetParent($currentPath)
+    }
+}
+
+function Resolve-StandardValidationInternalUseToolPath {
+    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) {
+        Assert-StandardValidationRegularFile -Path $Path -Context $Context
+        return [IO.Path]::GetFullPath($Path)
+    }
+
+    $separator = [IO.Path]::DirectorySeparatorChar
+    $pathParts = $Path.Split([char[]]@($separator), [StringSplitOptions]::None)
+    $invalidPath = -not [IO.Path]::IsPathFullyQualified($Path)
+    for ($index = 1; -not $invalidPath -and $index -lt $pathParts.Length; $index++) {
+        if ($pathParts[$index] -ceq '' -or $pathParts[$index] -ceq '.' -or $pathParts[$index] -ceq '..') {
+            $invalidPath = $true
+        }
+    }
+    if ($invalidPath) {
+        throw "INVALID|$Context path must be an absolute path without '.' or '..' components: $Path"
+    }
+
+    try { $full = [IO.Path]::GetFullPath($Path) }
+    catch { throw "INVALID|$Context path is invalid: $Path. $($_.Exception.Message)" }
+    $anchor = [IO.Path]::GetPathRoot($full)
+    $pending = @($full.Substring($anchor.Length).Split(
+        [char[]]@([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar),
+        [StringSplitOptions]::RemoveEmptyEntries))
+    $current = $anchor
+    for ($hop = 0; $hop -lt 40; $hop++) {
+        $redirected = $false
+        while ($pending.Count -gt 0) {
+            $part = $pending[0]
+            $pending = @(if ($pending.Count -gt 1) { @($pending[1..($pending.Count - 1)]) } else { @() })
+            if ($part -ceq '.') { continue }
+            if ($part -ceq '..') {
+                $parent = [IO.Directory]::GetParent($current)
+                if ($null -ne $parent) { $current = $parent.FullName }
+                continue
+            }
+            $parentPath = $current
+            $current = Join-Path $current $part
+            $entry = if ($pending.Count -eq 0) { [IO.FileInfo]::new($current) } else { [IO.DirectoryInfo]::new($current) }
+            try { $linkTarget = $entry.LinkTarget }
+            catch { throw "INVALID|$Context symbolic-link metadata could not be read: $current. $($_.Exception.Message)" }
+            if ($null -eq $linkTarget) {
+                if ($pending.Count -gt 0 -and -not $entry.Exists) {
+                    throw "INVALID|$Context path component is not a directory: $current"
+                }
+                continue
+            }
+            if ($linkTarget.Length -eq 0) {
+                throw "INVALID|$Context symbolic-link target path must not be empty: $current"
+            }
+            Assert-StandardValidationTrustedUnixLinkPath -Path $current -Context $Context
+            $targetLastCharacter = $linkTarget[$linkTarget.Length - 1]
+            if ($pending.Count -eq 0 -and
+                ($targetLastCharacter -eq [IO.Path]::DirectorySeparatorChar -or
+                 $targetLastCharacter -eq [IO.Path]::AltDirectorySeparatorChar)) {
+                throw "INVALID|$Context must resolve to a regular file: $current"
+            }
+            if ([IO.Path]::IsPathFullyQualified($linkTarget)) {
+                $targetAnchor = [IO.Path]::GetPathRoot($linkTarget)
+                $targetPath = $linkTarget.Substring($targetAnchor.Length)
+                $current = $targetAnchor
+            }
+            else {
+                $targetPath = $linkTarget
+                $current = $parentPath
+            }
+            $targetParts = @($targetPath.Split([char[]]@($separator), [StringSplitOptions]::RemoveEmptyEntries))
+            $pending = @($targetParts) + @($pending)
+            $redirected = $true
+            break
+        }
+        if (-not $redirected) {
+            $resolved = [IO.Path]::GetFullPath($current)
+            Assert-StandardValidationTrustedUnixToolPath -Path $resolved -Context $Context
+            return $resolved
+        }
+    }
+    throw "INVALID|$Context symbolic-link chain exceeds the 40-link resolution limit: $Path"
+}
+
 function Assert-StandardValidationLauncherFileIdentity {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -6446,16 +6679,18 @@ function Resolve-StandardValidationInternalSkillUse {
         throw 'BLOCKED|Internal Skill package inventory/content drifted.'
     }
     $tools = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    $toolPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     foreach ($tool in $ToolInventory) {
         Assert-StandardValidationExactPropertySet -Object $tool -Expected @('id', 'version', 'path', 'sha256') -Context 'internal use frozen tool'
         $id = [string]$tool.id
         if ($tools.ContainsKey($id)) { throw 'BLOCKED|Duplicate internal use tool.' }
         Assert-StandardValidationSha256 -Value ([string]$tool.sha256) -Context 'internal use tool hash'
-        Assert-StandardValidationRegularFile -Path ([string]$tool.path) -Context 'internal use tool'
-        if ((Get-StandardValidationFileSha256 -Path ([string]$tool.path) -Context 'internal use tool') -cne [string]$tool.sha256) {
+        $resolvedToolPath = Resolve-StandardValidationInternalUseToolPath -Path ([string]$tool.path) -Context 'internal use tool'
+        if ((Get-StandardValidationFileSha256 -Path $resolvedToolPath -Context 'internal use tool') -cne [string]$tool.sha256) {
             throw 'BLOCKED|Internal use tool bytes drifted.'
         }
         $tools.Add($id, $tool)
+        $toolPaths.Add($id, $resolvedToolPath)
     }
     foreach ($requirement in $approval.requiredTools) {
         if (-not $tools.ContainsKey([string]$requirement.id)) { throw "BLOCKED|Required internal use tool is missing: $($requirement.id)" }
@@ -6479,8 +6714,9 @@ function Resolve-StandardValidationInternalSkillUse {
     }
     foreach ($requirement in $approval.requiredTools) {
         $tool = $tools[[string]$requirement.id]
-        Assert-StandardValidationRegularFile -Path ([string]$tool.path) -Context 'internal use final tool'
-        if ((Get-StandardValidationFileSha256 -Path ([string]$tool.path) -Context 'internal use final tool') -cne [string]$tool.sha256) {
+        $finalToolPath = Resolve-StandardValidationInternalUseToolPath -Path ([string]$tool.path) -Context 'internal use final tool'
+        if ($finalToolPath -cne $toolPaths[[string]$requirement.id] -or
+            (Get-StandardValidationFileSha256 -Path $finalToolPath -Context 'internal use final tool') -cne [string]$tool.sha256) {
             throw 'BLOCKED|Internal use tool changed during evaluation.'
         }
     }

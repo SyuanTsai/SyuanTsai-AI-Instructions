@@ -958,6 +958,10 @@ if ((Test-CleanupCanonicalSourceRepository -Repository $targetRootPath) -or
     throw 'Tracked AI instructions pollution cleanup refuses the canonical Instructions source repository.'
 }
 
+$gitExcludePath = ((Invoke-CleanupGit -Repository $targetRootPath -Arguments @('rev-parse','--git-path','info/exclude')) | Select-Object -First 1).Trim()
+if (-not [System.IO.Path]::IsPathRooted($gitExcludePath)) { $gitExcludePath = Join-Path $targetRootPath $gitExcludePath }
+Assert-CleanupExcludeMutationPath -Repository $targetRootPath -Path $gitExcludePath
+
 Assert-NoRepoManagedManifestV4 -Repository $targetRootPath
 
 $repositoryOperationLock = Open-CleanupRepositoryOperationLock -Repository $targetRootPath
@@ -1073,9 +1077,6 @@ foreach ($trackedManagedEntry in $trackedManagedEntries) {
 Write-Output "Tracked AI instructions pollution detected: $($trackedManagedPaths -join ', ')"
 if (-not $Authorize) { throw 'Cleanup requires explicit authorization; re-run with -Authorize after reviewing the pollution paths.' }
 
-$gitExcludePath = ((Invoke-CleanupGit -Repository $targetRootPath -Arguments @('rev-parse','--git-path','info/exclude')) | Select-Object -First 1).Trim()
-if (-not [System.IO.Path]::IsPathRooted($gitExcludePath)) { $gitExcludePath = Join-Path $targetRootPath $gitExcludePath }
-Assert-CleanupExcludeMutationPath -Repository $targetRootPath -Path $gitExcludePath
 $excludeMutation = New-CleanupExcludeMutation -Repository $targetRootPath -Path $gitExcludePath
 $cleanupPaths = @($trackedManagedPaths | Sort-Object)
 $indexSnapshot = @(Get-CleanupIndexSnapshot -Repository $targetRootPath -Paths $cleanupPaths)
@@ -1090,7 +1091,8 @@ try {
         -ProtectedPaths $repositoryProtectedClaudeFamilyPaths -PreservedProtectedPaths $preservedProtectedExcludePaths
     Remove-CleanupIndexEntriesAtomically -Repository $targetRootPath -Paths $cleanupPaths -ExpectedSnapshot $indexSnapshot -ProtectedPaths $activeWorktreeProtectedClaudeFamilyPaths
     foreach ($cleanupPath in $cleanupPaths) {
-        $fullPath = Join-Path $targetRootPath $cleanupPath.Replace('/','\')
+        $materializationPath = @($trackedManagedEntries | Where-Object { [string]$_.IndexPath -ceq $cleanupPath } | Select-Object -First 1)[0].ManifestPath
+        $fullPath = Join-Path $targetRootPath ([string]$materializationPath).Replace('/','\')
         if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { throw "Cleanup failed to preserve local materialization: $cleanupPath" }
         $status = @(Invoke-CleanupGit -Repository $targetRootPath -Arguments @('diff','--cached','--name-status','--',$cleanupPath))
         if ($status.Count -ne 1 -or [string]$status[0] -cnotmatch '^D\s+') { throw "Cleanup did not stage exactly one deletion for '$cleanupPath'." }

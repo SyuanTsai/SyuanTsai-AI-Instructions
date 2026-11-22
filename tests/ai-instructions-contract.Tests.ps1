@@ -4,6 +4,7 @@ Describe 'AI instructions machine-readable contract' {
         $script:ContractPath = Join-Path $script:RepositoryRoot 'ai-instructions-contract.json'
         $script:BootstrapPath = Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions.ps1'
         $script:BuilderPath = Join-Path $script:RepositoryRoot 'scripts\Build-AiInstructions.ps1'
+        $script:IsWindowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 
 function Get-AiInstructionText {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -263,7 +264,8 @@ function Invoke-AiInstructionBuilderProcess {
 
     $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BuilderPath,'-RepositoryRoot',$Root)
     if ($Check) { $arguments += '-Check' }
-    $output = & powershell.exe @arguments 2>&1 | Out-String
+    $powerShellExecutable = if ($script:IsWindowsHost) { 'powershell.exe' } else { (Get-Process -Id $PID).Path }
+    $output = & $powerShellExecutable @arguments 2>&1 | Out-String
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
 }
 
@@ -865,6 +867,39 @@ function New-AiInstructionFixture {
                 }
             }
         }
+    }
+
+    # Scenario: Cross-platform scripts or branch-changed tests introduce a case-variant assignment to a read-only platform automatic variable.
+    # Purpose: Reject the assignment at parse level on every host before Linux or macOS reaches the affected code path.
+    It 'UnitT55_rejects_assignments_to_read_only_platform_automatic_variables' {
+        $relativePaths = @(
+            'scripts/Invoke-StandardValidation.ps1',
+            'scripts/cleanup-ai-instructions-pollution.ps1',
+            'tests/ai-instructions-contract.Tests.ps1',
+            'tests/bootstrap-ai-instructions.Tests.ps1',
+            'tests/cleanup-ai-instructions-pollution.Tests.ps1',
+            'tests/internal-skill-use.Tests.ps1',
+            'tests/invoke-ai-instructions-rollout.Tests.ps1'
+        )
+        $forbidden = @('IsWindows','IsLinux','IsMacOS')
+        $violations = foreach ($relativePath in $relativePaths) {
+            $tokens = $null
+            $parseErrors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+                (Join-Path $script:RepositoryRoot $relativePath), [ref]$tokens, [ref]$parseErrors)
+            @($parseErrors).Count | Should Be 0
+            foreach ($assignment in @($ast.FindAll({
+                            param($node)
+                            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                            $node.Left -is [System.Management.Automation.Language.VariableExpressionAst]
+                        }, $true))) {
+                $name = [string]$assignment.Left.VariablePath.UserPath
+                if ($forbidden -icontains $name) {
+                    '{0}:{1}:${2}' -f $relativePath,$assignment.Extent.StartLineNumber,$name
+                }
+            }
+        }
+        @($violations) | Should BeNullOrEmpty
     }
 
 }
