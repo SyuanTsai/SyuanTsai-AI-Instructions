@@ -544,6 +544,20 @@ Describe 'Internal Skill use approvals' {
 
             { Invoke-InternalUseFixture $fixture } | Should -Throw "path component is not a directory: $blockerPath"
         }
+
+        # Scenario: A trusted final symbolic link targets the reviewed regular file with a trailing separator.
+        # Purpose: Preserve POSIX ENOTDIR semantics instead of approving a regular file as a directory target.
+        It 'UnitT99_RejectsAUnixFinalSymlinkTargetWithATrailingSeparator' {
+            $fixture = New-InternalUseFixture
+            $targetPath = Join-Path $script:InternalUseTrustedUnixRoot 'trailing-separator-target'
+            Copy-Item -LiteralPath ([string]$fixture.tools[1].path) -Destination $targetPath
+            [IO.File]::SetUnixFileMode($targetPath, [IO.UnixFileMode]384)
+            $linkPath = Join-Path (Split-Path -Parent ([string]$fixture.tools[1].path)) 'trailing-separator-link'
+            New-Item -ItemType SymbolicLink -Path $linkPath -Target "$targetPath/" | Out-Null
+            $fixture.tools[1].path = $linkPath
+
+            { Invoke-InternalUseFixture $fixture } | Should -Throw 'regular file'
+        }
     }
 
     # Scenario: Package bytes change only after the initial inventory, during final authority binding.

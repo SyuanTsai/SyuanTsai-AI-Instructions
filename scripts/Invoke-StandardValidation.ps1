@@ -852,6 +852,12 @@ function Resolve-StandardValidationInternalUseToolPath {
                 throw "INVALID|$Context symbolic-link target path must not be empty: $current"
             }
             Assert-StandardValidationTrustedUnixLinkPath -Path $current -Context $Context
+            $targetLastCharacter = $linkTarget[$linkTarget.Length - 1]
+            if ($pending.Count -eq 0 -and
+                ($targetLastCharacter -eq [IO.Path]::DirectorySeparatorChar -or
+                 $targetLastCharacter -eq [IO.Path]::AltDirectorySeparatorChar)) {
+                throw "INVALID|$Context must resolve to a regular file: $current"
+            }
             if ([IO.Path]::IsPathFullyQualified($linkTarget)) {
                 $targetAnchor = [IO.Path]::GetPathRoot($linkTarget)
                 $targetPath = $linkTarget.Substring($targetAnchor.Length)
