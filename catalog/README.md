@@ -101,10 +101,10 @@ Conditional operator 的 production semantics：
 - `shells` 使用可判讀的 capability expression，例如 `pwsh>=7`。
 - `requiredCapabilities` 中每一項都必須滿足。
 - `anyOfCapabilities` 的每個內層集合代表 alternatives；每個集合至少滿足一項。
-- Capability `kind` 為 `command`、`connector` 或 `environment`；`state` 為 `available`、`authenticated` 或 `configured`。
+- Capability requirement 的 `kind` 為 `command`、`connector` 或 `environment`；`state` 為 `available`、`authenticated` 或 `configured`。只有 runtime evidence 可另外使用 `absent` 明確撤銷能力。
 - `command` + `available` 可由本機 `Get-Command` 驗證；authentication、connector、API/environment readiness 不得由名稱猜測，必須有明確 runtime evidence。
 - 只有 Skill 在任何安全路徑都無法運作時，connector 或 environment 才屬於安裝期 compatibility。若 Skill 已定義「tool 不可用時略過外部寫入並繼續本機工作」的安全 fallback，該 connector 是執行期 dependency，保留在 Skill metadata／instructions，不得放入 `requiredCapabilities` 阻止 Skill 載入。`manage-ai-memory` 的可選遠端記憶工具即採此模式。
-- Runtime evidence 透過 `AI_INSTRUCTIONS_CAPABILITY_EVIDENCE` 傳入 JSON array，例如：
+- Runtime evidence 是 `{kind,id,state}` 的 JSON array，同一個 `(kind,id)` 不得重複。config v5 可透過 installer 的 `-CapabilityEvidence '<JSON>'` 宣告或整份取代；傳入 `[]` 或使用 `-ClearCapabilityEvidence` 會清除。未給這兩個參數但 `AI_INSTRUCTIONS_CAPABILITY_EVIDENCE` 非空時，installer 會沿用舊介面並把內容持久化到 config v5。例如：
 
 ```json
 [
@@ -114,7 +114,9 @@ Conditional operator 的 production semantics：
 ]
 ```
 
-- 對 Catalog 明確宣告的安裝期 compatibility，沒有 evidence 時採 fail-closed；不得只因 profile 被選取就假設 connector、authentication 或 API capability 可用。執行期 optional dependency 則由 Skill 自身 fallback 處理，不得偽造 evidence。
+- 明確撤銷使用 `state: "absent"`；它代表該能力不存在，不會滿足任何 compatibility requirement。config 已存證據會先載入，再由本次執行的 `AI_INSTRUCTIONS_CAPABILITY_EVIDENCE` 依 `(kind,id)` 覆蓋；`update-agent-environment` 只使用合併後結果，不改寫 config。
+- 後續 installer `Auto`、launcher 自動更新，以及 `update-agent-environment` Apply／VerifyOnly 都沿用 config v5 已存證據。持久化參數只接受 V3V5；V2V4 會拒絕並提示改用 `-WriterSchema V3V5`。config v4 不新增欄位。
+- 全新安裝時，Catalog 明確宣告的 connector／environment compatibility 若沒有 evidence，仍採 fail-closed，不得只因 profile 被選取就假設能力可用。若目前受管 USER manifest 已管理該 Skill，完全沒有對應 `(kind,id)` 證據則代表狀態未知：Skill 會保留、照目前 pin 更新並顯示宣告／`absent` 提示，VerifyOnly 仍為 `current`。只有明確 `absent` 才移除；platform、shell、removed lifecycle、明確 exclude 及 `command` 的 `Get-Command` 判斷都不因保留規則放寬。執行期 optional dependency 仍由 Skill 自身 fallback 處理，不得偽造 evidence。
 
 ## Source acquisition、pin 與 hash contract
 

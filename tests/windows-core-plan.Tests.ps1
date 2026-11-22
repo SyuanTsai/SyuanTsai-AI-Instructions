@@ -472,9 +472,10 @@ if ($IsWindows) {
             'install-ai-instructions-bootstrap.part1.Tests.ps1' = 17
             'install-ai-instructions-bootstrap.part2.Tests.ps1' = 19
             'install-ai-instructions-bootstrap.part3.Tests.ps1' = 20
+            'install-ai-instructions-bootstrap.part4.Tests.ps1' = 6
             'bootstrap-ai-instructions.Tests.ps1' = 26
             'ai-instructions-writer-gate.part2.Tests.ps1' = 25
-            'agent-environment-reconciler.Tests.ps1' = 18
+            'agent-environment-reconciler.Tests.ps1' = 22
             'ai-instructions-writer-gate.part1.Tests.ps1' = 16
             'syp214-user-only.Tests.ps1' = 10
             'platform-runtime.Tests.ps1' = 3
@@ -485,7 +486,7 @@ if ($IsWindows) {
             'trust-anchor-tools.Tests.ps1' = 2
             'consumer-bootstrap.Tests.ps1' = 4
             'consumer-source-gate.Tests.ps1' = 17
-            'bootstrap-ai-instructions-multisource.Tests.ps1' = 2
+            'bootstrap-ai-instructions-multisource.Tests.ps1' = 3
             'ai-instructions-writer-gate.part3.Tests.ps1' = 15
             'ai-instructions-writer-gate.part4.Tests.ps1' = 12
             'ai-instructions-writer-gate.part5.Tests.ps1' = 12
@@ -500,20 +501,20 @@ if ($IsWindows) {
         }
 
         $expectedShards = @(
-            @('bootstrap-ai-instructions.Tests.ps1','third-party-source-envelope.Tests.ps1'),
-            @('ai-instructions-writer-gate.part2.Tests.ps1','standard-core-progress.Tests.ps1','windows-core-plan.Tests.ps1'),
-            @('ai-instructions-runtime-contract.Tests.ps1','install-ai-instructions-bootstrap.part3.Tests.ps1','license-delivery.Tests.ps1','skills-catalog-source-host.Tests.ps1','standard-process-discovery.Tests.ps1','standard-validation-runner.Tests.ps1'),
-            @('ai-instructions-writer-gate.part9.Tests.ps1','bootstrap-ai-instructions-multisource-lock-arrays.Tests.ps1','licensing-scope.Tests.ps1','platform-runtime.Tests.ps1','skills-selection.Tests.ps1','standard-semantic-bridge.Tests.ps1'),
-            @('bootstrap-ai-instructions-multisource.Tests.ps1','install-ai-instructions-bootstrap.part2.Tests.ps1','production-skills-catalog.Tests.ps1','skills-source-acquisition.Tests.ps1','standard-validation-resolver-hardening.Tests.ps1','trust-anchor-tools.Tests.ps1'),
-            @('agent-environment-reconciler.Tests.ps1','ai-instructions-launcher-recovery.Tests.ps1','routine-semantic-scan.Tests.ps1','skills-source-composition.Tests.ps1','standard-validation-skillspector-probe.Tests.ps1','update-ai-instructions.Tests.ps1'),
-            @('agent-artifact-remediation.Tests.ps1','ai-instructions-writer-gate.part8.Tests.ps1','cleanup-ai-instructions-pollution.Tests.ps1','consumer-gate-workflow.Tests.ps1','safe-zip.Tests.ps1','skills-source-retrieval.Tests.ps1','static-approved-exceptions.Tests.ps1'),
-            @('ai-instructions-writer-gate.part7.Tests.ps1','consumer-source-gate.Tests.ps1','internal-skill-use.Tests.ps1','skill-tools-core-path-patch.Tests.ps1','skills-source-routing.Tests.ps1','static-parser-coverage.Tests.ps1'),
-            @('ai-instructions-contract.Tests.ps1','consumer-bootstrap.Tests.ps1','install-ai-instructions-bootstrap.part1.Tests.ps1','invoke-ai-instructions-rollout.Tests.ps1','skills-catalog-contract.Tests.ps1','source-merge-exception-draft.Tests.ps1','syp101-production-smoke-contract.Tests.ps1'),
-            @('ai-instructions-writer-gate.part1.Tests.ps1','syp214-user-only.Tests.ps1'),
+            @('bootstrap-ai-instructions.Tests.ps1','skills-source-routing.Tests.ps1','third-party-source-envelope.Tests.ps1'),
+            @('ai-instructions-writer-gate.part2.Tests.ps1','routine-semantic-scan.Tests.ps1','source-merge-exception-draft.Tests.ps1','windows-core-plan.Tests.ps1'),
+            @('agent-environment-reconciler.Tests.ps1','platform-runtime.Tests.ps1','safe-zip.Tests.ps1','standard-core-progress.Tests.ps1'),
+            @('ai-instructions-contract.Tests.ps1','cleanup-ai-instructions-pollution.Tests.ps1','consumer-gate-workflow.Tests.ps1','install-ai-instructions-bootstrap.part3.Tests.ps1','skill-tools-core-path-patch.Tests.ps1','standard-process-discovery.Tests.ps1'),
+            @('ai-instructions-launcher-recovery.Tests.ps1','ai-instructions-writer-gate.part9.Tests.ps1','internal-skill-use.Tests.ps1','skills-catalog-contract.Tests.ps1','standard-semantic-bridge.Tests.ps1','standard-validation-runner.Tests.ps1'),
+            @('bootstrap-ai-instructions-multisource.Tests.ps1','install-ai-instructions-bootstrap.part2.Tests.ps1','invoke-ai-instructions-rollout.Tests.ps1','skills-catalog-source-host.Tests.ps1','standard-validation-resolver-hardening.Tests.ps1','trust-anchor-tools.Tests.ps1'),
+            @('ai-instructions-writer-gate.part8.Tests.ps1','consumer-bootstrap.Tests.ps1','license-delivery.Tests.ps1','skills-selection.Tests.ps1','standard-validation-skillspector-probe.Tests.ps1','update-ai-instructions.Tests.ps1'),
+            @('ai-instructions-runtime-contract.Tests.ps1','consumer-source-gate.Tests.ps1','install-ai-instructions-bootstrap.part4.Tests.ps1','licensing-scope.Tests.ps1','skills-source-acquisition.Tests.ps1','static-approved-exceptions.Tests.ps1'),
+            @('agent-artifact-remediation.Tests.ps1','ai-instructions-writer-gate.part7.Tests.ps1','bootstrap-ai-instructions-multisource-lock-arrays.Tests.ps1','install-ai-instructions-bootstrap.part1.Tests.ps1','production-skills-catalog.Tests.ps1','skills-source-composition.Tests.ps1','static-parser-coverage.Tests.ps1'),
+            @('ai-instructions-writer-gate.part1.Tests.ps1','syp101-production-smoke-contract.Tests.ps1','syp214-user-only.Tests.ps1'),
             @('ai-instructions-writer-gate.part3.Tests.ps1','ai-instructions-writer-gate.part5.Tests.ps1'),
-            @('ai-instructions-writer-gate.part4.Tests.ps1','ai-instructions-writer-gate.part6.Tests.ps1','third-party-skill-source.Tests.ps1')
+            @('ai-instructions-writer-gate.part4.Tests.ps1','ai-instructions-writer-gate.part6.Tests.ps1','skills-source-retrieval.Tests.ps1','third-party-skill-source.Tests.ps1')
         )
-        $expectedLoads = @(27,27,26,26,26,26,26,26,26,26,27,26)
+        $expectedLoads = @(28,28,27,27,27,27,27,27,27,27,27,27)
         $script:ActualPlan.Plan.shards.Count | Should Be 12
         for ($index = 0; $index -lt $expectedShards.Count; $index++) {
             $shard = $script:ActualPlan.Plan.shards[$index]
@@ -526,7 +527,7 @@ if ($IsWindows) {
             }
             $load | Should Be $expectedLoads[$index]
         }
-        ($expectedLoads | Measure-Object -Maximum).Maximum | Should Be 27
+        ($expectedLoads | Measure-Object -Maximum).Maximum | Should Be 28
     }
 
     # Scenario: A shard configuration retains the retired eight-partition value.

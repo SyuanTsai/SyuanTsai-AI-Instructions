@@ -1518,6 +1518,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/install-ai-instructions-bootstrap.part4.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/install-ai-instructions-bootstrap.TestSupport.ps1",
       "license": "Apache-2.0"
     },

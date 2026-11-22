@@ -341,14 +341,192 @@ function New-SelectionCatalog {
         }
     }
 
-    # Scenario: Capability evidence is present but is not valid JSON.
-    # Purpose: Reject malformed evidence rather than silently weakening compatibility checks.
+    # Scenario: Capability evidence is malformed JSON or a valid top-level object instead of an array.
+    # Purpose: Reject malformed and wrong-shaped evidence rather than silently weakening compatibility checks.
     It 'UnitT96_rejects_invalid_capability_evidence_json' {
         $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='{invalid'
         $catalog=New-SelectionCatalog
         Assert-ThrowsMessage {
             Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@() })
         } 'not valid JSON'
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='{"kind":"connector","id":"datadog","state":"configured"}'
+        Assert-ThrowsMessage {
+            Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@() })
+        } 'must be a JSON array'
+    }
+
+    # Scenario: A profile-selected connector-gated Skill is present in the managed USER manifest, but no current evidence exists for its capability.
+    # Purpose: Preserve an installed Skill when connector state is unknown and emit actionable evidence guidance without changing fresh-install filtering.
+    It 'UnitT99_preserves_an_installed_Skill_when_connector_evidence_is_unknown' {
+        $catalog = New-SelectionCatalog
+        $catalog.skills = @($catalog.skills | Where-Object { $_.id -ne 'skill-optional' }) + @(
+            (New-TestSkill -Id 'skill-optional' -Compatibility (New-TestCompatibility -RequiredCapabilities @(
+                [pscustomobject]@{ kind='connector'; id='datadog'; state='configured' }
+            )))
+        )
+        $selection = [pscustomobject]@{ profiles=@('optional'); includeSkills=@(); excludeSkills=@() }
+
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection).Count | Should Be 0
+        $warnings = @()
+        $resolved = @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -InstalledSkillIds @('skill-optional') -WarningVariable warnings)
+
+        Assert-StringSequence -Actual $resolved -Expected @('skill-optional')
+        ($warnings -join "`n") | Should Match 'skill-optional'
+        ($warnings -join "`n") | Should Match 'connector:datadog'
+        ($warnings -join "`n") | Should Match '\-CapabilityEvidence'
+        ($warnings -join "`n") | Should Match 'absent'
+    }
+
+    # Scenario: Stored configured evidence is overlaid by an environment declaration, including the explicit absent state in either source.
+    # Purpose: Make the per-run environment declaration authoritative while keeping persisted evidence immutable at selection time.
+    It 'UnitT100_merges_stored_evidence_with_environment_override_and_honors_absent' {
+        $catalog = New-SelectionCatalog
+        $catalog.skills = @($catalog.skills | Where-Object { $_.id -ne 'skill-optional' }) + @(
+            (New-TestSkill -Id 'skill-optional' -Compatibility (New-TestCompatibility -RequiredCapabilities @(
+                [pscustomobject]@{ kind='connector'; id='datadog'; state='configured' }
+            )))
+        )
+        $selection = [pscustomobject]@{ profiles=@('optional'); includeSkills=@(); excludeSkills=@() }
+        $configured = @([pscustomobject]@{kind='connector';id='datadog';state='configured'})
+        $absent = @([pscustomobject]@{kind='connector';id='datadog';state='absent'})
+
+        Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -CapabilityEvidence $configured) -Expected @('skill-optional')
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -CapabilityEvidence $absent -InstalledSkillIds @('skill-optional')).Count | Should Be 0
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"absent"}]'
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -CapabilityEvidence $configured -InstalledSkillIds @('skill-optional')).Count | Should Be 0
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"configured"}]'
+        Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -CapabilityEvidence $absent) -Expected @('skill-optional')
+    }
+
+    # Scenario: Installed Skills fail command, platform, or explicit-exclusion checks while connector evidence is unknown.
+    # Purpose: Limit unknown-state preservation to connector/environment capability gaps and retain all existing hard filters.
+    It 'UnitT101_does_not_preserve_command_platform_or_explicitly_excluded_Skills' {
+        $catalog = [pscustomobject]@{
+            profiles=@([pscustomobject]@{id='core';default=$true;includes=@('connector-skill','command-skill','platform-skill');excludes=@()})
+            skills=@(
+                (New-TestSkill -Id 'connector-skill' -Compatibility (New-TestCompatibility -RequiredCapabilities @([pscustomobject]@{kind='connector';id='datadog';state='configured'}))),
+                (New-TestSkill -Id 'command-skill' -Compatibility (New-TestCompatibility -RequiredCapabilities @([pscustomobject]@{kind='command';id='syp511-command-that-does-not-exist';state='available'}))),
+                (New-TestSkill -Id 'platform-skill' -Compatibility (New-TestCompatibility -Platforms @('syp511-unsupported') -RequiredCapabilities @([pscustomobject]@{kind='connector';id='datadog';state='configured'})))
+            )
+        }
+        $installed=@('connector-skill','command-skill','platform-skill')
+        $selection=[pscustomobject]@{profiles=@('core');includeSkills=@();excludeSkills=@('connector-skill')}
+
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -InstalledSkillIds $installed).Count | Should Be 0
+    }
+
+    # Scenario: Stored or environment capability evidence repeats the same kind and ID tuple.
+    # Purpose: Reject ambiguous precedence within one evidence source before selection can silently collapse it.
+    It 'UnitT102_rejects_duplicate_capability_evidence_tuples' {
+        $catalog=New-SelectionCatalog
+        $selection=[pscustomobject]@{profiles=@('core');includeSkills=@();excludeSkills=@()}
+        $duplicate=@(
+            [pscustomobject]@{kind='connector';id='datadog';state='configured'},
+            [pscustomobject]@{kind='connector';id='datadog';state='absent'}
+        )
+        Assert-ThrowsMessage { Resolve-SkillsSelection -Catalog $catalog -Selection $selection -CapabilityEvidence $duplicate } 'duplicate'
+        $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"configured"},{"kind":"connector","id":"datadog","state":"absent"}]'
+        Assert-ThrowsMessage { Resolve-SkillsSelection -Catalog $catalog -Selection $selection } 'duplicate'
+    }
+
+    # Scenario: An installed connector-gated Skill requires configured evidence while the matching tuple is only available or authenticated.
+    # Purpose: Preserve only the managed installation for non-absent states that do not yet satisfy the requirement, while keeping fresh-install filtering unchanged.
+    It 'UnitT103_preserves_installed_Skills_for_non_absent_mismatched_states_but_filters_fresh_installs' {
+        $catalog = New-SelectionCatalog
+        $catalog.skills = @($catalog.skills | Where-Object { $_.id -ne 'skill-optional' }) + @(
+            (New-TestSkill -Id 'skill-optional' -Compatibility (New-TestCompatibility -RequiredCapabilities @(
+                [pscustomobject]@{ kind='connector'; id='datadog'; state='configured' }
+            )))
+        )
+        $selection = [pscustomobject]@{ profiles=@('optional'); includeSkills=@(); excludeSkills=@() }
+
+        foreach ($state in @('available','authenticated')) {
+            $evidence = @([pscustomobject]@{kind='connector';id='datadog';state=$state})
+            @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -CapabilityEvidence $evidence).Count | Should Be 0
+            $warnings = @()
+
+            $resolved = @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -CapabilityEvidence $evidence -InstalledSkillIds @('skill-optional') -WarningVariable warnings)
+
+            Assert-StringSequence -Actual $resolved -Expected @('skill-optional')
+            ($warnings -join "`n") | Should Match 'connector:datadog'
+            ($warnings -join "`n") | Should Match 'absent'
+        }
+    }
+
+    # Scenario: A managed manifest still records a removed Skill ID whose Catalog tombstone and active alias both point to a connector-gated replacement.
+    # Purpose: Preserve the active replacement as already installed when evidence is unknown, while retaining fresh-install filtering and explicit excludes.
+    It 'UnitT104_normalizes_installed_removed_ids_to_the_active_replacement' {
+        $catalog = [pscustomobject]@{
+            profiles=@([pscustomobject]@{ id='core'; default=$true; includes=@('new-skill'); excludes=@() })
+            skills=@(
+                (New-TestSkill -Id 'old-skill' -Status 'removed' -ReplacementId 'new-skill'),
+                (New-TestSkill -Id 'new-skill' -Aliases @('old-skill') -Compatibility (New-TestCompatibility -RequiredCapabilities @(
+                    [pscustomobject]@{ kind='connector'; id='datadog'; state='configured' }
+                )))
+            )
+        }
+        $selection = [pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@() }
+
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection).Count | Should Be 0
+        $warnings = @()
+        $resolved = @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection -InstalledSkillIds @('old-skill') -WarningVariable warnings)
+
+        Assert-StringSequence -Actual $resolved -Expected @('new-skill')
+        ($warnings -join "`n") | Should Match 'new-skill'
+        ($warnings -join "`n") | Should Match 'connector:datadog'
+        $excluded = [pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@('old-skill') }
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection $excluded -InstalledSkillIds @('old-skill')).Count | Should Be 0
+    }
+
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and $null -ne (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+        # Scenario: Windows PowerShell 5.1 parses empty, single-record, and multi-record capability evidence arrays in a child process.
+        # Purpose: Keep the shared selection resolver usable by supported Desktop fan-out paths without changing array cardinality semantics.
+        It 'UnitT105_parses_capability_evidence_arrays_in_windows_powershell_5_1' {
+            $childPath = Join-Path $TestDrive 'skills-selection-windows-powershell-5-1.ps1'
+            $childScript = @'
+param([Parameter(Mandatory=$true)][string]$ModulePath)
+$ErrorActionPreference='Stop'
+Import-Module $ModulePath -Force
+function New-ChildSkill([string]$Id,[string]$Kind,[string]$CapabilityId) {
+    [pscustomobject]@{
+        id=$Id
+        compatibility=[pscustomobject]@{
+            platforms=@('any');shells=@()
+            requiredCapabilities=@([pscustomobject]@{kind=$Kind;id=$CapabilityId;state='configured'})
+            anyOfCapabilities=@()
+        }
+        dependencies=@()
+        lifecycle=[pscustomobject]@{status='active';aliases=@()}
+    }
+}
+$catalog=[pscustomobject]@{
+    profiles=@([pscustomobject]@{id='core';default=$true;includes=@('connector-skill','environment-skill');excludes=@()})
+    skills=@(
+        (New-ChildSkill 'connector-skill' 'connector' 'datadog'),
+        (New-ChildSkill 'environment-skill' 'environment' 'jira-cloud-api')
+    )
+}
+$selection=[pscustomobject]@{profiles=@('core');includeSkills=@();excludeSkills=@()}
+$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[]'
+$empty=@(Resolve-SkillsSelection -Catalog $catalog -Selection $selection)
+$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"configured"}]'
+$single=@(Resolve-SkillsSelection -Catalog $catalog -Selection $selection)
+$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"datadog","state":"configured"},{"kind":"environment","id":"jira-cloud-api","state":"configured"}]'
+$multiple=@(Resolve-SkillsSelection -Catalog $catalog -Selection $selection)
+[pscustomobject]@{empty=$empty;single=$single;multiple=$multiple}|ConvertTo-Json -Depth 4 -Compress
+'@
+            [IO.File]::WriteAllText($childPath,$childScript,[Text.UTF8Encoding]::new($false))
+
+            $output = @(& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $childPath -ModulePath (Join-Path $script:RepositoryRoot 'scripts\skills-selection.psm1') 2>&1)
+            $exitCode = $LASTEXITCODE
+
+            if ($exitCode -ne 0) { throw "Windows PowerShell 5.1 child failed: $($output -join [Environment]::NewLine)" }
+            $exitCode | Should Be 0
+            $result = [string]$output[-1] | ConvertFrom-Json
+            @($result.empty).Count | Should Be 0
+            Assert-StringSequence -Actual @($result.single) -Expected @('connector-skill')
+            Assert-StringSequence -Actual @($result.multiple) -Expected @('connector-skill','environment-skill')
+        }
     }
 
     # Scenario: The approved Atlassian profile resolves its existing setup fallback on Windows and filters platform-specific Skills elsewhere.

@@ -1467,7 +1467,11 @@ function Get-ProjectCandidateDesiredState {
     if (($expectedProjections -join "`n") -cne ($actualProjections -join "`n") -or $expectedProjections.Count -eq 0) {
         throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'Project candidate projections do not match the verified sync configuration.')
     }
-    $selectedSkillIds = @(Resolve-SkillsSelection -Catalog $Catalog -Selection $SyncConfiguration.catalog)
+    $configuredCapabilityEvidence = @()
+    if ($null -ne $SyncConfiguration.PSObject.Properties['capabilityEvidence']) {
+        $configuredCapabilityEvidence = @($SyncConfiguration.capabilityEvidence)
+    }
+    $selectedSkillIds = @(Resolve-SkillsSelection -Catalog $Catalog -Selection $SyncConfiguration.catalog -CapabilityEvidence $configuredCapabilityEvidence)
     [string[]]$expectedSkillIds = @($selectedSkillIds)
     [Array]::Sort($expectedSkillIds,[StringComparer]::Ordinal)
     [string[]]$actualSkillIds = @($inventory.skills | ForEach-Object { [string]$_.id })

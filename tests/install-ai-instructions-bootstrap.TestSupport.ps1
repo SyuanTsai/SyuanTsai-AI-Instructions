@@ -74,7 +74,11 @@ function Invoke-InstallScript {
         [Parameter(Mandatory = $true)][string] $CodexHome,
         [string[]] $ExcludedRepositoryUrls = @(),
         [string[]] $ExcludedRepositoryPaths = @(),
-        [string] $IsolatedUserHome
+        [string] $IsolatedUserHome,
+        [ValidateSet('Auto','V2V4','V3V5')][string] $WriterSchema='Auto',
+        [AllowNull()][string] $CapabilityEvidence,
+        [switch] $ClearCapabilityEvidence,
+        [AllowNull()][string] $CapabilityEvidenceEnvironment
     )
 
     $sourceCommit = (@(& git -C $RepositoryRoot rev-parse HEAD) -join '').Trim()
@@ -87,8 +91,11 @@ function Invoke-InstallScript {
         '-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git',
         '-SourceCommit',$sourceCommit,
         '-ArchiveSha256',$archiveSha256,
-        '-SourceArchivePath',$archivePath
+        '-SourceArchivePath',$archivePath,
+        '-WriterSchema',$WriterSchema
     )
+    if($PSBoundParameters.ContainsKey('CapabilityEvidence')){$arguments+=@('-CapabilityEvidence',$CapabilityEvidence)}
+    if($ClearCapabilityEvidence){$arguments+='-ClearCapabilityEvidence'}
     if ($ExcludedRepositoryUrls.Count -gt 0) {
         $arguments += '-ExcludedRepositoryUrls'
         foreach ($repositoryUrl in $ExcludedRepositoryUrls) { $arguments += $repositoryUrl }
@@ -110,6 +117,8 @@ function Invoke-InstallScript {
         $start.Environment['HOME']=$isolatedEnvironment.Home;$start.Environment['USERPROFILE']=$isolatedEnvironment.UserProfile;$start.Environment['CODEX_HOME']=$CodexHome
         $start.Environment['APPDATA']=$isolatedEnvironment.AppData;$start.Environment['LOCALAPPDATA']=$isolatedEnvironment.LocalAppData
         $start.Environment['XDG_CONFIG_HOME']=$isolatedEnvironment.XdgConfig;$start.Environment['XDG_DATA_HOME']=$isolatedEnvironment.XdgData;$start.Environment['XDG_CACHE_HOME']=$isolatedEnvironment.XdgCache
+        [void]$start.Environment.Remove('AI_INSTRUCTIONS_CAPABILITY_EVIDENCE')
+        if($PSBoundParameters.ContainsKey('CapabilityEvidenceEnvironment')){$start.Environment['AI_INSTRUCTIONS_CAPABILITY_EVIDENCE']=$CapabilityEvidenceEnvironment}
         $process=[Diagnostics.Process]::new();$process.StartInfo=$start
         try{
             if(-not$process.Start()){throw 'Failed to start isolated installer child process.'}

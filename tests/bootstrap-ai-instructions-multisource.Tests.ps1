@@ -59,12 +59,15 @@ function New-TestInstructionArchive {
     param([string]$Root,[string]$ArchivePath)
     $repositoryRoot=Join-Path $Root 'SyuanTsai-AI-Instructions-main'
     Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path (Join-Path $repositoryRoot '.codex\AI-Rules'),(Join-Path $repositoryRoot '.github\AI-Rules'),(Join-Path $repositoryRoot '.agents\skills\legacy-skill')|Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $repositoryRoot '.codex\AI-Rules'),(Join-Path $repositoryRoot '.github\AI-Rules'),(Join-Path $repositoryRoot '.claude\AI-Rules'),(Join-Path $repositoryRoot '.agents\skills\legacy-skill'),(Join-Path $repositoryRoot 'scripts')|Out-Null
     Set-TestUtf8Text (Join-Path $repositoryRoot '.codex\AGENTS.en.md') "# Codex Base`n"
     Set-TestUtf8Text (Join-Path $repositoryRoot '.codex\AI-Rules\core.en.md') "# Codex Rule`n"
     Set-TestUtf8Text (Join-Path $repositoryRoot '.github\copilot-instructions.en.md') "# Copilot Base`n"
     Set-TestUtf8Text (Join-Path $repositoryRoot '.github\AI-Rules\core.en.md') "# Copilot Rule`n"
+    Set-TestUtf8Text (Join-Path $repositoryRoot '.claude\CLAUDE.en.md') "# Claude Base`n"
+    Set-TestUtf8Text (Join-Path $repositoryRoot '.claude\AI-Rules\core.en.md') "# Claude Rule`n"
     Set-TestUtf8Text (Join-Path $repositoryRoot '.agents\skills\legacy-skill\SKILL.md') "---`nname: legacy-skill`ndescription: Legacy fixture skill.`n---`n"
+    Set-TestUtf8Text (Join-Path $repositoryRoot 'scripts\Build-AiInstructions.ps1') "param([switch]`$Check)`n"
     Compress-TestDirectory -SourceRoot $repositoryRoot -ArchivePath $ArchivePath
 }
 function New-TestSkillArchive {
@@ -86,6 +89,37 @@ function New-TestSkillArchive {
     $contentHash=Get-SkillInventorySha256 -RepositoryRoot $repositoryRoot -SkillRoot $skillRoot
     Compress-TestDirectory -SourceRoot $repositoryRoot -ArchivePath $ArchivePath
     return [pscustomobject]@{ArchivePath=$ArchivePath;ArchiveSha256=(Get-TestFileSha256 $ArchivePath);ContentSha256=$contentHash}
+}
+
+function New-TestDatadogSkillArchive {
+    param([string]$Root,[string]$ArchivePath)
+    $repositoryRoot=Join-Path $Root 'Skill-General-aaaaaaaa'
+    $skillRoot=Join-Path $repositoryRoot 'skills\investigate-datadog-logs'
+    $baselineSkillRoot=Join-Path $repositoryRoot 'skills\plan-production-change'
+    Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $skillRoot,$baselineSkillRoot|Out-Null
+    Set-TestUtf8Text (Join-Path $skillRoot 'SKILL.md') "---`nname: investigate-datadog-logs`ndescription: Isolated launcher evidence fixture.`n---`n`n# Datadog fixture`n"
+    Set-TestUtf8Text (Join-Path $baselineSkillRoot 'SKILL.md') "---`nname: plan-production-change`ndescription: Isolated ungated launcher fixture.`n---`n`n# Baseline fixture`n"
+    $datadogContentHash=Get-SkillInventorySha256 -RepositoryRoot $repositoryRoot -SkillRoot $skillRoot
+    $baselineContentHash=Get-SkillInventorySha256 -RepositoryRoot $repositoryRoot -SkillRoot $baselineSkillRoot
+    Compress-TestDirectory -SourceRoot $repositoryRoot -ArchivePath $ArchivePath
+    return [pscustomobject]@{ArchivePath=$ArchivePath;ArchiveSha256=(Get-TestFileSha256 $ArchivePath);DatadogContentSha256=$datadogContentHash;BaselineContentSha256=$baselineContentHash}
+}
+
+function New-TestV5RuntimeBundle {
+    param([string]$RuntimeRoot,[string]$Commit)
+    $platformModule=Import-Module (Join-Path $RuntimeRoot 'platform-runtime.psd1') -Force -PassThru
+    $receipt=&$platformModule {Get-PlatformCapabilities -Required @()}
+    $contractModule=Import-Module (Join-Path $RuntimeRoot 'ai-instructions-runtime-contract.psm1') -Force -PassThru
+    $arguments=@{
+        RuntimeRoot=$RuntimeRoot
+        Repository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
+        Commit=$Commit
+        Acquisition='git-checkout'
+        CapabilityReceipt=$receipt
+    }
+    $bundle=&$contractModule {param($Arguments) New-AiInstructionsRuntimeBundleV3 @Arguments} $arguments
+    Set-TestUtf8Text (Join-Path $RuntimeRoot 'runtime-bundle.json') (($bundle|ConvertTo-Json -Depth 30).Replace("`r`n","`n")+"`n")
 }
 function New-TestTargetRepository {
     param([string]$Path)
@@ -464,5 +498,65 @@ Describe 'bootstrap-ai-instructions-multisource' {
         $manifest=Get-Content -Raw (Join-Path $targetRoot '.codex/ai-instructions.manifest.json') | ConvertFrom-Json
         @($manifest.files | Where-Object artifactType -eq 'skill').Count | Should Be 0
         (@(Invoke-TestGit $targetRoot @('log','-1','--pretty=%s')) -join '').Trim() | Should Be 'project Skill'
+    }
+}
+
+Describe 'SYP-511 launcher capability evidence fan-out' {
+    BeforeEach { Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue }
+    AfterEach { Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue }
+
+    # Scenario: Config v5 selects the production observability profile with stored Datadog evidence, no evidence, or an environment absent override.
+    # Purpose: Reuse persisted evidence for provenance and project candidates while preserving environment precedence and fresh-install filtering.
+    It 'InterT50_fans_out_stored_capability_evidence_with_environment_precedence' {
+        $runtime=Join-Path $TestDrive 'runtime';New-Item -ItemType Directory -Force -Path (Join-Path $runtime 'catalog')|Out-Null
+        Get-ChildItem -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Filter '*.psm1'|Copy-Item -Destination $runtime
+        Copy-TestPlatformRuntimeClosure -Destination $runtime
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md') -Destination (Join-Path $runtime 'bootstrap-section.md')
+        $catalogPath=Join-Path $runtime 'catalog/skills-catalog.json';$lockPath=Join-Path $runtime 'catalog/skills-catalog-lock.json'
+        $catalog=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog.json')|ConvertFrom-Json
+        $catalog.projections=@($catalog.projections)+@([pscustomobject][ordered]@{id='project-agents';scope='project';root='.agents/skills'})
+        Set-TestUtf8Text $catalogPath (($catalog|ConvertTo-Json -Depth 30).Replace("`r`n","`n")+"`n")
+        $lock=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog-lock.json')|ConvertFrom-Json
+        $skillId='investigate-datadog-logs';$source=@($lock.sources|Where-Object id -ceq 'general')[0]
+        $skillArchive=New-TestDatadogSkillArchive -Root (Join-Path $TestDrive 'datadog-source') -ArchivePath (Join-Path $TestDrive 'datadog-source.zip')
+        $source.archiveSha256=$skillArchive.ArchiveSha256
+        @($lock.skills|Where-Object id -ceq $skillId)[0].contentSha256=$skillArchive.DatadogContentSha256
+        @($lock.skills|Where-Object id -ceq 'plan-production-change')[0].contentSha256=$skillArchive.BaselineContentSha256
+        $lock.catalogSha256=Get-TestFileSha256 $catalogPath
+        $contractModule=Import-Module (Join-Path $runtime 'ai-instructions-runtime-contract.psm1') -Force -PassThru
+        $lock.projectionContractSha256=&$contractModule {param($Projections) Get-AiInstructionsProjectionContractSha256 -Projections $Projections} $catalog.projections
+        Set-TestUtf8Text $lockPath (($lock|ConvertTo-Json -Depth 30).Replace("`r`n","`n")+"`n")
+        $commit='c'*40
+        New-TestV5RuntimeBundle -RuntimeRoot $runtime -Commit $commit
+        $instructionArchive=Join-Path $TestDrive 'instructions.zip'
+        New-TestInstructionArchive (Join-Path $TestDrive 'instruction-root') $instructionArchive
+        $userHome=Join-Path $TestDrive 'user';New-Item -ItemType Directory -Force -Path $userHome|Out-Null
+
+        foreach($case in @(
+            [pscustomobject]@{Name='stored';Stored=$true;Environment=$null;Expected=$true},
+            [pscustomobject]@{Name='unknown';Stored=$false;Environment=$null;Expected=$false},
+            [pscustomobject]@{Name='environment-absent';Stored=$true;Environment='[{"kind":"connector","id":"datadog","state":"absent"}]';Expected=$false}
+        )){
+            $configurationPath=Join-Path $TestDrive "$($case.Name)-config.json"
+            $configuration=[ordered]@{
+                schemaVersion=5;excludedRepositoryUrls=@();excludedRepositoryPaths=@()
+                catalog=[ordered]@{repository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git';ref=$commit;profiles=@('observability');includeSkills=@('plan-production-change');excludeSkills=@()}
+                updates=[ordered]@{mode='notify-only';channel='protected-branch';ref='main';minimumCheckIntervalMinutes=1440}
+                projections=[ordered]@{user=@('user-agents');project=@('project-agents')}
+            }
+            if($case.Stored){$configuration.capabilityEvidence=@([ordered]@{kind='connector';id='datadog';state='configured'})}
+            Set-TestUtf8Text $configurationPath (($configuration|ConvertTo-Json -Depth 20).Replace("`r`n","`n")+"`n")
+            if($null-ne$case.Environment){$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE=[string]$case.Environment}else{Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue}
+            $targetRoot=Join-Path $TestDrive "$($case.Name)-target";New-TestTargetRepository $targetRoot
+
+            & $script:BootstrapScript -CatalogPath $catalogPath -LockPath $lockPath -ConfigurationPath $configurationPath `
+                -InstructionSourceArchivePath $instructionArchive -InstructionSourceCommit $commit `
+                -SourceArchivePaths @{'general'=$skillArchive.ArchivePath} -TargetRoot $targetRoot -UserHome $userHome -RuntimeRoot $runtime
+
+            $skillPath=Join-Path $targetRoot ".agents/skills/$skillId/SKILL.md"
+            (Test-Path -LiteralPath $skillPath -PathType Leaf)|Should Be $case.Expected
+            $manifest=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $targetRoot '.codex/ai-instructions.manifest.json')|ConvertFrom-Json
+            (@($manifest.files|Where-Object artifactId -ceq $skillId).Count -gt 0)|Should Be $case.Expected
+        }
     }
 }
