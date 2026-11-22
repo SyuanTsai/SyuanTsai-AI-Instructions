@@ -135,6 +135,11 @@ cleanup() {
                     run_clean rm -f "$run_tmp/$asset_name" "$run_tmp/._$asset_name" \
                         "$run_tmp/download/$asset_name" "$run_tmp/download/._$asset_name" 2>/dev/null || :
                 fi
+                # On macOS the .NET named-mutex implementation leaves these
+                # empty TMPDIR-relative directories behind after pwsh exits.
+                # Remove only the exact runtime-defined and setup-owned paths;
+                # rmdir neither scans nor deletes a non-empty directory tree.
+                run_clean rmdir "$run_tmp/pwsh-tmp/.dotnet/shm" "$run_tmp/pwsh-tmp/.dotnet" "$run_tmp/pwsh-tmp" 2>/dev/null || :
                 run_clean rmdir "$run_tmp/download" "$run_tmp" 2>/dev/null || : ;;
         esac
     fi
@@ -493,7 +498,8 @@ run_clean chmod 0700 "$bootstrap/pwsh"
 
 # --- S4: hand-off with an explicit environment allowlist (M5) ----------------
 if [ "$os_token" = osx ]; then default_lang=en_US.UTF-8; else default_lang=C.UTF-8; fi
-set -- "HOME=$home" "PATH=${PATH-/usr/bin:/bin}" "LANG=${LANG:-$default_lang}" "TMPDIR=$run_tmp" "PSModulePath=$bootstrap/Modules"
+run_clean mkdir "$run_tmp/pwsh-tmp" || refuse internal-error "$EXIT_INTERNAL_ERROR" 'Cannot create the private PowerShell temp directory.'
+set -- "HOME=$home" "PATH=${PATH-/usr/bin:/bin}" "LANG=${LANG:-$default_lang}" "TMPDIR=$run_tmp/pwsh-tmp" "PSModulePath=$bootstrap/Modules"
 if [ -n "${LC_ALL+x}" ]; then set -- "$@" "LC_ALL=$LC_ALL"; fi
 if [ -n "${HTTPS_PROXY+x}" ]; then set -- "$@" "HTTPS_PROXY=$HTTPS_PROXY"; fi
 if [ -n "${HTTP_PROXY+x}" ]; then set -- "$@" "HTTP_PROXY=$HTTP_PROXY"; fi

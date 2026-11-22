@@ -609,12 +609,16 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         }
     }
 
-    # Scenario: The shell edge downloads and hands off to PowerShell.
-    # Purpose: L7 https-only bounded downloads, M5 env -i allowlist, fixed setup root without XDG.
+    # Scenario: The shell edge downloads and hands off to PowerShell through a dedicated private child temp directory.
+    # Purpose: L7 bounded HTTPS, M5 env -i allowlist, and exact empty-directory cleanup keep .NET runtime state out of the run root.
     It 'UnitT33_uses_https_only_bounded_downloads_and_an_environment_allowlist' {
         $script:SetupShellText | Should Match "curl -q --proto '=https' --proto-redir '=https' --tlsv1\.2"
         $script:SetupShellText | Should Match '--max-time [0-9]+'
         $script:SetupShellText | Should Match 'wget --no-config --https-only --secure-protocol=TLSv1_2 --timeout=[0-9]+'
+        $script:SetupShellText | Should Match ([regex]::Escape('run_clean mkdir "$run_tmp/pwsh-tmp"'))
+        $script:SetupShellText | Should Match ([regex]::Escape('"TMPDIR=$run_tmp/pwsh-tmp"'))
+        $script:SetupShellText | Should Match ([regex]::Escape('run_clean rmdir "$run_tmp/pwsh-tmp/.dotnet/shm" "$run_tmp/pwsh-tmp/.dotnet" "$run_tmp/pwsh-tmp"'))
+        $script:SetupShellText | Should Not Match '"TMPDIR=\$run_tmp"'
         $script:SetupShellText | Should Match '(?m)^"\$env_path" -i "\$@" "\$bootstrap/pwsh" -NoLogo -NoProfile -NonInteractive -File '
         $script:SetupShellText | Should Match 'setup_root="\$home/\.local/share/ai-instructions-setup"'
         foreach ($pattern in @('XDG_','DOTNET_','LD_','DYLD_','POWERSHELL_')) { $script:SetupShellText | Should Not Match $pattern }
