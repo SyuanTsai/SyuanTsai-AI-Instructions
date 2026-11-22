@@ -151,26 +151,22 @@ function ConvertFrom-AiUnicodeEscape {
     return [regex]::Replace($Value, '\\u(?<hex>[0-9A-F]{4})', { param($match) [string][char][Convert]::ToInt32($match.Groups['hex'].Value, 16) })
 }
 
-function Get-AiWindowsOnlyRuntimeExpectation {
+function Get-AiLocalRuntimeSupportMatrixExpectation {
     param([Parameter(Mandatory = $true)][string] $LocaleId)
 
-    # Pinned wording: the original Windows-only invariant sentence plus the single SYP-354 narrow exception (P10 K1).
+    # Pinned wording: Windows, Linux, and macOS local runtimes are supported; WSL is unsupported.
     # Non-ASCII text is escaped so this file stays ASCII-only for every PowerShell lane.
     if ($LocaleId -ceq 'zh-TW') {
-        $original = ConvertFrom-AiUnicodeEscape -Value '\u672C Repository \u8207\u4F7F\u7528\u5176\u5171\u7528 AI-Instructions\uFF0FSkills runtime \u7684\u6D88\u8CBB Repository\uFF0C\u5176\u672C\u6A5F Agent \u958B\u767C\u3001\u5B89\u88DD\u3001\u57F7\u884C\u3001\u9A57\u8B49\u3001\u6E2C\u8A66\u3001acceptance \u8207 CI host \u50C5\u652F\u63F4 Windows\uFF1BLinux\u3001macOS \u8207 WSL \u4E0D\u652F\u63F4\u3002\u6B64\u9650\u5236\u4E0D\u6DB5\u84CB\u4E0B\u6E38\u7522\u54C1\u7684 target\uFF0Fdeployment OS\uFF0C\u4E5F\u4E0D\u9650\u5236\u6838\u51C6 connector \u80CC\u5F8C\u9060\u7AEF SaaS \u7684\u670D\u52D9 OS\u3002'
-        $exception = ConvertFrom-AiUnicodeEscape -Value '\u552F\u4E00\u7A84\u4F8B\u5916\uFF08SYP-354 \u904E\u6E21\u671F\uFF09\uFF1A\u53EA\u6709 (1) disposable cloud setup \u5165\u53E3 `scripts/setup-agent-environment.*`\uFF0C\u4EE5\u53CA (2) \u4EE5\u300CRegister only on the native host\u300D\u689D\u4EF6\u8A3B\u518A\u3001\u53EA\u5728\u5C0D\u61C9 native host \u57F7\u884C\u7684\u6E2C\u8A66\uFF0C\u53EF\u5728 Linux \u6216 macOS \u4E0A\u57F7\u884C\uFF1B\u6B64\u4F8B\u5916\u4E0D\u6539\u8B8A\u652F\u63F4\u77E9\u9663\uFF0C\u4E5F\u4E0D\u6388\u6B0A\u4E00\u822C Linux\u3001macOS \u6216 WSL \u672C\u6A5F\u4F7F\u7528\u3002'
-        $clauseSeparator = ConvertFrom-AiUnicodeEscape -Value '\uFF1B'
+        $text = ConvertFrom-AiUnicodeEscape -Value '\u672C Repository \u8207\u4F7F\u7528\u5176\u5171\u7528 AI-Instructions\uFF0FSkills runtime \u7684\u6D88\u8CBB Repository\uFF0C\u5176\u672C\u6A5F Agent \u958B\u767C\u3001\u5B89\u88DD\u3001\u57F7\u884C\u3001\u9A57\u8B49\u3001\u6E2C\u8A66\u3001acceptance \u8207 CI host \u652F\u63F4 Windows\u3001Linux \u8207 macOS\uFF1BWSL \u4E0D\u652F\u63F4\u3002\u6B64\u9650\u5236\u4E0D\u6DB5\u84CB\u4E0B\u6E38\u7522\u54C1\u7684 target\uFF0Fdeployment OS\uFF0C\u4E5F\u4E0D\u9650\u5236\u6838\u51C6 connector \u80CC\u5F8C\u9060\u7AEF SaaS \u7684\u670D\u52D9 OS\u3002'
     }
     elseif ($LocaleId -ceq 'en') {
-        $original = 'This repository and consuming repositories using its shared AI-Instructions/Skills runtime support local Agent development, installation, execution, validation, tests, acceptance, and CI hosts on Windows only; Linux, macOS, and WSL are unsupported. This does not restrict downstream product target/deployment operating systems or the operating systems of remote SaaS services behind approved connectors. '
-        $exception = 'Sole narrow exception (SYP-354 transition period): only (1) the disposable cloud setup entry point `scripts/setup-agent-environment.*` and (2) tests registered under the "Register only on the native host" condition that run only on their matching native host may run on Linux or macOS; this exception does not change the support matrix and does not authorize general local Linux, macOS, or WSL use.'
-        $clauseSeparator = ';'
+        $text = 'This repository and consuming repositories using its shared AI-Instructions/Skills runtime support local Agent development, installation, execution, validation, tests, acceptance, and CI hosts on Windows, Linux, and macOS; WSL is unsupported. This does not restrict downstream product target/deployment operating systems or the operating systems of remote SaaS services behind approved connectors.'
     }
     else {
-        throw "No pinned Windows-only runtime wording for locale '$LocaleId'."
+        throw "No pinned local runtime support matrix wording for locale '$LocaleId'."
     }
 
-    return [pscustomobject]@{ Original = $original; Exception = $exception; ClauseSeparator = $clauseSeparator }
+    return $text
 }
 
 function Get-AiOrdinalOccurrenceCount {
@@ -185,32 +181,30 @@ function Get-AiOrdinalOccurrenceCount {
     return $count
 }
 
-function Assert-AiWindowsOnlyNarrowException {
+function Assert-AiLocalRuntimeSupportMatrix {
     param(
         [Parameter(Mandatory = $true)][string] $Text,
-        [Parameter(Mandatory = $true)] $Expectation,
+        [Parameter(Mandatory = $true)][string] $Expectation,
         [Parameter(Mandatory = $true)][string] $Context
     )
 
     $marker = '<!-- ai-invariant:base.windows-only-local-runtime -->'
-    $expectedLine = [string]$Expectation.Original + [string]$Expectation.Exception + ' ' + $marker
+    $expectedLine = $Expectation + ' ' + $marker
     $lines = @($Text.Split([char]"`n"))
     $markerLines = @($lines | Where-Object { $_.Contains($marker) })
     if ($markerLines.Count -ne 1) {
-        throw "${Context}: expected exactly one Windows-only runtime invariant line, found $($markerLines.Count)."
+        throw "${Context}: expected exactly one local runtime support matrix invariant line, found $($markerLines.Count)."
     }
     if (-not [string]::Equals([string]$markerLines[0], $expectedLine, [System.StringComparison]::Ordinal)) {
-        throw "${Context}: the Windows-only runtime invariant line drifted from the pinned invariant plus narrow exception."
+        throw "${Context}: the local runtime support matrix invariant line drifted from the pinned wording."
     }
-    foreach ($required in @([string]$Expectation.Original, [string]$Expectation.Exception)) {
-        $occurrences = Get-AiOrdinalOccurrenceCount -Text $Text -Value $required
-        if ($occurrences -ne 1) {
-            throw "${Context}: pinned Windows-only runtime wording occurs $occurrences times instead of exactly once."
-        }
+    $occurrences = Get-AiOrdinalOccurrenceCount -Text $Text -Value $Expectation
+    if ($occurrences -ne 1) {
+        throw "${Context}: pinned local runtime support matrix wording occurs $occurrences times instead of exactly once."
     }
     foreach ($line in @($lines | Where-Object { -not $_.Contains($marker) })) {
-        if ($line -match '(?i)\b(?:linux|macos|wsl)\b|setup-agent-environment|native[ -]host') {
-            throw "${Context}: a Linux/macOS/WSL or setup-exception statement appears outside the single authoritative invariant line."
+        if ($line -match '(?i)\b(?:linux|macos|wsl)\b') {
+            throw "${Context}: a Linux/macOS/WSL support statement appears outside the single authoritative invariant line."
         }
     }
 }
@@ -910,65 +904,56 @@ function New-AiInstructionFixture {
         $maintenanceInstructions | Should Not Match 'consumer bootstrap 不安裝／更新／重建共用 Skills'
     }
 
-    # Scenario: The SYP-354 narrow exception to the Windows-only local runtime invariant is generated into every Base variant.
-    # Purpose: Require the exception exactly once per platform and locale, identical to the authoritative common source, while the original invariant stays intact.
-    It 'InterT55_keeps_the_windows_only_narrow_exception_single_sourced_in_every_base_variant' {
+    # Scenario: The Windows/Linux/macOS-supported and WSL-unsupported local runtime matrix is generated into every Base variant.
+    # Purpose: Require the support matrix exactly once per platform and locale, identical to the authoritative common source.
+    It 'InterT55_keeps_the_local_runtime_support_matrix_single_sourced_in_every_base_variant' {
         $contract = Get-AiInstructionContract
         $identity = 'base.windows-only-local-runtime'
         $declaration = @($contract.baseInvariants | Where-Object { $_.id -ceq $identity })
         $declaration.Count | Should Be 1
-        Assert-OrdinalStringSet -Actual @($declaration[0].platforms) -Expected @('codex','github-copilot','claude') -Context 'Windows-only runtime invariant platforms'
+        Assert-OrdinalStringSet -Actual @($declaration[0].platforms) -Expected @('codex','github-copilot','claude') -Context 'local runtime support matrix invariant platforms'
         foreach ($locale in @($contract.locales)) {
             $localeId = [string]$locale.id
-            $expectation = Get-AiWindowsOnlyRuntimeExpectation -LocaleId $localeId
+            $expectation = Get-AiLocalRuntimeSupportMatrixExpectation -LocaleId $localeId
             $sourceRelative = 'instructions/common/base' + [string]$locale.ruleSuffix
             $sourceText = Get-AiInstructionText -Path (Get-ContractFullPath -RelativePath $sourceRelative)
-            Assert-AiWindowsOnlyNarrowException -Text $sourceText -Expectation $expectation -Context "authoritative source '$sourceRelative'"
+            Assert-AiLocalRuntimeSupportMatrix -Text $sourceText -Expectation $expectation -Context "authoritative source '$sourceRelative'"
             $sourceLine = @($sourceText.Split([char]"`n") | Where-Object { $_.Contains('<!-- ai-invariant:base.windows-only-local-runtime -->') })[0]
             foreach ($platform in @($contract.platforms)) {
                 $relative = Get-PlatformBaseRelativePath -Platform $platform -LocaleId $localeId
                 $text = Get-AiInstructionText -Path (Get-ContractFullPath -RelativePath $relative)
                 @((Get-AiInvariantIds -Text $text) | Where-Object { $_ -ceq $identity }).Count | Should Be 1
-                Assert-AiWindowsOnlyNarrowException -Text $text -Expectation $expectation -Context "platform '$($platform.id)' locale '$localeId'"
+                Assert-AiLocalRuntimeSupportMatrix -Text $text -Expectation $expectation -Context "platform '$($platform.id)' locale '$localeId'"
                 $generatedLine = @($text.Split([char]"`n") | Where-Object { $_.Contains('<!-- ai-invariant:base.windows-only-local-runtime -->') })[0]
                 [string]::Equals([string]$generatedLine, [string]$sourceLine, [System.StringComparison]::Ordinal) | Should Be $true
             }
         }
     }
 
-    # Scenario: The narrow exception is deleted, duplicated, or widened into general Linux/macOS/WSL support, or the original invariant sentence is dropped.
-    # Purpose: Prove the exception check is bidirectional, so every such mutation of a generated Base variant is rejected.
-    It 'InterT56_rejects_removed_duplicated_or_broadened_windows_only_exception_variants' {
+    # Scenario: A supported OS is removed, WSL is enabled, or the local runtime support matrix is moved or duplicated.
+    # Purpose: Prove every narrowing, widening, deletion, relocation, or duplication of the generated Base invariant is rejected.
+    It 'InterT56_rejects_narrowed_widened_or_relocated_local_runtime_support_matrix_variants' {
         $contract = Get-AiInstructionContract
         $marker = '<!-- ai-invariant:base.windows-only-local-runtime -->'
         foreach ($locale in @($contract.locales)) {
             $localeId = [string]$locale.id
-            $expectation = Get-AiWindowsOnlyRuntimeExpectation -LocaleId $localeId
-            $original = [string]$expectation.Original
-            $exception = [string]$expectation.Exception
-            $clauseIndex = $exception.IndexOf([string]$expectation.ClauseSeparator, [System.StringComparison]::Ordinal)
-            $clauseIndex | Should BeGreaterThan 0
-            $withoutNonAuthorization = $exception.Substring(0, $clauseIndex) + $exception.Substring($exception.Length - 1)
+            $expectation = Get-AiLocalRuntimeSupportMatrixExpectation -LocaleId $localeId
             foreach ($platform in @($contract.platforms)) {
                 $relative = Get-PlatformBaseRelativePath -Platform $platform -LocaleId $localeId
                 $text = Get-AiInstructionText -Path (Get-ContractFullPath -RelativePath $relative)
                 $context = "platform '$($platform.id)' locale '$localeId'"
-                Assert-AiWindowsOnlyNarrowException -Text $text -Expectation $expectation -Context $context
+                Assert-AiLocalRuntimeSupportMatrix -Text $text -Expectation $expectation -Context $context
 
                 $mutations = @(
-                    [pscustomobject]@{ name = 'exception removed'; text = $text.Replace($exception, '') },
-                    [pscustomobject]@{ name = 'original invariant sentence removed'; text = $text.Replace($original, '') },
+                    [pscustomobject]@{ name = 'Linux support removed'; text = $text.Replace('Windows, Linux, and macOS', 'Windows and macOS').Replace((ConvertFrom-AiUnicodeEscape -Value 'Windows\u3001Linux \u8207 macOS'), (ConvertFrom-AiUnicodeEscape -Value 'Windows \u8207 macOS')) },
+                    [pscustomobject]@{ name = 'WSL support enabled'; text = $text.Replace('WSL is unsupported', 'WSL is supported').Replace((ConvertFrom-AiUnicodeEscape -Value 'WSL \u4E0D\u652F\u63F4'), (ConvertFrom-AiUnicodeEscape -Value 'WSL \u652F\u63F4')) },
                     [pscustomobject]@{ name = 'invariant line removed'; text = [regex]::Replace($text, '(?m)^.*<!-- ai-invariant:base\.windows-only-local-runtime -->.*\n?', '') },
-                    [pscustomobject]@{ name = 'exception duplicated'; text = $text.Replace($exception, $exception + ' ' + $exception) },
-                    [pscustomobject]@{ name = 'setup scope widened to every script'; text = $text.Replace('`scripts/setup-agent-environment.*`', '`scripts/*`') },
-                    [pscustomobject]@{ name = 'non-authorization clause dropped'; text = $text.Replace($exception, $withoutNonAuthorization) },
-                    [pscustomobject]@{ name = 'general Linux support clause appended to the invariant line'; text = $text.Replace(' ' + $marker, ' Local Agent development on Linux is supported. ' + $marker) },
-                    [pscustomobject]@{ name = 'general Linux support stated on another line'; text = $text + "`nLocal Agent development, installation, and tests on Linux, macOS, and WSL are supported.`n" },
-                    [pscustomobject]@{ name = 'exception moved to a separate line'; text = $text.Replace($exception + ' ' + $marker, $marker + "`n" + $exception) }
+                    [pscustomobject]@{ name = 'support matrix duplicated'; text = $text.Replace($expectation, $expectation + ' ' + $expectation) },
+                    [pscustomobject]@{ name = 'support matrix moved to a separate line'; text = $text.Replace($expectation + ' ' + $marker, $marker + "`n" + $expectation) }
                 )
                 foreach ($mutation in $mutations) {
                     [string]::Equals([string]$mutation.text, $text, [System.StringComparison]::Ordinal) | Should Be $false
-                    Assert-Throws -Action { Assert-AiWindowsOnlyNarrowException -Text ([string]$mutation.text) -Expectation $expectation -Context $context } -Context "$context mutation '$($mutation.name)'"
+                    Assert-Throws -Action { Assert-AiLocalRuntimeSupportMatrix -Text ([string]$mutation.text) -Expectation $expectation -Context $context } -Context "$context mutation '$($mutation.name)'"
                 }
             }
         }

@@ -2,7 +2,7 @@
 
 You are the Codex agent responsible for development, testing, and code review in the current repository.
 
-This repository and consuming repositories using its shared AI-Instructions/Skills runtime support local Agent development, installation, execution, validation, tests, acceptance, and CI hosts on Windows only; Linux, macOS, and WSL are unsupported. This does not restrict downstream product target/deployment operating systems or the operating systems of remote SaaS services behind approved connectors. Sole narrow exception (SYP-354 transition period): only (1) the disposable cloud setup entry point `scripts/setup-agent-environment.*` and (2) tests registered under the "Register only on the native host" condition that run only on their matching native host may run on Linux or macOS; this exception does not change the support matrix and does not authorize general local Linux, macOS, or WSL use. <!-- ai-invariant:base.windows-only-local-runtime -->
+This repository and consuming repositories using its shared AI-Instructions/Skills runtime support local Agent development, installation, execution, validation, tests, acceptance, and CI hosts on Windows, Linux, and macOS; WSL is unsupported. This does not restrict downstream product target/deployment operating systems or the operating systems of remote SaaS services behind approved connectors. <!-- ai-invariant:base.windows-only-local-runtime -->
 
 ## Workflow
 

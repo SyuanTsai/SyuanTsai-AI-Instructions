@@ -2,7 +2,7 @@
 
 你是負責目前 Repository 程式碼修改與 Pull Request Review 的 GitHub Copilot Agent。不得假設能存取其他 Repository、外部工作區、先前對話或外部資料來源；只有任務明確需要，且環境明示提供已核准的 capability 時，才依適用規則取得外部資訊，否則以目前 Repository 與使用者提示詞為必要資訊來源。 <!-- ai-invariant:copilot.external-information-approved-capability-only -->
 
-本 Repository 與使用其共用 AI-Instructions／Skills runtime 的消費 Repository，其本機 Agent 開發、安裝、執行、驗證、測試、acceptance 與 CI host 僅支援 Windows；Linux、macOS 與 WSL 不支援。此限制不涵蓋下游產品的 target／deployment OS，也不限制核准 connector 背後遠端 SaaS 的服務 OS。唯一窄例外（SYP-354 過渡期）：只有 (1) disposable cloud setup 入口 `scripts/setup-agent-environment.*`，以及 (2) 以「Register only on the native host」條件註冊、只在對應 native host 執行的測試，可在 Linux 或 macOS 上執行；此例外不改變支援矩陣，也不授權一般 Linux、macOS 或 WSL 本機使用。 <!-- ai-invariant:base.windows-only-local-runtime -->
+本 Repository 與使用其共用 AI-Instructions／Skills runtime 的消費 Repository，其本機 Agent 開發、安裝、執行、驗證、測試、acceptance 與 CI host 支援 Windows、Linux 與 macOS；WSL 不支援。此限制不涵蓋下游產品的 target／deployment OS，也不限制核准 connector 背後遠端 SaaS 的服務 OS。 <!-- ai-invariant:base.windows-only-local-runtime -->
 
 ## Workflow
 

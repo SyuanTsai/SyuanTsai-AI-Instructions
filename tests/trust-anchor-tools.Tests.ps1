@@ -422,7 +422,7 @@ function Get-TrustAnchorProtectedContracts {
         'scripts/trust-anchor/ConvertTo-TrustAnchorPublicKeyXml.ps1'=@{TokenCount=86;Sha256='1f42500679c905fbb8662df71f08087535160891b3bcc1bfb39e88f50b539a9e'}
         'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1'=@{TokenCount=117;Sha256='7690182cf612e77daa3f106ae16dc46540e131e2849645591436ae342b6fe27f'}
         'scripts/platform/WindowsInstallerMutation.cs'=@{TokenCount=3104;Sha256='2b997cd7670a5623aa228230df8c80fccb791f63f00c948d0af865e97896fb18';Language='CSharp'}
-        'scripts/platform/WindowsNative.cs'=@{TokenCount=9270;Sha256='c5e788c08d7d81d25c16746bed9dae448212880b5939889b878b443763dc438c';Language='CSharp'}
+        'scripts/platform/WindowsNative.cs'=@{TokenCount=9607;Sha256='b70de4b852608d0d63351ebee9c336a8a71f22bb3b11fbaee4974e7eeeeda960';Language='CSharp'}
     }
 }
 function Test-TrustAnchorProtectedContract {
