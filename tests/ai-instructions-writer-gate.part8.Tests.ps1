@@ -151,31 +151,57 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
             [pscustomobject]@{Name='after-store-before-bind';Failpoint="after-operation-$evidenceSequence-before-journal";Stored=$true;Bound=$false},
             [pscustomobject]@{Name='after-bind';Failpoint="after-operation-$evidenceSequence";Stored=$true;Bound=$true}
         )
-        foreach($case in $cases){
-            foreach($recoveryPath in @('InProcess','NextRun')){
-                $target=Join-Path $script:ExternalRoot "evidence-$($case.Name)-$recoveryPath";Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $target -Recurse
+        $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'r155') -Failpoint RecoveryOnly
+        $parallelCases=New-Object System.Collections.Generic.List[object];$caseIndex=0
+        foreach($case in $cases){foreach($recoveryPath in @('InProcess','NextRun')){
+            $caseParent=Join-Path $script:ExternalRoot ("p155-"+$caseIndex);New-Item -ItemType Directory -Path $caseParent|Out-Null
+            $parallelCases.Add([pscustomobject]@{Index=$caseIndex;Name=$case.Name;Failpoint=$case.Failpoint;Stored=$case.Stored;Bound=$case.Bound;RecoveryPath=$recoveryPath;EvidenceSequence=$evidenceSequence;CaseParent=$caseParent;Seed=$script:P9cSeeds.False;Context=$script:P9cUpdated.Context;ArchivePath=$script:P9cChanged.ArchivePath;Recovery=$recovery});$caseIndex++
+        }}
+        $worker={param($case)
+                $caseParent=$case.CaseParent
+                $target=Join-Path $caseParent 'repo';Copy-Item -LiteralPath $case.Seed -Destination $target -Recurse
                 $before=Get-P9cPublicationStateSnapshot $target
                 $stashBefore=(@(& git -C $target rev-parse --verify refs/stash 2>$null)|Select-Object -First 1)
-                $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "evidence-runtime-$($case.Name)-$recoveryPath") -Failpoint $case.Failpoint -RecoveryPath $recoveryPath
-                (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap).ExitCode|Should -Not -Be 0
+                $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $caseParent 'fp') -Failpoint $case.Failpoint -RecoveryPath $case.RecoveryPath
+                $failed=Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap
                 $stashAfterFailure=(@(& git -C $target rev-parse --verify refs/stash 2>$null)|Select-Object -First 1)
-                if($case.Stored){[string]$stashAfterFailure|Should -Not -Be ([string]$stashBefore)}else{[string]$stashAfterFailure|Should -Be ([string]$stashBefore)}
+                $observation=[ordered]@{FailedExitCode=$failed.ExitCode;Before=$before;StashBefore=[string]$stashBefore;StashAfterFailure=[string]$stashAfterFailure}
+                if($case.RecoveryPath-ceq'NextRun'){
+                    $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$observation.TransactionCount=$transaction.Count
+                    if($transaction.Count-ne1){return [pscustomobject]$observation}
+                    $journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
+                    $evidence=@($journal.operations|Where-Object kind -ceq store-git-stash-evidence)
+                    $observation.EvidenceCount=$evidence.Count
+                    if($evidence.Count-ne1){return [pscustomobject]$observation}
+                    $observation.EvidenceSequence=[int]$evidence[0].sequence;$observation.JournalPhase=[string]$journal.phase
+                    $observation.EvidenceState=[string]$evidence[0].state;$observation.EvidenceObjectId=[string]$evidence[0].after.objectId;$observation.EvidenceObjectIdIsNull=$null-eq$evidence[0].after.objectId
+                    $observation.RecoveryExitCode=(Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $target -BootstrapPath $case.Recovery).ExitCode
+                }
+                $observation.AfterRecovery=Get-P9cPublicationStateSnapshot $target
+                $stashAfterRecovery=(@(& git -C $target rev-parse --verify refs/stash 2>$null)|Select-Object -First 1)
+                $observation.StashAfterRecovery=[string]$stashAfterRecovery
+                $observation.ResidueCount=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force -ErrorAction SilentlyContinue).Count
+                return [pscustomobject]$observation
+        }
+        $results=@(Invoke-P9cParallelCases -Cases $parallelCases.ToArray() -Worker $worker);$resultIndex=0
+        foreach($case in $cases){
+            foreach($recoveryPath in @('InProcess','NextRun')){
+                $result=$results[$resultIndex++];if($null-ne$result.ErrorMessage){throw $result.ErrorMessage};$observation=$result.Value
+                $observation.FailedExitCode|Should -Not -Be 0
+                if($case.Stored){$observation.StashAfterFailure|Should -Not -Be $observation.StashBefore}else{$observation.StashAfterFailure|Should -Be $observation.StashBefore}
 
                 if($recoveryPath-ceq'NextRun'){
-                    $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$transaction.Count|Should -Be 1
-                    $journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
-                    $evidence=@($journal.operations|Where-Object kind -ceq store-git-stash-evidence);$evidence.Count|Should -Be 1
-                    [int]$evidence[0].sequence|Should -Be $evidenceSequence
-                    if($case.Name-ceq'prepared'){[string]$journal.phase|Should -BeExactly prepared}else{[string]$journal.phase|Should -BeExactly applying}
-                    if($case.Bound){[string]$evidence[0].state|Should -BeExactly applied;[string]$evidence[0].after.objectId|Should -BeExactly ([string]$stashAfterFailure)}
-                    else{[string]$evidence[0].state|Should -BeExactly pending;$null-eq$evidence[0].after.objectId|Should -Be $true}
-                    $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "evidence-recovery-$($case.Name)") -Failpoint RecoveryOnly
-                    (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
+                    $observation.TransactionCount|Should -Be 1
+                    $observation.EvidenceCount|Should -Be 1
+                    $observation.EvidenceSequence|Should -Be $evidenceSequence
+                    if($case.Name-ceq'prepared'){$observation.JournalPhase|Should -BeExactly prepared}else{$observation.JournalPhase|Should -BeExactly applying}
+                    if($case.Bound){$observation.EvidenceState|Should -BeExactly applied;$observation.EvidenceObjectId|Should -BeExactly $observation.StashAfterFailure}
+                    else{$observation.EvidenceState|Should -BeExactly pending;$observation.EvidenceObjectIdIsNull|Should -Be $true}
+                    $observation.RecoveryExitCode|Should -Not -Be 0
                 }
-                (Get-P9cPublicationStateSnapshot $target)|Should -BeExactly $before
-                $stashAfterRecovery=(@(& git -C $target rev-parse --verify refs/stash 2>$null)|Select-Object -First 1)
-                if($case.Stored){[string]$stashAfterRecovery|Should -BeExactly ([string]$stashAfterFailure)}else{[string]$stashAfterRecovery|Should -BeExactly ([string]$stashBefore)}
-                @(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force -ErrorAction SilentlyContinue).Count|Should -Be 0
+                $observation.AfterRecovery|Should -BeExactly $observation.Before
+                if($case.Stored){$observation.StashAfterRecovery|Should -BeExactly $observation.StashAfterFailure}else{$observation.StashAfterRecovery|Should -BeExactly $observation.StashBefore}
+                $observation.ResidueCount|Should -Be 0
             }
         }
     }

@@ -9,7 +9,7 @@
 **How it works**
 - One common instruction source generates the Codex, GitHub Copilot and Claude variants, so the three tools follow the same rules.
 - The Skills catalog points to separate Skill repositories ([Skill-General](https://github.com/SyuanTsai/Skill-General), Skill-Atlassian-Ecosystem, Skill-Code-Collaboration, Skill-Knowledge-Content) and locks each one to a commit SHA and content hash.
-- A bootstrap fans the instruction files out into product repositories. Shared Skills are installed once per user under `~/.agents/skills` by default; a verified v3/v5 runtime may additionally project them into explicitly selected project roots. That project selection is global and applies to every consumer repository not covered by an exclusion. Updates are checked and reported, not silently auto-installed.
+- A bootstrap fans the instruction files out into product repositories. Shared Skills are installed once per user under `~/.agents/skills` by default; on Windows, an explicit `-WriterSchema V3V5` opt-in also projects the same managed bytes to `~/.claude/skills` and manages the repository-instructions section in `~/.claude/CLAUDE.md`. Later `Auto` installs and updates preserve that v3/v5 selection and any config-v5 capability evidence declared with `-CapabilityEvidence` (or the legacy environment variable); `state: "absent"` explicitly revokes a capability, while `-ClearCapabilityEvidence` clears stored evidence. When connector or environment evidence is unknown, a capability-gated Skill already listed in the managed USER manifest is preserved and updated with a warning; a fresh install still filters it. Unmanaged differing bytes fail with `unmanaged-collision` and must be backed up and moved manually; Linux and macOS projection remain unsupported under SYP-508. A verified v3/v5 runtime may additionally project Skills into explicitly selected project roots. That project selection is global and applies to every consumer repository not covered by an exclusion. Updates are checked and reported, not silently auto-installed.
 - CI validates contracts and runs security scanning on Skills before anything is published.
 
 **Who it's for:** engineers who want repeatable, reviewable AI-assisted workflows. Local tooling is Windows-only (see below).
@@ -23,7 +23,7 @@
 **運作方式**
 - 由同一份共用指令產生 Codex、GitHub Copilot、Claude 三種版本，三個工具遵循相同規則。
 - Skills 目錄指向獨立的 Skill Repository（[Skill-General](https://github.com/SyuanTsai/Skill-General)、Skill-Atlassian-Ecosystem、Skill-Code-Collaboration、Skill-Knowledge-Content），並以 commit SHA 與內容雜湊鎖定版本。
-- bootstrap 將指令檔分發到各產品 Repository；共用 Skills 預設由獨立 updater 安裝在使用者層級的 `~/.agents/skills`。通過驗證的 v3/v5 runtime 可再把 Skills 投影到明確選取的 project roots；這是全域 opt-in，會套用到所有未排除的 consumer Repository。有新版本時只檢查並通知，不會自動悄悄安裝。
+- bootstrap 將指令檔分發到各產品 Repository；共用 Skills 預設由獨立 updater 安裝在使用者層級的 `~/.agents/skills`。在 Windows 上明確使用 `-WriterSchema V3V5` 選擇啟用後，同一份受管 bytes 也會投影到 `~/.claude/skills`，並管理 `~/.claude/CLAUDE.md` 的 Repository Instructions 區段；後續 `Auto` 安裝與更新會沿用 v3/v5，以及透過 `-CapabilityEvidence`（或舊環境變數介面）寫入 config v5 的能力證據。`state: "absent"` 可明確撤銷能力，`-ClearCapabilityEvidence` 可清除已存證據；connector／environment 證據未知時，受管 USER manifest 已列出的 capability-gated Skill 會保留、更新並提示，但全新安裝仍會過濾。若未受管的同名檔案 bytes 不同，會以 `unmanaged-collision` 拒絕，必須由使用者先備份並移開；Linux 與 macOS 投影仍由 SYP-508 處理、目前不支援。通過驗證的 v3/v5 runtime 可再把 Skills 投影到明確選取的 project roots；這是全域 opt-in，會套用到所有未排除的 consumer Repository。有新版本時只檢查並通知，不會自動悄悄安裝。
 - 發布前由 CI 驗證契約，並對 Skills 執行安全掃描。
 
 **適用對象：** 想要可重複、可審查的 AI 輔助開發流程的工程師。本機工具僅支援 Windows（詳見下方）。
@@ -38,11 +38,11 @@
 
 ## Production 契約
 
-- Skills Catalog schema 1：stable Skill ID、profiles、compatibility、dependencies 與 lifecycle。
-- Catalog lock schema 1：把外部來源鎖定到完整 commit SHA、archive hash 與 Skill content hash。
-- Managed manifest schema 2：記錄每個 target file 的完整 provenance 與 content hash。
-- Personal sync configuration schema 4：記錄 exclusions、immutable runtime pin、Skill selection 與更新 policy；不含 auto-commit 欄位。
-- Runtime bundle schema 2：記錄 canonical Repository、commit、acquisition、archive hash 與 exact runtime inventory。
+- Skills Catalog schema 3：stable Skill ID、profiles、compatibility、dependencies、lifecycle，以及 `user-agents`／`user-claude` USER projections。
+- Catalog lock schema 3：把外部來源鎖定到完整 commit SHA、archive hash、Skill content hash 與 projection contract hash。
+- USER managed manifest schema 3：在 v3/v5 opt-in 後記錄兩個 projection 的完整 provenance、content hash 與 generation；legacy v2/v4 仍使用 manifest v2。
+- Personal sync configuration schema 5：在 v3/v5 opt-in 後記錄 exclusions、immutable runtime pin、Skill selection、更新 policy 與 USER projections；未 opt-in 的 fresh／v2v4 `Auto` 安裝仍維持 schema 4。
+- Runtime bundle schema 3：在 v3/v5 opt-in 後記錄 canonical Repository、commit、acquisition、archive hash、exact runtime inventory 與 projection binding；未 opt-in 的 fresh／v2v4 `Auto` 安裝仍維持 schema 2。
 - Update receipt schema 1：記錄上次檢查、candidate、結果與診斷。
 
 Schemas、去識別化 examples 與完整約束見 [catalog/README.md](catalog/README.md)。可執行契約驗證：
@@ -82,7 +82,7 @@ SkillSpector 的 analyzer coverage 不完整時，canonical Stage 4 仍維持 `F
 
 每次執行依序完成：
 
-1. 驗證 installed config v4、runtime bundle v2、所有 runtime bytes、Catalog 與 Lock。
+1. 驗證 installed config／runtime generation（v4＋bundle v2，或 v5＋bundle v3）、所有 runtime bytes、Catalog 與 Lock。
 2. 依更新 policy 檢查 canonical protected `main` 或 latest GitHub release；預設只通知，不自動安裝。
 3. 依 Catalog selection 解析 external Skills，只取得 lock 中的 immutable commits，驗證 archive 與每個 Skill content inventory。
 4. 將 Codex、GitHub Copilot 與 Claude Instructions 組成已驗證 archive，再交給 mutation engine；預設時選中的 Skills 只提供可信 USER inventory 核對。只有通過 v3/v5 gate 且全域 `projections.project` 非空時，multisource 才另外建立 lock-bound project candidate，交由 project-scope durable transaction 套用至所有未排除的 consumer Repository。
@@ -156,6 +156,54 @@ Installer 的 git-checkout 模式只接受 canonical origin 與完整 `HEAD` com
 .\scripts\install-ai-instructions-bootstrap.ps1
 ```
 
+### Windows Claude Code Skills 選擇啟用
+
+預設 `Auto` 對 fresh 或既有 v2/v4 安裝仍維持 v2/v4。只有在 Windows 上明確指定下列參數，才會安裝 config v5／runtime bundle v3，並把受管 Skills 同時投影到 `~/.agents/skills` 與 `~/.claude/skills`：
+
+```powershell
+.\scripts\install-ai-instructions-bootstrap.ps1 -WriterSchema V3V5
+
+$codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
+  $env:CODEX_HOME
+} else {
+  Join-Path $HOME '.codex'
+}
+& (Join-Path $codexHome 'hooks\update-agent-environment.ps1') -Apply -OutputFormat Json
+& (Join-Path $codexHome 'hooks\update-agent-environment.ps1') -VerifyOnly -OutputFormat Json
+```
+
+成功啟用後，installer 的 `Auto`、launcher 自動更新，以及 `update-agent-environment` 的 Apply／VerifyOnly 都會沿用 config v5 的 `projections.user`；明確要求 `V2V4` 會以 `downgrade-refused` 拒絕。`user-claude` 也會更新 `~/.claude/CLAUDE.md` 的受管 Repository Instructions 區段，個人區段保持原 bytes。
+
+能力證據同樣由 config v5 沿用。`-CapabilityEvidence` 接受完整 JSON array 並整份取代舊值；`state: "absent"` 明確表示能力不存在，`[]` 或 `-ClearCapabilityEvidence` 會清除。兩個參數互斥，且只適用 V3V5：
+
+```powershell
+.\scripts\install-ai-instructions-bootstrap.ps1 -WriterSchema V3V5 `
+  -CapabilityEvidence '[{"kind":"connector","id":"datadog","state":"configured"}]'
+
+# 修改／撤銷
+.\scripts\install-ai-instructions-bootstrap.ps1 `
+  -CapabilityEvidence '[{"kind":"connector","id":"datadog","state":"absent"}]'
+
+# 清除全部已存證據
+.\scripts\install-ai-instructions-bootstrap.ps1 -ClearCapabilityEvidence
+```
+
+若兩個參數都未提供，但 `AI_INSTRUCTIONS_CAPABILITY_EVIDENCE` 非空，installer 會為相容舊用法而把該值持久化；三者都沒有時沿用 config。每次 reconciliation 會以環境變數按 `(kind,id)` 覆蓋 config 證據，但不回寫 config。沒有 connector／environment 證據代表狀態未知：全新安裝仍不安裝受限 Skill；若受管 USER manifest 已列出該 Skill，則保留並更新到目前 pin、顯示如何宣告或以 `absent` 撤銷，VerifyOnly 仍回 `current`。platform、shell、removed lifecycle、明確 exclude 與 `command` 判斷不受此保留規則影響。
+
+若 `~/.claude/skills/<skill-id>` 已有不同的未受管 bytes，結果會包含 `failureDetails[].code = "unmanaged-collision"`，且兩個 Skills roots、manifest 與 `CLAUDE.md` 都不變。先自行備份並移開整個舊手動副本，或只移開衝突的 Skill 目錄，再重試；installer 不會自動備份接管：
+
+```powershell
+$manualRoot = Join-Path $HOME '.claude\skills'
+$manualBackup = Join-Path $HOME ('.claude\skills.manual-' + (Get-Date -Format 'yyyyMMddHHmmss'))
+Move-Item -LiteralPath $manualRoot -Destination $manualBackup
+
+# 或只移開診斷指出的單一目錄：
+Move-Item -LiteralPath (Join-Path $HOME '.claude\skills\<skill-id>') `
+  -Destination (Join-Path $HOME '.claude\<skill-id>.manual')
+```
+
+Linux 與 macOS 的 V3V5 projection runtime 尚未支援，會回 `projection-runtime-unavailable`；跨平台支援追蹤於 SYP-508。
+
 安裝會以 transaction 更新：
 
 - `~/.codex/hooks/bootstrap-ai-instructions.ps1`
@@ -192,9 +240,9 @@ $codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { $env:CODE
 
 `excludedRepositoryPaths` 只接受 repo-relative path，不接受磁碟絕對路徑、`.` 或 `..`。
 
-## Personal sync configuration v4
+## Personal sync configuration v4／v5
 
-Installer 會把 v1／v2／v3／v4 idempotent 遷移為 v4。舊 `autoCommitRepositoryUrls`、`autoCommitRepositoryPaths` 與 `repositoryUrls` 會移除；exclusions 與 v3/v4 Skill selections 保留。
+Installer 的 fresh／v2v4 `Auto` 路徑會把 v1／v2／v3／v4 idempotent 遷移為 v4；明確 `V3V5` 或既有 v3/v5 的 `Auto` 則寫入 v5，並保留既有合法的 `projections.user`／`projections.project`。舊 `autoCommitRepositoryUrls`、`autoCommitRepositoryPaths` 與 `repositoryUrls` 會移除；exclusions 與 v3/v4 Skill selections 保留。
 
 ```json
 {
@@ -221,7 +269,7 @@ Installer 會把 v1／v2／v3／v4 idempotent 遷移為 v4。舊 `autoCommitRepo
 }
 ```
 
-`catalog.repository/ref` 由 installer 管理；不得手動改成其他 Repository 或 mutable ref。使用者可維護 exclusions、Skill selections 與 `updates` policy；`minimumCheckIntervalMinutes` 的合法範圍是 1 到 2147483647。
+`catalog.repository/ref` 由 installer 管理；不得手動改成其他 Repository 或 mutable ref。使用者可維護 exclusions、Skill selections 與 `updates` policy；v5 另可維護契約允許的 projections。`minimumCheckIntervalMinutes` 的合法範圍是 1 到 2147483647。
 
 ## Runtime 更新
 
@@ -509,10 +557,10 @@ Runtime／Instructions／選取的 Skill 會遞送來源版本的授權文件、
 
 ## 主要檔案
 
-- `scripts/install-ai-instructions-bootstrap.ps1`：transactional installer 與 v1–v4 migration。
+- `scripts/install-ai-instructions-bootstrap.ps1`：transactional installer、v1–v5 configuration migration 與 Windows V3V5 opt-in gate。
 - `scripts/installer-safe-mutation.psm1`：installer stable-file 的 handle-bound mutation 與目錄 guard。
 - `scripts/bootstrap-ai-instructions-installed.ps1`：stable launcher、更新前後 runtime validation。
-- `scripts/ai-instructions-runtime-contract.psm1`：config v4、bundle v2 與 exact inventory 契約。
+- `scripts/ai-instructions-runtime-contract.psm1`：config v4／v5、bundle v2／v3、platform gate 與 exact inventory 契約。
 - `scripts/ai-instructions-updater.psm1`、`scripts/update-ai-instructions.ps1`：更新 workflow 與 installed command。
 - `scripts/agent-environment-reconciler.psm1`、`scripts/update-agent-environment.ps1`：使用者層級 Catalog Skills transaction、recovery 與 verified-runtime reconciliation 入口。
 - `scripts/bootstrap-ai-instructions-multisource.ps1`：Catalog selection、immutable acquisition 與 composition。

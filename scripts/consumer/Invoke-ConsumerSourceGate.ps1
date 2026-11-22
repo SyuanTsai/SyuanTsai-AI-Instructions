@@ -48,7 +48,7 @@ if(-not[string]::IsNullOrWhiteSpace($phaseEnvironmentDumpPath)){
         }
     }
     $authorityRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
-    Initialize-GateGitHooks $WorkRoot
+    Initialize-GateGitHooks $WorkRoot -Phase $Phase
     $binding=Read-GateJson $AuthorityBindingPath 'authority binding'
     $binding|Add-Member -NotePropertyName canonicalEvent -NotePropertyValue $(if([string]$binding.triggerEvent-ceq'push'){'push'}else{'pull_request'}) -Force
     $eventRepository=[string]$env:CONSUMER_GATE_EVENT_REPOSITORY
@@ -56,12 +56,12 @@ if(-not[string]::IsNullOrWhiteSpace($phaseEnvironmentDumpPath)){
     if($Phase-ceq'prepare'){
         $validated=Assert-GateConfig $authorityRoot $CandidateRoot $eventRepository
         Assert-GateTransitionInventory $BaseRoot $validated.ManifestEntry ([string]$binding.baseRevision) ([bool]$TransitionFromLegacy)
-        Assert-GateProtectedFiles $authorityRoot $BaseRoot $CandidateRoot $validated.ManifestEntry `
+        Assert-GateProtectedFilesWithExceptionShrinkOnly $authorityRoot $BaseRoot $CandidateRoot $validated.ManifestEntry `
             ([string]$binding.baseRevision) ([string]$binding.candidateRevision) ([bool]$TransitionFromLegacy)
         Invoke-GateManifestClosureCheck $authorityRoot $BaseRoot $CandidateRoot $validated.ManifestEntry `
             ([string]$binding.baseRevision) ([string]$binding.candidateRevision) $WorkRoot `
             ([bool]$TransitionFromLegacy)
-        Assert-GateExceptionSetUnchanged $CandidateRoot ([string]$binding.baseRevision) ([string]$binding.candidateRevision)
+        # The protected-files wrapper runs shrink-only before any retained exception-set path can bypass byte identity.
         [void](Invoke-GateCredentialScopedPreparation $authorityRoot $CandidateRoot $WorkRoot $Platform $binding $eventRepository $token)
     }elseif($Phase-ceq'validate'){
         $validated=Assert-GateConfig $authorityRoot $CandidateRoot $eventRepository

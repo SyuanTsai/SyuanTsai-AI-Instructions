@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "catalogId": "syuantsai-agent-skills",
   "sources": [
     {
@@ -93,8 +93,7 @@
       "group": "core-engineering",
       "source": {
         "sourceId": "general",
-        "sourcePath": "skills/plan-production-change",
-        "targetPath": ".agents/skills/plan-production-change"
+        "sourcePath": "skills/plan-production-change"
       },
       "profiles": [
         "core"
@@ -118,8 +117,7 @@
       "group": "core-engineering",
       "source": {
         "sourceId": "general",
-        "sourcePath": "skills/verify-data-access-performance",
-        "targetPath": ".agents/skills/verify-data-access-performance"
+        "sourcePath": "skills/verify-data-access-performance"
       },
       "profiles": [
         "core"
@@ -143,8 +141,7 @@
       "group": "knowledge-management",
       "source": {
         "sourceId": "general",
-        "sourcePath": "skills/manage-notion-ai-memory",
-        "targetPath": ".agents/skills/manage-notion-ai-memory"
+        "sourcePath": "skills/manage-notion-ai-memory"
       },
       "profiles": [],
       "compatibility": {
@@ -167,8 +164,7 @@
       "group": "knowledge-management",
       "source": {
         "sourceId": "general",
-        "sourcePath": "skills/manage-ai-memory",
-        "targetPath": ".agents/skills/manage-ai-memory"
+        "sourcePath": "skills/manage-ai-memory"
       },
       "profiles": [
         "ai-memory"
@@ -194,8 +190,7 @@
       "group": "knowledge-management",
       "source": {
         "sourceId": "general",
-        "sourcePath": "skills/manage-task-handoff",
-        "targetPath": ".agents/skills/manage-task-handoff"
+        "sourcePath": "skills/manage-task-handoff"
       },
       "profiles": [
         "ai-memory"
@@ -219,8 +214,7 @@
       "group": "code-collaboration",
       "source": {
         "sourceId": "code-collaboration",
-        "sourcePath": "skills/write-implementation-prompt",
-        "targetPath": ".agents/skills/write-implementation-prompt"
+        "sourcePath": "skills/write-implementation-prompt"
       },
       "profiles": [
         "code-collaboration"
@@ -244,8 +238,7 @@
       "group": "code-collaboration",
       "source": {
         "sourceId": "atlassian-ecosystem",
-        "sourcePath": "skills/configure-bitbucket-api-access",
-        "targetPath": ".agents/skills/configure-bitbucket-api-access"
+        "sourcePath": "skills/configure-bitbucket-api-access"
       },
       "profiles": [],
       "compatibility": {
@@ -267,8 +260,7 @@
       "group": "code-collaboration",
       "source": {
         "sourceId": "atlassian-ecosystem",
-        "sourcePath": "skills/review-bitbucket-pull-request",
-        "targetPath": ".agents/skills/review-bitbucket-pull-request"
+        "sourcePath": "skills/review-bitbucket-pull-request"
       },
       "profiles": [
         "code-collaboration"
@@ -324,8 +316,7 @@
       "group": "atlassian-work-management",
       "source": {
         "sourceId": "atlassian-ecosystem",
-        "sourcePath": "skills/configure-jira-api-access",
-        "targetPath": ".agents/skills/configure-jira-api-access"
+        "sourcePath": "skills/configure-jira-api-access"
       },
       "profiles": [],
       "compatibility": {
@@ -347,8 +338,7 @@
       "group": "atlassian-work-management",
       "source": {
         "sourceId": "atlassian-ecosystem",
-        "sourcePath": "skills/work-with-jira",
-        "targetPath": ".agents/skills/work-with-jira"
+        "sourcePath": "skills/work-with-jira"
       },
       "profiles": [
         "atlassian"
@@ -398,8 +388,7 @@
       "group": "atlassian-work-management",
       "source": {
         "sourceId": "atlassian-ecosystem",
-        "sourcePath": "skills/configure-confluence-api-access",
-        "targetPath": ".agents/skills/configure-confluence-api-access"
+        "sourcePath": "skills/configure-confluence-api-access"
       },
       "profiles": [],
       "compatibility": {
@@ -421,8 +410,7 @@
       "group": "atlassian-work-management",
       "source": {
         "sourceId": "atlassian-ecosystem",
-        "sourcePath": "skills/manage-confluence-docs-as-code",
-        "targetPath": ".agents/skills/manage-confluence-docs-as-code"
+        "sourcePath": "skills/manage-confluence-docs-as-code"
       },
       "profiles": [
         "atlassian"
@@ -459,8 +447,7 @@
       "group": "atlassian-work-management",
       "source": {
         "sourceId": "atlassian-ecosystem",
-        "sourcePath": "skills/publish-requirements-to-confluence",
-        "targetPath": ".agents/skills/publish-requirements-to-confluence"
+        "sourcePath": "skills/publish-requirements-to-confluence"
       },
       "profiles": [
         "atlassian"
@@ -510,8 +497,7 @@
       "group": "observability",
       "source": {
         "sourceId": "general",
-        "sourcePath": "skills/investigate-datadog-logs",
-        "targetPath": ".agents/skills/investigate-datadog-logs"
+        "sourcePath": "skills/investigate-datadog-logs"
       },
       "profiles": [
         "observability"
@@ -541,8 +527,7 @@
       "group": "external-research",
       "source": {
         "sourceId": "general",
-        "sourcePath": "skills/search-with-felo",
-        "targetPath": ".agents/skills/search-with-felo"
+        "sourcePath": "skills/search-with-felo"
       },
       "profiles": [],
       "compatibility": {
@@ -572,8 +557,7 @@
       "group": "knowledge-capture",
       "source": {
         "sourceId": "knowledge-content",
-        "sourcePath": "skills/capture-private-course-knowledge",
-        "targetPath": ".agents/skills/capture-private-course-knowledge"
+        "sourcePath": "skills/capture-private-course-knowledge"
       },
       "profiles": [
         "knowledge-capture"
@@ -591,6 +575,18 @@
         "status": "active",
         "aliases": []
       }
+    }
+  ],
+  "projections": [
+    {
+      "id": "user-agents",
+      "scope": "user",
+      "root": ".agents/skills"
+    },
+    {
+      "id": "user-claude",
+      "scope": "user",
+      "root": ".claude/skills"
     }
   ]
 }

@@ -131,6 +131,10 @@ function New-TestRuntimeV3Fixture {
     Copy-TestCanonicalRuntimeText `
         -Source (Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-v3.example.json') `
         -Destination (Join-Path $Path 'catalog\skills-catalog.json')
+    [IO.File]::WriteAllBytes(
+        (Join-Path $Path 'bootstrap-section.md'),
+        [IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions\common\bootstrap-section.md'))
+    )
     $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\runtime-bundle-v3.example.json') | ConvertFrom-Json
     $fixture = [pscustomobject]@{ Root=$Path; Bundle=$bundle }
     Update-TestRuntimeV3Inventory -Fixture $fixture
@@ -162,8 +166,13 @@ function Invoke-TestRuntimeV3OrdinalChild {
 
     $outputPath = Join-Path $TestDrive ('runtime-v3-ordinal-stdout-' + [Guid]::NewGuid().ToString('N') + '.txt')
     $errorPath = Join-Path $TestDrive ('runtime-v3-ordinal-stderr-' + [Guid]::NewGuid().ToString('N') + '.txt')
+    $arguments = @('-NoProfile','-NonInteractive')
+    if ([IO.Path]::GetFileNameWithoutExtension($Executable) -ieq 'powershell') {
+        $arguments += @('-ExecutionPolicy','Bypass')
+    }
+    $arguments += @('-File',$ScriptPath,$ModulePath,$InventoryPath)
     $process = Start-Process -FilePath $Executable `
-        -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$ScriptPath,$ModulePath,$InventoryPath) `
+        -ArgumentList $arguments `
         -PassThru -Wait -NoNewWindow -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath
     return [pscustomobject]@{
         ExitCode = $process.ExitCode
@@ -1083,7 +1092,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
 
             (Get-RuntimeContractError { Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $bundle.inventory }) |
                 Should Match 'control character'
-            (Test-Json -Json ($bundle | ConvertTo-Json -Depth 20) -SchemaFile $schemaPath) | Should Be $false
+            (Test-Json -Json ($bundle | ConvertTo-Json -Depth 20) -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
             (Get-RuntimeContractError {
                 Assert-AiInstructionsRuntimeBundleV3 -Bundle $bundle -Configuration $configuration -RuntimeRoot $fixture.Root
             }) | Should Match 'control character'
@@ -3239,7 +3248,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
                 (Get-RuntimeContractError {ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json|Out-Null})|Should Match 'outside the USER Skill projection roots'
                 (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue)|Should Be $false
             }
-            foreach($target in @('.agents/skills/alpha/SKILL.md','.claude/skills/alpha/SKILL.md','.copilot/skills/alpha/SKILL.md')){
+            foreach($target in @('.agents/skills/alpha/SKILL.md','.claude/skills/alpha/SKILL.md','.copilot/skills/alpha/SKILL.md','.claude/CLAUDE.md')){
                 $json=(New-ScopedUserJournal 'create-file' $target)|ConvertTo-Json -Depth 20
                 {ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json|Out-Null}|Should Not Throw
                 (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue)|Should Be $true
@@ -3993,5 +4002,153 @@ exit /b %errorlevel%
         $LASTEXITCODE|Should Not Be 0
         ($errorOutput-join[Environment]::NewLine)|Should Match 'injected initial HEAD query failure'
         ($errorOutput-join[Environment]::NewLine)|Should Not Match 'target repository has no commit'
+    }
+
+    # Scenario: Existing UTF-8 USER instructions vary encoding details and place headings around CommonMark HTML blocks, containers, fences, or indented code.
+    # Purpose: Recognize only document-level managed/H2 headings and preserve every byte outside that boundary while installing canonical authority bytes.
+    It 'UnitT232_merges_the_bootstrap_section_without_normalizing_personal_bytes' -TestCases @(
+        @{Name='empty';Existing=[byte[]]@();Prefix=[byte[]]@();Suffix=[byte[]]@()},
+        @{Name='bom-only';Existing=[byte[]]@(0xEF,0xBB,0xBF);Prefix=[byte[]]@(0xEF,0xBB,0xBF);Suffix=[byte[]]@()},
+        @{Name='append-lf';Existing=[Text.UTF8Encoding]::new($false).GetBytes("personal  `n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("personal  `n`n");Suffix=[byte[]]@()},
+        @{Name='append-crlf';Existing=[Text.UTF8Encoding]::new($false).GetBytes("personal`r`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("personal`r`n`r`n");Suffix=[byte[]]@()},
+        @{Name='append-lf-no-final-newline';Existing=[Text.UTF8Encoding]::new($false).GetBytes("personal`nlast");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("personal`nlast`n`n");Suffix=[byte[]]@()},
+        @{Name='append-crlf-no-final-newline';Existing=[Text.UTF8Encoding]::new($false).GetBytes("personal`r`nlast");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("personal`r`nlast`r`n`r`n");Suffix=[byte[]]@()},
+        @{Name='append-mixed-no-final-newline';Existing=[Text.UTF8Encoding]::new($false).GetBytes("one`ntwo`r`nlast");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("one`ntwo`r`nlast`r`n`r`n");Suffix=[byte[]]@()},
+        @{Name='append-multiple-lf';Existing=[Text.UTF8Encoding]::new($false).GetBytes("personal`n`n`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("personal`n`n`n");Suffix=[byte[]]@()},
+        @{Name='append-multiple';Existing=[Text.UTF8Encoding]::new($false).GetBytes("personal`r`n`r`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("personal`r`n`r`n");Suffix=[byte[]]@()},
+        @{Name='replace-mixed';Existing=[Text.UTF8Encoding]::new($false).GetBytes("before`r`n## Repository Instructions Bootstrap`nold  `n`n## Tail`r`nkeep  `r`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("before`r`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`r`nkeep  `r`n")},
+        @{Name='replace-lf-multiple-blank-lines';Existing=[Text.UTF8Encoding]::new($false).GetBytes("before`n## Repository Instructions Bootstrap`nold`n`n`n## Tail`nkeep`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("before`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='replace-crlf-multiple-blank-lines';Existing=[Text.UTF8Encoding]::new($false).GetBytes("before`r`n## Repository Instructions Bootstrap`r`nold`r`n`r`n`r`n## Tail`r`nkeep`r`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("before`r`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`r`nkeep`r`n")},
+        @{Name='replace-one-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n ## Tail`nkeep  `n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes(" ## Tail`nkeep  `n")},
+        @{Name='replace-two-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`r`nold`r`n  ## Tail`r`nkeep  `r`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("  ## Tail`r`nkeep  `r`n")},
+        @{Name='replace-three-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n   ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("   ## Tail`nkeep`n")},
+        @{Name='ignore-four-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n    ## Code`nnot a boundary`n## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='ignore-tab-indented-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`t## Code`nnot a boundary`n## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='ignore-H3';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n### Child`nnot a boundary`n## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='ignore-fenced-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n~~~text`n## fenced heading`n~~~~`n  ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("  ## Tail`nkeep`n")},
+        @{Name='append-only-backtick-fenced-managed-heading';Existing=[Text.UTF8Encoding]::new($false).GetBytes((@('# Personal','```md','## Repository Instructions Bootstrap','example','```')-join"`n")+"`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes((@('# Personal','```md','## Repository Instructions Bootstrap','example','```','')-join"`n")+"`n");Suffix=[byte[]]@()},
+        @{Name='append-only-tilde-fenced-managed-heading';Existing=[Text.UTF8Encoding]::new($false).GetBytes("# Personal`n~~~md`n## Repository Instructions Bootstrap`nexample`n~~~~`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("# Personal`n~~~md`n## Repository Instructions Bootstrap`nexample`n~~~~`n`n");Suffix=[byte[]]@()},
+        @{Name='replace-real-section-after-fenced-example';Existing=[Text.UTF8Encoding]::new($false).GetBytes((@('```md','## Repository Instructions Bootstrap','example','``` ','## Repository Instructions Bootstrap','old','## Tail','keep')-join"`n")+"`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes((@('```md','## Repository Instructions Bootstrap','example','``` ')-join"`n")+"`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='replace-before-multiline-setext-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`nPersonal notes`r`ncontinued title`r`n-------------`r`nKEEP  `r`n");Prefix=[byte[]]@();Separator=[Text.UTF8Encoding]::new($false).GetBytes("`r`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("Personal notes`r`ncontinued title`r`n-------------`r`nKEEP  `r`n")},
+        @{Name='ignore-blank-then-thematic-break';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n---`nmanaged body continues`n");Prefix=[byte[]]@();Suffix=[byte[]]@()},
+        @{Name='thematic-star-spaced-before-one-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n* * *`n ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes(" ## Tail`nkeep`n")},
+        @{Name='thematic-star-spaced-before-two-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n* * *`n  ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("  ## Tail`nkeep`n")},
+        @{Name='thematic-star-spaced-before-three-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n* * *`n   ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("   ## Tail`nkeep`n")},
+        @{Name='thematic-dash-spaced-before-one-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n- - -`n ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes(" ## Tail`nkeep`n")},
+        @{Name='thematic-dash-spaced-before-two-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n- - -`n  ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("  ## Tail`nkeep`n")},
+        @{Name='thematic-dash-spaced-before-three-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n- - -`n   ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("   ## Tail`nkeep`n")},
+        @{Name='thematic-underscore-spaced-before-one-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n_ _ _`n ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes(" ## Tail`nkeep`n")},
+        @{Name='thematic-underscore-spaced-before-two-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n_ _ _`n  ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("  ## Tail`nkeep`n")},
+        @{Name='thematic-underscore-spaced-before-three-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n_ _ _`n   ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("   ## Tail`nkeep`n")},
+        @{Name='thematic-star-compact-before-one-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n***`n ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes(" ## Tail`nkeep`n")},
+        @{Name='thematic-star-compact-before-two-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n***`n  ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("  ## Tail`nkeep`n")},
+        @{Name='thematic-star-compact-before-three-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n***`n   ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("   ## Tail`nkeep`n")},
+        @{Name='thematic-dash-compact-before-one-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n---`n ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes(" ## Tail`nkeep`n")},
+        @{Name='thematic-dash-compact-before-two-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n---`n  ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("  ## Tail`nkeep`n")},
+        @{Name='thematic-dash-compact-before-three-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n---`n   ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("   ## Tail`nkeep`n")},
+        @{Name='thematic-break-inside-list-stays-in-container';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n- list item`n  * * *`n  ## Hidden list H2`n  keep`n## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='ignore-fenced-ATX-and-Setext';Existing=[Text.UTF8Encoding]::new($false).GetBytes((@('## Repository Instructions Bootstrap','old','```md','Fenced title','---','## Fenced ATX','``` ','Personal tail','---','KEEP')-join"`n")+"`n");Prefix=[byte[]]@();Separator=[Text.UTF8Encoding]::new($false).GetBytes("`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("Personal tail`n---`nKEEP`n")},
+        @{Name='ignore-indented-code-managed-heading';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n    ## Repository Instructions Bootstrap`n    example`n## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='html-type-1-script';Existing=[Text.UTF8Encoding]::new($false).GetBytes("<script type=`"text/plain`">`n## Repository Instructions Bootstrap`n## Hidden H2`n</script>`n## Repository Instructions Bootstrap`nold`n## Tail`nkeep`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("<script type=`"text/plain`">`n## Repository Instructions Bootstrap`n## Hidden H2`n</script>`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='html-type-2-comment';Existing=[Text.UTF8Encoding]::new($false).GetBytes("<!--`n## Repository Instructions Bootstrap`n## Hidden H2`n-->`n## Repository Instructions Bootstrap`nold`n## Tail`nkeep`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("<!--`n## Repository Instructions Bootstrap`n## Hidden H2`n-->`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='html-type-3-processing-instruction';Existing=[Text.UTF8Encoding]::new($false).GetBytes("<?fixture`n## Repository Instructions Bootstrap`n## Hidden H2`n?>`n## Repository Instructions Bootstrap`nold`n## Tail`nkeep`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("<?fixture`n## Repository Instructions Bootstrap`n## Hidden H2`n?>`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='html-type-4-declaration';Existing=[Text.UTF8Encoding]::new($false).GetBytes("<!FIXTURE`n## Repository Instructions Bootstrap`n## Hidden H2`n>`n## Repository Instructions Bootstrap`nold`n## Tail`nkeep`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("<!FIXTURE`n## Repository Instructions Bootstrap`n## Hidden H2`n>`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='html-type-5-cdata';Existing=[Text.UTF8Encoding]::new($false).GetBytes("<![CDATA[`n## Repository Instructions Bootstrap`n## Hidden H2`n]]>`n## Repository Instructions Bootstrap`nold`n## Tail`nkeep`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("<![CDATA[`n## Repository Instructions Bootstrap`n## Hidden H2`n]]>`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='html-type-6-block-tag';Existing=[Text.UTF8Encoding]::new($false).GetBytes("<div>`n## Repository Instructions Bootstrap`n## Hidden H2`n</div>`n`n## Repository Instructions Bootstrap`nold`n## Tail`nkeep`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("<div>`n## Repository Instructions Bootstrap`n## Hidden H2`n</div>`n`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='html-type-7-complete-tag';Existing=[Text.UTF8Encoding]::new($false).GetBytes("<fixture data-kind='example'>`n## Repository Instructions Bootstrap`n## Hidden H2`n</fixture>`n`n## Repository Instructions Bootstrap`nold`n## Tail`nkeep`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("<fixture data-kind='example'>`n## Repository Instructions Bootstrap`n## Hidden H2`n</fixture>`n`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='html-type-7-does-not-interrupt-paragraph';Existing=[Text.UTF8Encoding]::new($false).GetBytes("personal paragraph`n<fixture>`n## Repository Instructions Bootstrap`nold`n## Tail`nkeep`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("personal paragraph`n<fixture>`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='list-fenced-and-indented-examples';Existing=[Text.UTF8Encoding]::new($false).GetBytes("- ~~~md`n  ## Repository Instructions Bootstrap`n  ## Hidden H2`n  ~~~~`n- indented example`n`n      ## Repository Instructions Bootstrap`n      ## Hidden H2`n## Repository Instructions Bootstrap`nold`n## Tail`nkeep`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("- ~~~md`n  ## Repository Instructions Bootstrap`n  ## Hidden H2`n  ~~~~`n- indented example`n`n      ## Repository Instructions Bootstrap`n      ## Hidden H2`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='blockquote-fenced-and-indented-examples';Existing=[Text.UTF8Encoding]::new($false).GetBytes("> ~~~md`n> ## Repository Instructions Bootstrap`n> ## Hidden H2`n> ~~~~`n>     ## Repository Instructions Bootstrap`n>     ## Hidden H2`n## Repository Instructions Bootstrap`nold`n## Tail`nkeep`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("> ~~~md`n> ## Repository Instructions Bootstrap`n> ## Hidden H2`n> ~~~~`n>     ## Repository Instructions Bootstrap`n>     ## Hidden H2`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='container-H2-is-not-top-level-boundary';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n- ## List H2`n  keep`n> ## Quote H2`n> keep`n## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='container-lazy-continuation-and-Setext';Existing=[Text.UTF8Encoding]::new($false).GetBytes("- list paragraph`nlazy continuation`n  ---`n> quote paragraph`nlazy continuation`n> ---`n## Repository Instructions Bootstrap`nold`n## Tail`nkeep`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("- list paragraph`nlazy continuation`n  ---`n> quote paragraph`nlazy continuation`n> ---`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='nested-container-fenced-example';Existing=[Text.UTF8Encoding]::new($false).GetBytes("> - ~~~md`n>   ## Repository Instructions Bootstrap`n>   ## Hidden H2`n>   ~~~~`n## Repository Instructions Bootstrap`nold`n## Tail`nkeep`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("> - ~~~md`n>   ## Repository Instructions Bootstrap`n>   ## Hidden H2`n>   ~~~~`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")}
+    ) {
+        param($Name,$Existing,$Prefix,$Separator=[byte[]]@(),$Suffix)
+        [byte[]]$section=[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$actual=Get-InstallerBootstrapSectionContent -ExistingBytes ([byte[]]$Existing) -SectionBytes $section
+        [byte[]]$expected=[byte[]]@(([byte[]]$Prefix)+$section+([byte[]]$Separator)+([byte[]]$Suffix))
+        [Convert]::ToBase64String($actual)|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: An LF or CRLF managed section is followed by a Setext H2 whose separating blank line belongs to the replaced range.
+    # Purpose: Restore one existing-style blank line before the Setext suffix and keep the exact bytes stable on a second merge.
+    It 'UnitT232b_separates_a_Setext_H2_suffix_and_is_exact_byte_idempotent' -TestCases @(
+        @{Name='LF';Newline="`n"},
+        @{Name='CRLF';Newline="`r`n"}
+    ) {
+        param($Name,$Newline)
+        $utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$section=[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$suffix=$utf8.GetBytes("Personal notes${Newline}--------------${Newline}KEEP  ${Newline}")
+        [byte[]]$existing=$utf8.GetBytes("## Repository Instructions Bootstrap${Newline}- old${Newline}${Newline}Personal notes${Newline}--------------${Newline}KEEP  ${Newline}")
+        [byte[]]$expected=[byte[]]@($section+$utf8.GetBytes($Newline)+$suffix)
+
+        [byte[]]$first=Get-InstallerBootstrapSectionContent -ExistingBytes $existing -SectionBytes $section
+        [byte[]]$second=Get-InstallerBootstrapSectionContent -ExistingBytes $first -SectionBytes $section
+
+        [Convert]::ToBase64String($first)|Should Be ([Convert]::ToBase64String($expected))
+        [Convert]::ToBase64String($second)|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: Managed instructions bytes have invalid encoding, duplicate or ambiguous headings, bare CR, or an unclosed explicit-marker block.
+    # Purpose: Fail closed with actionable encoding or boundary remediation before either installer or coordinator can plan a mutation.
+    It 'UnitT233_rejects_ambiguous_or_non_UTF8_managed_instruction_bytes' -TestCases @(
+        @{Name='invalid UTF-8';Bytes=[byte[]]@(0xC3,0x28);Message='valid UTF-8'},
+        @{Name='UTF-16 LE';Bytes=[byte[]]@(0xFF,0xFE,0x41,0x00);Message='UTF-16'},
+        @{Name='UTF-32 BE';Bytes=[byte[]]@(0x00,0x00,0xFE,0xFF);Message='UTF-32'},
+        @{Name='UTF-16 LE without BOM';Bytes=[Text.Encoding]::Unicode.GetBytes('ASCII');Message='NUL bytes'},
+        @{Name='UTF-16 BE without BOM';Bytes=[Text.Encoding]::BigEndianUnicode.GetBytes('ASCII');Message='NUL bytes'},
+        @{Name='UTF-32 LE without BOM';Bytes=[Text.Encoding]::UTF32.GetBytes('ASCII');Message='NUL bytes'},
+        @{Name='UTF-32 BE without BOM';Bytes=[Text.UTF32Encoding]::new($true,$false).GetBytes('ASCII');Message='NUL bytes'},
+        @{Name='duplicate BOM';Bytes=[byte[]]@(0xEF,0xBB,0xBF,0xEF,0xBB,0xBF);Message='more than one UTF-8 BOM'},
+        @{Name='duplicate heading';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n## Repository Instructions Bootstrap`nold`n");Message='duplicate'},
+        @{Name='ambiguous heading';Bytes=[Text.UTF8Encoding]::new($false).GetBytes(" ## Repository Instructions Bootstrap`nold`n");Message='ambiguous'},
+        @{Name='bare CR';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("personal`rold");Message='bare CR'},
+        @{Name='unclosed fenced code';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n~~~`n## fenced heading`n");Message='unclosed fenced code block'},
+        @{Name='unclosed fence before any real section';Bytes=[Text.UTF8Encoding]::new($false).GetBytes((@('```md','## Repository Instructions Bootstrap','example')-join"`n")+"`n");Message='unclosed fenced code block'},
+        @{Name='unclosed HTML type 1';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("<script>`n## Repository Instructions Bootstrap`nexample`n");Message='unclosed CommonMark HTML block type 1'},
+        @{Name='unclosed HTML type 2';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("<!--`n## Repository Instructions Bootstrap`nexample`n");Message='unclosed CommonMark HTML block type 2'},
+        @{Name='ambiguous Setext paragraph after list';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n- list item`ncontinued paragraph`n---`nKEEP`n");Message='Setext H2 paragraph boundary'}
+    ) {
+        param($Name,$Bytes,$Message)
+        [byte[]]$section=[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md'))
+        (Get-RuntimeContractError {Get-InstallerBootstrapSectionContent -ExistingBytes ([byte[]]$Bytes) -SectionBytes $section|Out-Null})|Should Match ([regex]::Escape($Message))
+    }
+
+    # Scenario: A v3 bundle omits the dedicated authority file or moves it below a nested directory.
+    # Purpose: Bind the coordinator to exactly one root-level bootstrap-section.md and forbid inline or path fallback.
+    It 'UnitT234_requires_one_root_bootstrap_section_in_runtime_bundle_v3' {
+        $fixture=New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-bootstrap-section')
+        $configuration=New-TestConfigurationDocument -SchemaVersion 5
+        $configuration.catalog.ref=[string]$fixture.Bundle.commit
+        Update-TestRuntimeV3ProjectionContract -Fixture $fixture
+        {Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configuration -RuntimeRoot $fixture.Root|Out-Null}|Should Not Throw
+        Remove-Item -LiteralPath (Join-Path $fixture.Root 'bootstrap-section.md') -Force
+        Update-TestRuntimeV3Inventory -Fixture $fixture
+        (Get-RuntimeContractError {Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configuration -RuntimeRoot $fixture.Root|Out-Null})|Should Match 'bootstrap-section.md'
+    }
+
+    # Scenario: Config v5 is created, carried forward, replaced, and cleared with capability evidence while omission remains byte-compatible.
+    # Purpose: Persist deterministic evidence only in v5 and reject duplicate tuples before configuration bytes are written.
+    It 'UnitT235_persists_normalizes_replaces_and_clears_v5_capability_evidence' {
+        $configured=@(
+            [pscustomobject]@{kind='environment';id='jira-cloud-api';state='configured'},
+            [pscustomobject]@{kind='connector';id='datadog';state='configured'}
+        )
+        $created=ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration $null -CatalogRepository $script:CanonicalRepository -CatalogRef ('a'*40) -CapabilityEvidence $configured
+        @($created.capabilityEvidence|ForEach-Object{"$($_.kind):$($_.id):$($_.state)"})|Should Be @('connector:datadog:configured','environment:jira-cloud-api:configured')
+        {Assert-AiInstructionsSyncConfigurationV5 -Configuration $created}|Should Not Throw
+
+        $carried=ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration $created -CatalogRepository $script:CanonicalRepository -CatalogRef ('b'*40)
+        @($carried.capabilityEvidence|ForEach-Object{"$($_.kind):$($_.id):$($_.state)"})|Should Be @('connector:datadog:configured','environment:jira-cloud-api:configured')
+        $replaced=ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration $carried -CatalogRepository $script:CanonicalRepository -CatalogRef ('c'*40) -CapabilityEvidence @([pscustomobject]@{kind='connector';id='datadog';state='absent'})
+        @($replaced.capabilityEvidence|ForEach-Object{"$($_.kind):$($_.id):$($_.state)"})|Should Be @('connector:datadog:absent')
+        $cleared=ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration $replaced -CatalogRepository $script:CanonicalRepository -CatalogRef ('d'*40) -CapabilityEvidence @()
+        $cleared.PSObject.Properties.Name|Should Not Contain 'capabilityEvidence'
+
+        $withoutEvidence=ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration $null -CatalogRepository $script:CanonicalRepository -CatalogRef ('e'*40)
+        $withoutEvidence.PSObject.Properties.Name|Should Not Contain 'capabilityEvidence'
+        $duplicate=@([pscustomobject]@{kind='connector';id='datadog';state='configured'},[pscustomobject]@{kind='connector';id='datadog';state='absent'})
+        (Get-RuntimeContractError {ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration $null -CatalogRepository $script:CanonicalRepository -CatalogRef ('f'*40) -CapabilityEvidence $duplicate})|Should Match 'duplicate'
     }
 }

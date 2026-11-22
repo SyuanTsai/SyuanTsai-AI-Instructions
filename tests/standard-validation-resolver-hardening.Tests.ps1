@@ -78,6 +78,24 @@ Describe 'SYP258 source tool identity freeze' {
     }
 }
 
+Describe 'SYP-488 consumer supervisor credential boundary' {
+    # Scenario: Pre-authority Git and the verified supervisor are inspected together.
+    # Purpose: Git receives no credential alias, while only prepare may receive the resolver token through the authority supervisor.
+    It 'UnitT990_separates_pre_authority_git_from_prepare_only_token_delivery' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $bootstrap=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'consumer/bootstrap/Invoke-PinnedAuthority.ps1')
+        $supervisor=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'scripts/consumer/ConsumerBootstrapSupervisor.psm1')
+        foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){
+            $bootstrap|Should Match ([regex]::Escape("SetEnvironmentVariable(`$name,`$null,'Process')"))
+        }
+        $bootstrap|Should Match 'maintenance\.auto=false'
+        $bootstrap|Should Match 'gc\.autoDetach=false'
+        $supervisor|Should Match "CurrentPhase-ceq'prepare'"
+        $supervisor|Should Match "CurrentPhase-cne'prepare'"
+        $supervisor|Should Match 'credential sentinel and was suppressed'
+    }
+}
+
 Describe 'P11-pin phase-scoped resolver credential' {
     # Scenario: Consumer workflows acquire tools in prepare and then run candidate-controlled phases.
     # Purpose: Make the read-only workflow token unavailable to validate, finalize, aggregate, and every candidate child.
@@ -456,6 +474,57 @@ Describe 'Standard validation resolver hardening' {
         }
     }
 
+    # Scenario: The reviewed skill-tools installation reaches runtime validation and identity hashing.
+    # Purpose: Apply the fixed core path patch before --help and every installed-runtime hash is observed.
+    It 'UnitT25_applies_the_core_path_patch_before_skill_tools_validation_and_runtime_hashing' {
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        $functionStart = $resolver.IndexOf('function Resolve-SkillTools {', [StringComparison]::Ordinal)
+        $functionEnd = $resolver.IndexOf('function Resolve-SkillValidator {', $functionStart, [StringComparison]::Ordinal)
+        Assert-True ($functionStart -ge 0 -and $functionEnd -gt $functionStart) 'Resolve-SkillTools must remain a bounded script-scope function.'
+        $source = $resolver.Substring($functionStart, $functionEnd - $functionStart)
+        $patchCalls = [regex]::Matches($source, 'Invoke-SkillToolsCorePathPatch\s+-InstallPath\s+\$toolInstallPath')
+        Assert-Equal $patchCalls.Count 1 'Resolve-SkillTools must invoke the fixed core path patch exactly once.'
+        $patchIndex = $patchCalls[0].Index
+        foreach ($operation in @(
+            @{ Text = "Invoke-CheckedCommand -Command `$nodeCommand -Arguments @(`$entryPointPath, '--help')"; Context = '--help validation' },
+            @{ Text = 'Get-FileSha256 -Path $executablePath'; Context = 'launcher hash' },
+            @{ Text = 'Get-FileSha256 -Path $entryPointPath'; Context = 'entry-point hash' },
+            @{ Text = 'Get-FileSha256 -Path $nodeCommand'; Context = 'Node runtime hash' },
+            @{ Text = 'Get-DirectoryClosureIdentity -Path $toolInstallPath'; Context = 'installed closure hash' }
+        )) {
+            $operationIndex = $source.IndexOf([string]$operation.Text, [StringComparison]::Ordinal)
+            Assert-True ($operationIndex -gt $patchIndex) "The core path patch must precede $($operation.Context)."
+        }
+    }
+
+    # Scenario: An installed @skill-tools/core file differs from the pinned pre-patch digest.
+    # Purpose: Fail closed before runtime validation or installed-closure hashing can accept unreviewed bytes.
+    It 'UnitT25a_rejects_skill_tools_core_pre_hash_drift' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $installRoot = Join-Path $TestDrive 'hardening-core-pre-hash'
+        $coreRoot = Join-Path $installRoot 'node_modules/@skill-tools/core'
+        Write-TestUtf8File -Path (Join-Path $coreRoot 'package.json') -Text "{`"name`":`"@skill-tools/core`",`"version`":`"fixture`"}`n"
+        $targetPath = Join-Path $coreRoot 'dist/index.js'
+        Write-TestUtf8File -Path $targetPath -Text "const value = 'before';`n"
+        $spec = [pscustomobject][ordered]@{
+            packageName = '@skill-tools/core'
+            packageVersion = 'fixture'
+            files = @([pscustomobject][ordered]@{
+                relativePath = 'dist/index.js'
+                original = 'before'
+                replacement = 'after'
+                occurrenceCount = 1
+                preSha256 = '0' * 64
+                postSha256 = '1' * 64
+            })
+        }
+        $failure = $null
+        try { Invoke-SkillToolsCorePathPatch -InstallPath $installRoot -Spec $spec | Out-Null }
+        catch { $failure = $_.Exception.Message }
+        Assert-Match $failure 'pre-SHA256 mismatch' 'A pre-patch digest mismatch must fail closed.'
+        Assert-Equal ([IO.File]::ReadAllText($targetPath)) "const value = 'before';`n" 'A rejected patch must not modify the installed file.'
+    }
+
     # Scenario: A mocked GitHub acquisition failure includes the exact credential in its exception text.
     # Purpose: Ensure the diagnostic writer redacts the captured value and clears the script credential on failure.
     Context 'SkillSpector failure diagnostic redaction' {
@@ -483,7 +552,7 @@ Describe 'Standard validation resolver hardening' {
         }
     }
 
-    # Scenario: policy selects the reviewed SkillSpector registry and the registry activates a native 2.13.4 entry.
+    # Scenario: policy selects the reviewed SkillSpector registry and the registry activates the native 2.13.6 entry.
     # Purpose: replace mutable latest-release discovery with an explicit multi-version trust registry.
     It 'UnitT26_binds_SkillSpector_to_the_active_approved_source_entry' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
@@ -491,9 +560,17 @@ Describe 'Standard validation resolver hardening' {
         $registry=Get-SkillSpectorApprovedSources -Path (Join-Path $script:RepositoryRoot $toolPolicy.tools.skillspector.approvedSources)
         $profile=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/static-parser-host-ownership.json') | ConvertFrom-Json
         Assert-Equal $toolPolicy.tools.skillspector.channel 'approved-source-registry' 'SkillSpector must use the approved source registry.'
-        Assert-Equal $registry.active '2.13.4' 'The reviewed 2.13.4 release must be active.'
+        Assert-Equal $registry.active '2.13.6' 'The reviewed 2.13.6 release must be active.'
         Assert-Equal $registry.activeEntry.parserCorrection 'none' 'The active release must use the native parser without the legacy bridge.'
+        Assert-Equal $registry.entries.'2.13.4'.kind 'pypi-release' 'The retained 2.13.4 release must remain classified as a PyPI release.'
+        Assert-Equal $registry.entries.'2.13.4'.consoleEntryPoint 'skillspector.cli:app' 'The retained 2.13.4 release must keep its installed console entry point.'
         Assert-Equal $registry.entries.'2.13.0'.parserCorrection 'powershell-native-command-ownership-v1' 'The retained reviewed 2.13.0 entry must keep its correction profile.'
+        Assert-Equal $registry.entries.'2.13.6'.kind 'github-release-asset' 'The reviewed 2.13.6 release must be classified as a GitHub-only release asset.'
+        Assert-Equal $registry.entries.'2.13.6'.parserCorrection 'none' 'The reviewed 2.13.6 release must use the native parser.'
+        Assert-Equal $registry.entries.'2.13.6'.consoleEntryPoint 'skillspector.cli_entry:app' 'The reviewed 2.13.6 release must bind its installed console entry point.'
+        Assert-Equal $registry.entries.'2.13.6'.releaseCommit 'e2674da339b0bddc6e565d059c0577c6d9cd25da' 'The reviewed 2.13.6 release must bind its exact commit.'
+        Assert-Equal $registry.entries.'2.13.6'.wheelSha256 'e7b46c55e726405b2a068d375d1ee8e799e15d86f3fc05f84feb5ba962198b15' 'The reviewed 2.13.6 release must bind its exact wheel.'
+        Assert-Equal $registry.entries.'2.13.6'.analyzerSha256 '0065c5fec585766b53e21711c908c9dd440639e5a29e374e5269d9c5c2ee6f11' 'The reviewed 2.13.6 release must bind its exact analyzer.'
         Assert-Equal $profile.officialScannerVersion '2.13.0' 'Parser correction must remain bound to its reviewed release.'
         Assert-Equal $profile.officialScannerReleaseCommit '091a509b3d6ba8ff5be528966e1f43c2e68cf214' 'Parser correction must bind the reviewed release commit.'
         Assert-Equal $profile.officialScannerReleaseAssetSha256 '41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc' 'Parser correction must bind the reviewed release wheel.'
@@ -508,15 +585,25 @@ Describe 'Standard validation resolver hardening' {
         [IO.File]::WriteAllText($fixture,($canonical | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
         $accepted=Get-SkillSpectorApprovedSources -Path $fixture
         Assert-Equal $accepted.activeEntry.version '2.13.0' 'A reviewed active switch must remain policy-valid.'
-        foreach($mutation in @('unknown-kind','missing-field','extra-field','missing-active','key-version-mismatch','bridge-analyzer-mismatch')) {
+        $canonical.active='2.13.6'
+        [IO.File]::WriteAllText($fixture,($canonical | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+        $accepted=Get-SkillSpectorApprovedSources -Path $fixture
+        Assert-Equal $accepted.activeEntry.version '2.13.6' 'A reviewed GitHub-only release active switch must remain policy-valid.'
+        foreach($mutation in @('unknown-kind','missing-field','extra-field','missing-active','key-version-mismatch','bridge-analyzer-mismatch','missing-console-entry-point','unknown-console-entry-point','github-entry-unknown-kind','github-entry-extra-url','github-entry-key-version-mismatch','github-entry-bad-wheel-name')) {
             $candidate=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
             switch($mutation) {
-                'unknown-kind' {$candidate.entries.'2.13.4'.kind='github-commit'}
-                'missing-field' {$candidate.entries.'2.13.4'.PSObject.Properties.Remove('releaseCommit')}
-                'extra-field' {$candidate.entries.'2.13.4' | Add-Member -NotePropertyName unreviewed -NotePropertyValue $true}
+                'unknown-kind' {$candidate.entries.'2.13.6'.kind='github-commit'}
+                'missing-field' {$candidate.entries.'2.13.6'.PSObject.Properties.Remove('releaseCommit')}
+                'extra-field' {$candidate.entries.'2.13.6' | Add-Member -NotePropertyName unreviewed -NotePropertyValue $true}
                 'missing-active' {$candidate.active='9.9.9'}
-                'key-version-mismatch' {$candidate.entries.'2.13.4'.version='2.13.5'}
+                'key-version-mismatch' {$candidate.entries.'2.13.6'.version='2.13.5'}
                 'bridge-analyzer-mismatch' {$candidate.entries.'2.13.0'.analyzerSha256='0'*64}
+                'missing-console-entry-point' {$candidate.entries.'2.13.6'.PSObject.Properties.Remove('consoleEntryPoint')}
+                'unknown-console-entry-point' {$candidate.entries.'2.13.6'.consoleEntryPoint='skillspector.main:app'}
+                'github-entry-unknown-kind' {$candidate.entries.'2.13.6'.kind='github-release'}
+                'github-entry-extra-url' {$candidate.entries.'2.13.6' | Add-Member -NotePropertyName releaseAssetUrl -NotePropertyValue 'https://example.test/skillspector.whl'}
+                'github-entry-key-version-mismatch' {$candidate.entries.'2.13.6'.version='2.13.7'}
+                'github-entry-bad-wheel-name' {$candidate.entries.'2.13.6'.wheelFileName='skillspector-2.13.6.tar.gz'}
             }
             [IO.File]::WriteAllText($fixture,($candidate | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
             { Get-SkillSpectorApprovedSources -Path $fixture } | Should Throw
@@ -560,6 +647,7 @@ Describe 'Standard validation resolver hardening' {
         $policy=Get-Policy -Path $script:ToolchainPath
         $registry=Get-SkillSpectorApprovedSources -Path (Join-Path $script:RepositoryRoot $policy.tools.skillspector.approvedSources)
         $script:SkillSpectorApprovedEntry=$registry.activeEntry
+        $activeReleaseEndpointPattern='/releases/tags/'+[regex]::Escape([string]$script:SkillSpectorApprovedEntry.releaseTag)+'$'
         $script:SkillSpectorGitHubCalls=[Collections.Generic.List[string]]::new()
         $originalAssertCommand=(Get-Item Function:Assert-Command).ScriptBlock
         $originalAssertNoConflictingPipEnvironment=(Get-Item Function:Assert-NoConflictingPipEnvironment).ScriptBlock
@@ -596,7 +684,7 @@ Describe 'Standard validation resolver hardening' {
                 $message=''
                 try{Resolve-SkillSpector -ShouldInstall $false -ToolPolicy $policy.tools.skillspector -AcquisitionLimitSeconds 30 | Out-Null}catch{$message=$_.Exception.Message}
                 Assert-Match $message $case.Pattern "Mocked $($case.Drift) drift was not rejected."
-                Assert-True ($script:SkillSpectorGitHubCalls[0] -match '/releases/tags/v2\.13\.4$') 'Resolver did not start with the exact active release endpoint.'
+                Assert-True ($script:SkillSpectorGitHubCalls[0] -match $activeReleaseEndpointPattern) 'Resolver did not start with the exact active release endpoint.'
                 Assert-True (-not (@($script:SkillSpectorGitHubCalls) -match '/releases/latest')) 'Resolver queried mutable latest release metadata.'
             }
         }
@@ -683,6 +771,17 @@ Describe 'Standard validation resolver hardening' {
             '-B', '-c', 'import runpy,sys; h=runpy.run_path(sys.argv[1]); h["self_test_falls_back_to_prerelease"](); print("prerelease-fallback-self-test: passed")', $helper
         )
         Assert-Match ($output -join "`n") 'prerelease-fallback-self-test: passed' 'Prerelease fallback must remain solvable when no final candidate exists.'
+    }
+
+    # Scenario: dep needs prerelease fallback while other has both a final and a newer prerelease candidate in the verified pool.
+    # Purpose: Grant prerelease permission only to the missing project and retain pip's final-first choice for every other project.
+    It 'UnitT29ba_scopes_prerelease_permission_to_the_missing_project' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $helper = Join-Path $script:RepositoryRoot 'scripts/Resolve-PythonWheelClosure.py'
+        $output = Invoke-IsolatedPythonCommand -PythonCommand (Assert-Command -Name 'python') -Arguments @(
+            '-B', '-c', 'import runpy,sys; h=runpy.run_path(sys.argv[1]); h["self_test_prerelease_permission_is_scoped"](); print("scoped-prerelease-self-test: passed")', $helper
+        )
+        Assert-Match ($output -join "`n") 'scoped-prerelease-self-test: passed' 'Prerelease permission must not change final-first selection for unrelated projects.'
     }
 
     # Scenario: dep>=1.0.dev1 explicitly permits dep 1.0.dev6.
@@ -2470,5 +2569,21 @@ Describe 'SYP354 PR-K1 trust-anchor admission boundary' {
         }
         $admissionSources=@('scripts/Invoke-StandardValidation.ps1','scripts/Invoke-StandardAuthorityGate.ps1')|ForEach-Object{Get-Content -Raw -Encoding UTF8 (Join-Path $root $_)}
         ($admissionSources -join "`n") | Should Not Match 'trust-anchor/(New-TrustAnchorKeyPair|ConvertTo-TrustAnchorPublicKeyXml|Get-TrustAnchorFingerprint)\.ps1'
+    }
+
+    # Scenario: The central runner adds named script binding and a frozen absolute -File mode without changing the resolver or trust anchors.
+    # Purpose: Keep caller tokens out of command text and bind every trusted script to pwsh, frozenFiles, and single-link pre/post-launch checks.
+    It 'UnitT20_closes_named_script_dispatch_and_trusted_file_identity' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $runner=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'scripts/Invoke-StandardValidation.ps1')
+        foreach($required in @('ConvertTo-StandardValidationScriptArgumentBinding','Get-StandardValidationScriptDispatchText',
+                'New-StandardCoreTrustedFileBinding','verify-trusted-file-after-start','verify-trusted-file-after-exit',
+                'Assert-PlatformFileIdentity -Lease $trustedFileLease -Expected $trustedFileLease.Observation -SingleLink -VerifyPath')){
+            $runner | Should Match ([regex]::Escape($required))
+        }
+        $runner | Should Not Match 'STANDARD_VALIDATION_WRAPPER_COMMAND|STANDARD_VALIDATION_WRAPPER_ARGUMENTS'
+        $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        $standard | Should Match 'Candidate-relative mode|Candidate-relative 模式'
+        $standard | Should Match 'Trusted frozen mode|Trusted frozen 模式'
     }
 }

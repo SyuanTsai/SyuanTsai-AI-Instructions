@@ -808,11 +808,11 @@ function Confirm-PlatformPreparationDirectoryDurability {
         }
         return
     }
-    [void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::FlushDirectory($DestinationLease)
+    [void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::FlushDirectoryAndVerify($DestinationLease)
     $root=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetVerifiedPath($DestinationLease)
     foreach($relative in $ordered){
         $lease=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenDirectory($root,$relative,$false)
-        try{[void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::FlushDirectory($lease)}finally{$lease.Dispose()}
+        try{[void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::FlushDirectoryAndVerify($lease)}finally{$lease.Dispose()}
     }
 }
 

@@ -177,7 +177,7 @@ function Get-StaticApprovedSkillSpectorEntry($Receipt,$ApprovedSources,[string]$
        $Receipt.resolutionRunId -cne $ExpectedResolutionRunId -or
        $Receipt.identityKind -cne 'release-commit-asset-metadata-dependency-closure-and-executable' -or
        $Receipt.offlineResolutionVerified -isnot [bool] -or -not $Receipt.offlineResolutionVerified -or
-       $Receipt.consoleEntryPoint -cne 'skillspector.cli:app' -or
+       $Receipt.consoleEntryPoint -cne [string]$approvedEntry.consoleEntryPoint -or
        -not ([string]$Receipt.resolvedIdentity).StartsWith($identityPrefix,[StringComparison]::Ordinal) -or
        $Receipt.installedClosureSha256 -cnotmatch '^[0-9a-f]{64}$') {throw 'Scanner receipt has no supported frozen parser profile.'}
     if($Receipt.dependencyClosure -isnot [array]){throw 'Scanner dependency closure is not an explicit frozen array.'}
@@ -270,7 +270,12 @@ try {
     $working=[IO.Path]::GetDirectoryName($reportFull)
     # The shared process owner clears and rebuilds its own environment.
     $environment=@{STANDARD_VALIDATION_CANDIDATE_ID=$CandidateIdentity;STANDARD_VALIDATION_CANDIDATE_ROOT=$candidateFull}
-    $nativeArguments=@('-I','-B','-X','utf8','-c','from skillspector.cli import app; app()','scan',$skillFull,'--no-llm','--format','json')
+    $nativeEntryPoint=switch([string]$approvedEntry.consoleEntryPoint){
+        'skillspector.cli:app' {'from skillspector.cli import app; app()'}
+        'skillspector.cli_entry:app' {'from skillspector.cli_entry import app; app()'}
+        default {throw 'Approved scanner console entry point is unsupported.'}
+    }
+    $nativeArguments=@('-I','-B','-X','utf8','-c',$nativeEntryPoint,'scan',$skillFull,'--no-llm','--format','json')
     if($null -ne $baselineFull){$nativeArguments+=@('--baseline',$baselineFull)}
     $original=Invoke-StandardValidationProcess -Command $python -Arguments $nativeArguments -WorkingDirectory $working -Environment $environment -TimeoutSeconds $staticTimeout
     Write-StaticNativeReportFromProcess -Process $original -Path $originalReport

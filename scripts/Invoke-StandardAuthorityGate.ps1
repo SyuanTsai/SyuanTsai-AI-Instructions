@@ -1102,11 +1102,21 @@ function Assert-AuthorityValidationSecurityGate {
     Assert-AuthorityExactString -Value $aiReview.attestation -Expected 'trusted-supervisor-ai-review-v1' -Context 'Validation/security gate AI review attestation'
 
     $trustAnchors = Get-AuthorityRequiredProperty -Object $security -Name 'trustAnchors' -Context 'Validation/security gate trust-anchor policy'
-    Assert-AuthorityJsonPropertySet -Object $trustAnchors -Expected @('root', 'supervisorPublicKey', 'humanApprovalPublicKey', 'pinnedHashes') -Context 'Validation/security gate trust-anchor policy'
+    Assert-AuthorityJsonPropertySet -Object $trustAnchors -Expected @(
+        'root', 'supervisorPublicKey', 'humanApprovalPublicKey', 'pinnedHashes',
+        'status', 'supervisorStatus', 'humanApprovalStatus', 'revokedOn',
+        'revocationReason', 'completeLifecycle'
+    ) -Context 'Validation/security gate trust-anchor policy'
     Assert-AuthorityExactString -Value $trustAnchors.root -Expected 'docs/standards/trust-anchors' -Context 'Validation/security gate trust-anchor root'
     Assert-AuthorityExactString -Value $trustAnchors.supervisorPublicKey -Expected 'trusted-supervisor-public-key.xml' -Context 'Validation/security gate supervisor trust anchor'
     Assert-AuthorityExactString -Value $trustAnchors.humanApprovalPublicKey -Expected 'human-approval-public-key.xml' -Context 'Validation/security gate human-approval trust anchor'
     Assert-AuthorityExactBoolean -Value $trustAnchors.pinnedHashes -Expected $true -Context 'Validation/security gate pinned trust-anchor hashes'
+    Assert-AuthorityExactString -Value $trustAnchors.status -Expected 'no-active-trust-anchor' -Context 'Validation/security gate trust-anchor availability'
+    Assert-AuthorityExactString -Value $trustAnchors.supervisorStatus -Expected 'revoked' -Context 'Validation/security gate supervisor trust-anchor status'
+    Assert-AuthorityExactString -Value $trustAnchors.humanApprovalStatus -Expected 'revoked' -Context 'Validation/security gate human-approval trust-anchor status'
+    Assert-AuthorityExactString -Value $trustAnchors.revokedOn -Expected '2026-11-20' -Context 'Validation/security gate trust-anchor revocation date'
+    Assert-AuthorityExactString -Value $trustAnchors.revocationReason -Expected 'private-key-custody-unknown' -Context 'Validation/security gate trust-anchor revocation reason'
+    Assert-AuthorityExactString -Value $trustAnchors.completeLifecycle -Expected 'BLOCKED-pending-new-trust-anchor' -Context 'Validation/security gate CompleteLifecycle status'
 
     Assert-AuthorityEntryPointPolicy -Contract (Get-AuthorityRequiredProperty `
         -Object $Policy `
@@ -3153,6 +3163,17 @@ function Get-AuthorityLauncherDigest {
     finally { $sha.Dispose() }
 }
 
+function Get-AuthoritySkillSpectorApprovedSources {
+    $authorityRoot = Split-Path -Parent $PSScriptRoot
+    $toolchain = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $authorityRoot 'docs/standards/validation-toolchain.json') | ConvertFrom-Json
+    $registryPath = Join-Path $authorityRoot ([string]$toolchain.tools.skillspector.approvedSources)
+    return & {
+        param([string]$ResolverPath,[string]$ApprovedSourcesPath)
+        . $ResolverPath -ValidatePolicyOnly | Out-Null
+        Get-SkillSpectorApprovedSources -Path $ApprovedSourcesPath
+    } (Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1') $registryPath
+}
+
 function Assert-AuthorityLauncherReceipt {
     param(
         [Parameter(Mandatory = $true)] $Receipt,
@@ -3220,10 +3241,11 @@ function Assert-AuthorityLauncherReceipt {
         }
     }
     if ($kind -ceq 'skillspector-python') {
+        $approvedEntry = (Get-AuthoritySkillSpectorApprovedSources).activeEntry
         $expectedRuntime = Join-Path ([IO.Path]::GetDirectoryName($ExecutablePath)) $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'python.exe' } else { 'python' })
         if ($payloadPath -cne $shimPath -or $runtimePath -cne $expectedRuntime -or
             [string]$launcher.payloadSha256 -cne [string]$launcher.shimSha256 -or
-            [string]$Receipt.consoleEntryPoint -cne 'skillspector.cli:app') { throw 'SkillSpector native launcher does not bind the approved installed entry point and runtime.' }
+            [string]$Receipt.consoleEntryPoint -cne [string]$approvedEntry.consoleEntryPoint) { throw 'SkillSpector native launcher does not bind the approved installed entry point and runtime.' }
         Assert-AuthorityPathWithinRoot -Path $runtimePath -Root $InstallRoot -Context 'SkillSpector runtime'
         return
     }
@@ -3270,21 +3292,18 @@ function Assert-InstalledAuthorityToolReceipt {
         }
     }
     if ($ToolName -ceq 'skillspector') {
-        $toolchain = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/validation-toolchain.json') | ConvertFrom-Json
-        $registryPath = Join-Path (Split-Path -Parent $PSScriptRoot) ([string]$toolchain.tools.skillspector.approvedSources)
-        $registry = & {
-            param([string]$ResolverPath,[string]$ApprovedSourcesPath)
-            . $ResolverPath -ValidatePolicyOnly | Out-Null
-            Get-SkillSpectorApprovedSources -Path $ApprovedSourcesPath
-        } (Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1') $registryPath
+        $registry = Get-AuthoritySkillSpectorApprovedSources
         $approvedSourceId = Get-AuthorityRequiredProperty -Object $Receipt -Name 'approvedSourceId' -Context 'skillspector receipt'
         $parserCorrection = Get-AuthorityRequiredProperty -Object $Receipt -Name 'parserCorrection' -Context 'skillspector receipt'
         if ([string]$approvedSourceId -cne [string]$registry.active) { throw 'SkillSpector receipt does not name the active approved source entry.' }
         $entryProperty = @($registry.entries.PSObject.Properties | Where-Object { $_.Name -ceq [string]$approvedSourceId })
         if ($entryProperty.Count -ne 1) { throw 'SkillSpector receipt names an unknown approved source entry.' }
         $entry = $entryProperty[0].Value
+        $consoleEntryPoint = Get-AuthorityProperty -Object $Receipt -Name 'consoleEntryPoint'
         $identityPrefix = 'github:NVIDIA/SkillSpector@' + [string]$entry.releaseTag + '#commit=' + [string]$entry.releaseCommit + '#asset=sha256:' + [string]$entry.wheelSha256 + '#'
-        if ([string]$Receipt.resolvedVersion -cne [string]$entry.version -or
+        if ($consoleEntryPoint -isnot [string] -or
+            [string]$consoleEntryPoint -cne [string]$entry.consoleEntryPoint -or
+            [string]$Receipt.resolvedVersion -cne [string]$entry.version -or
             [string]$parserCorrection -cne [string]$entry.parserCorrection -or
             -not ([string]$Receipt.resolvedIdentity).StartsWith($identityPrefix, [StringComparison]::Ordinal)) {
             throw 'SkillSpector receipt does not match its approved source entry.'

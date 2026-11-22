@@ -79,8 +79,6 @@ function Get-AgentEnvironmentEntrySchemaVersion {
 
 function Assert-AgentEnvironmentEntryGenerationPair {
     param([AllowNull()][object]$Configuration,[AllowNull()][object]$Bundle)
-    # P7e integration point: replace this minimal D11 pair gate with the verified
-    # reader/baseline/closure/platform gate once that runtime is production-pinned.
     $configurationVersion=Get-AgentEnvironmentEntrySchemaVersion $Configuration
     $bundleVersion=Get-AgentEnvironmentEntrySchemaVersion $Bundle
     if($null-eq$configurationVersion-or$null-eq$bundleVersion-or$configurationVersion-notin@(4,5)-or$bundleVersion-notin@(2,3)){
@@ -89,9 +87,8 @@ function Assert-AgentEnvironmentEntryGenerationPair {
     if(($configurationVersion-eq5)-xor($bundleVersion-eq3)){
         throw (New-AgentEnvironmentEntryRefusalException -Code 'mixed-generation' -Message 'Installed Agent environment configuration and runtime bundle are from mixed generations.')
     }
-    if($configurationVersion-eq5-and$bundleVersion-eq3){
-        throw (New-AgentEnvironmentEntryRefusalException -Code 'projection-runtime-unavailable' -Message 'Projection-aware production runtime is unavailable until the P7e gate and production pins are installed.')
-    }
+    if($configurationVersion-eq5-and$bundleVersion-eq3){return 'v3v5'}
+    return 'v2v4'
 }
 
 function Open-AgentEnvironmentRuntimeReadLock {
@@ -212,6 +209,8 @@ function Write-AgentEnvironmentResult {
 $temporaryRoot = $null
 $finalResult = $null
 $reconcilerCommands = @{}
+$entryGeneration = $null
+$userProjectionGateContext = $null
 try {
     $script:agentEnvironmentRuntimeReadLock = Open-AgentEnvironmentRuntimeReadLock
     if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) { throw "Installed AI instructions runtime is missing: $runtimeRoot" }
@@ -225,9 +224,19 @@ try {
             if(Test-Path -LiteralPath $bundlePath -PathType Leaf){$bundle=Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath|ConvertFrom-Json}
         }
         catch{throw (New-AgentEnvironmentEntryRefusalException -Code 'unsupported-version' -Message "Installed Agent environment generation metadata is invalid: $($_.Exception.Message)")}
-        Assert-AgentEnvironmentEntryGenerationPair -Configuration $configuration -Bundle $bundle
+        $entryGeneration=Assert-AgentEnvironmentEntryGenerationPair -Configuration $configuration -Bundle $bundle
     }
     & $launcher -ValidateOnly | Out-Null
+
+    $capabilityReceipt=$null
+    if($entryGeneration-ceq'v3v5'){
+        $platformRuntimePath=Join-Path $runtimeRoot 'platform-runtime.psd1'
+        try{
+            $platformRuntimeModule=Import-Module $platformRuntimePath -Force -PassThru
+            $capabilityReceipt=& $platformRuntimeModule {param([string[]]$required)Get-PlatformCapabilities -Required $required} ([string[]]@($bundle.requiredCapabilities))
+        }
+        catch{throw (New-AgentEnvironmentEntryRefusalException -Code 'capability-unavailable' -Message "Installed USER projection runtime capabilities are unavailable: $($_.Exception.Message)")}
+    }
 
     Remove-Module agent-environment-reconciler -Force -ErrorAction SilentlyContinue
     $reconcilerModule = @(Import-Module $reconcilerPath -Force -PassThru | Where-Object { [string]::Equals([IO.Path]::GetFullPath([string]$_.Path),[IO.Path]::GetFullPath($reconcilerPath),[StringComparison]::OrdinalIgnoreCase) }) | Select-Object -Last 1
@@ -253,15 +262,15 @@ try {
     }
     elseif($null-eq$finalResult) {
         if ([string]$configuration.catalog.ref -cne [string]$bundle.commit) { throw 'Installed Catalog configuration and runtime bundle commit do not match.' }
-        $catalogVersion=(Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog.json')|ConvertFrom-Json).schemaVersion
-        $lockVersion=(Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json')|ConvertFrom-Json).schemaVersion
-        if([int64]$catalogVersion-eq3-or[int64]$lockVersion-eq3){$command=$reconcilerCommands['Assert-UserProjectionRuntimeGate'];& $command -RuntimeRoot $runtimeRoot}
+        if($entryGeneration-ceq'v3v5'){$command=$reconcilerCommands['Assert-UserProjectionRuntimeGate'];$userProjectionGateContext=& $command -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot -CapabilityReceipt $capabilityReceipt}
 
         $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('agent-environment-' + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
         $command=$reconcilerCommands['Get-UserSkillsDesiredState']
-        $desiredState = & $command -RuntimeRoot $runtimeRoot -Configuration $configuration `
-            -CatalogRepository ([string]$bundle.repository) -CatalogCommit ([string]$bundle.commit) -WorkingRoot $temporaryRoot
+        $desiredStateParameters=@{RuntimeRoot=$runtimeRoot;Configuration=$configuration;CatalogRepository=[string]$bundle.repository;CatalogCommit=[string]$bundle.commit;WorkingRoot=$temporaryRoot}
+        if($null-ne$userProjectionGateContext){$desiredStateParameters.GateContext=$userProjectionGateContext}
+        if($command.Parameters.ContainsKey('UserHome')){$desiredStateParameters.UserHome=$userHomePath}
+        $desiredState = & $command @desiredStateParameters
         $mode = if ($VerifyOnly) { 'VerifyOnly' } elseif ($WhatIfPreference) { 'WhatIf' } else { 'Apply' }
         $command=$reconcilerCommands['Invoke-UserSkillsReconciliation']
         $finalResult = & $command -DesiredState $desiredState -UserHome $userHomePath -Mode $mode `

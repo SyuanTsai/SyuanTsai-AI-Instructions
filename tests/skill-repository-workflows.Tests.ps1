@@ -23,6 +23,10 @@ Describe 'SYP258 explicit source validation contract' {
         $property = $schema.properties.PSObject.Properties['sourceValidation']
         if ($null -eq $property) { throw 'The v2 adapter must expose its optional sourceValidation contract.' }
         if (@($schema.required) -contains 'sourceValidation') { throw 'Ordinary Core must not require sourceValidation.' }
+        $policy = Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/standard-core-validation-v2.json') | ConvertFrom-Json
+        $policy.processOwnership.scriptArgumentBinding | Should Match 'named, switch, and positional data.*fixed pwsh -File dispatcher'
+        $policy.core.fileArguments | Should Match 'candidate-relative -File.*trusted frozen -File.*pre/post-launch hash revalidation'
+        $schema.'$defs'.check.properties.arguments.description | Should Match 'Other absolute arguments are invalid'
         $tokens = $null; $errors = $null
         $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'scripts/Invoke-StandardValidation.ps1'), [ref]$tokens, [ref]$errors)
         if (@($errors).Count -gt 0) { throw 'The source runner must remain parseable.' }
@@ -58,6 +62,31 @@ Describe 'SYP258 explicit source validation contract' {
             $modeArguments=@($call.CommandElements | Where-Object { $_ -is [Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -ceq 'AllowDevelopmentContent' })
             if ($modeArguments.Count -ne 1) { throw "Candidate inventory at line $($call.Extent.StartLineNumber) omitted mandatory -AllowDevelopmentContent." }
         }
+    }
+}
+
+Describe 'SYP-488 thin consumer bootstrap workflow contract' {
+    # Scenario: Consumer phase budgets now include bootstrap Git and authority-supervisor grace.
+    # Purpose: Keep all published workflow deadlines synchronized with the authority budget and below 150 minutes.
+    It 'UnitT990_binds_consumer_deadlines_and_verified_supervisor_loading' {
+        $root=Split-Path -Parent $PSScriptRoot
+        Import-Module (Join-Path $root 'scripts/consumer/ConsumerGate.psm1') -Force
+        $budget=Get-GateDeadlineBudget
+        $budget.jobTimeoutMinutes|Should Be 150
+        $budget.aggregateJobTimeoutMinutes|Should Be 20
+        foreach($phase in @('prepare','validate','finalize','aggregate')){
+            $budget.phaseBudgets.$phase.bootstrapGitReserveSeconds|Should BeGreaterThan 0
+            $budget.phaseBudgets.$phase.supervisorGraceSeconds|Should BeGreaterThan 0
+        }
+        foreach($path in @('consumer/workflows/consumer-gate.yml','consumer/workflows/consumer-gate-transition.yml',
+                '.github/workflows/consumer-transition-probe.yml')){
+            $text=Get-Content -Raw -Encoding UTF8 (Join-Path $root $path)
+            $text|Should Match 'timeout-minutes: 150'
+            $text|Should Match 'timeout-minutes: 20'
+        }
+        $bootstrap=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'consumer/bootstrap/Invoke-PinnedAuthority.ps1')
+        $bootstrap.IndexOf('Assert-AuthorityTree',[StringComparison]::Ordinal)|Should BeLessThan `
+            $bootstrap.LastIndexOf('Import-ConsumerBootstrapSupervisor',[StringComparison]::Ordinal)
     }
 }
 
@@ -234,11 +263,13 @@ Describe 'Agent Skill authority workflow contract' {
         $script:WorkflowExpectations = [ordered]@{
             '.github/workflows/consumer-transition-probe.yml' = 2
             '.github/workflows/pr8-powershell-validation.yml' = 5
+            '.github/workflows/skill-tools-path-patch.yml' = 2
             '.github/workflows/standards-conformance.yml' = 1
             '.github/workflows/syp101-production-smoke.yml' = 1
             '.github/workflows/syp86-production-lock.yml' = 1
             '.github/workflows/validator-maintenance-producer.yml' = 1
         }
+        $script:ExpectedOrdinaryWorkflowPaths = @($script:WorkflowExpectations.Keys)
         $script:AuthorityTests = @(
             'internal-source-continuation.Tests.ps1'
             'skill-repository-standard.Tests.ps1'
@@ -260,6 +291,23 @@ Describe 'Agent Skill authority workflow contract' {
         function Assert-Equal {
             param($Actual, $Expected, [string] $Message)
             if ($Actual -ne $Expected) { throw "$Message Expected='$Expected' Actual='$Actual'." }
+        }
+
+        function Test-TemporaryProbeWorkflowPath {
+            param([string] $Path)
+            return ($env:GITHUB_REF -clike 'refs/heads/probe/*' -and
+                $Path -cmatch '^\.github/workflows/probe-[^/]*\.yml$')
+        }
+
+        function Get-OrdinaryWorkflowInventory {
+            param([string[]] $Paths)
+            return @($Paths | Where-Object { -not (Test-TemporaryProbeWorkflowPath -Path $_) })
+        }
+
+        function Assert-OrdinaryWorkflowInventory {
+            param([string[]] $Paths)
+            Assert-Equal $Paths.Count $script:ExpectedOrdinaryWorkflowPaths.Count 'The repository must retain exactly the seven registered active workflow files.'
+            Assert-Equal (($Paths | Sort-Object) -join '|') (($script:ExpectedOrdinaryWorkflowPaths | Sort-Object) -join '|') 'The workflow inventory must retire the unmatched protected maintenance consumer and reject unreviewed workflow additions.'
         }
 
         function Assert-Match {
@@ -637,19 +685,10 @@ jobs:
     # Purpose: Keep one Windows Core job, one Windows Install Smoke job, and verified PowerShell provenance.
     It 'UnitT15_ordinary_workflows_use_verified_Windows_PowerShell_only' {
         $workflowDirectory = Join-Path $script:RepositoryRoot '.github/workflows'
-        $workflowPaths = @(Get-ChildItem -LiteralPath $workflowDirectory -File |
+        $workflowPaths = @(Get-OrdinaryWorkflowInventory -Paths @(Get-ChildItem -LiteralPath $workflowDirectory -File |
             Where-Object { $_.Extension -in @('.yml', '.yaml') } |
-            ForEach-Object { [IO.Path]::GetRelativePath($script:RepositoryRoot, $_.FullName).Replace('\', '/') })
-        $expectedWorkflowPaths = @(
-            '.github/workflows/consumer-transition-probe.yml',
-            '.github/workflows/pr8-powershell-validation.yml',
-            '.github/workflows/standards-conformance.yml',
-            '.github/workflows/syp101-production-smoke.yml',
-            '.github/workflows/syp86-production-lock.yml',
-            '.github/workflows/validator-maintenance-producer.yml'
-        )
-        Assert-Equal $workflowPaths.Count $expectedWorkflowPaths.Count 'The repository must retain exactly the six registered active workflow files.'
-        Assert-Equal (($workflowPaths | Sort-Object) -join '|') (($expectedWorkflowPaths | Sort-Object) -join '|') 'The workflow inventory must retire the unmatched protected maintenance consumer and reject unreviewed workflow additions.'
+            ForEach-Object { [IO.Path]::GetRelativePath($script:RepositoryRoot, $_.FullName).Replace('\', '/') }))
+        Assert-OrdinaryWorkflowInventory -Paths $workflowPaths
         $pullRequestWorkflows = New-Object 'System.Collections.Generic.List[string]'
         $pullRequestJobNames = New-Object 'System.Collections.Generic.List[string]'
         foreach ($relativePath in $workflowPaths) {
@@ -661,8 +700,8 @@ jobs:
                 $jobMatches = [regex]::Matches($jobsBlock.Groups['block'].Value, '(?m)^  ([a-z][a-z0-9-]*):\s*$')
                 if ($relativePath -ceq '.github/workflows/pr8-powershell-validation.yml') {
                     $pullRequestJobNames.Add('windows-core')
-                } elseif($relativePath-ceq'.github/workflows/consumer-transition-probe.yml') {
-                    Assert-Equal $jobMatches.Count 2 'The transition probe must contain one matrix leg and one aggregate job.'
+                } elseif($relativePath -in @('.github/workflows/consumer-transition-probe.yml', '.github/workflows/skill-tools-path-patch.yml')) {
+                    Assert-Equal $jobMatches.Count 2 "The three-platform probe '$relativePath' must contain one matrix leg and one aggregate job."
                 } else {
                     Assert-Equal $jobMatches.Count 1 "Ordinary pull-request workflow '$relativePath' must have exactly one job."
                     $pullRequestJobNames.Add($jobMatches[0].Groups[1].Value)
@@ -671,9 +710,10 @@ jobs:
             Assert-NotMatch $workflow 'windows-powershell-51|PowerShell 5\.1|Pester 3\.4\.0|shell:\s*powershell|shell:\s*bash' "Workflow '$relativePath' must not retain a retired PowerShell 5.1 lane."
             Assert-NotMatch $workflow '(?ms)^\s*&\s+\./scripts/[^\r\n]+\.ps1[^\r\n]*\r?\n\s*if\s*\(\s*\$LASTEXITCODE' "Workflow '$relativePath' must use PowerShell success state or exceptions after PowerShell script calls, not a stale native exit code."
             Assert-NotMatch $workflow 'Get-Module Pester -ListAvailable -Name Pester' "Workflow '$relativePath' must not pass Pester both positionally and through -Name."
-            if($relativePath-ceq'.github/workflows/consumer-transition-probe.yml'){
-                Assert-Match $workflow '(?s)windows-latest.*ubuntu-latest.*macos-latest' 'The transition probe must retain all three platform rows.'
-                Assert-Match $workflow 'tests/Invoke-ConsumerTransitionProbe\.ps1' 'The transition probe must use its shared local/CI driver.'
+            if($relativePath -in @('.github/workflows/consumer-transition-probe.yml', '.github/workflows/skill-tools-path-patch.yml')){
+                Assert-Match $workflow '(?s)windows-latest.*ubuntu-latest.*macos-latest' "The three-platform probe '$relativePath' must retain all three platform rows."
+                $expectedDriver = if ($relativePath -ceq '.github/workflows/consumer-transition-probe.yml') { 'tests/Invoke-ConsumerTransitionProbe\.ps1' } else { 'tests/Invoke-SkillToolsPathPatchProbe\.ps1' }
+                Assert-Match $workflow $expectedDriver "The three-platform probe '$relativePath' must use its shared local/CI driver."
                 continue
             }
             Assert-NotMatch $workflow 'runs-on:\s*ubuntu-latest' "Ordinary workflow '$relativePath' must not add a Linux CI lane."
@@ -694,13 +734,14 @@ jobs:
                 Assert-Equal (@($runnerValues | Where-Object { $_ -cne 'windows-latest' }).Count) 0 "Ordinary workflow '$relativePath' may use only windows-latest."
             }
         }
-        Assert-Equal $pullRequestWorkflows.Count 3 'Core, Install Smoke, and the non-required consumer transition probe must run for ordinary pull requests.'
+        Assert-Equal $pullRequestWorkflows.Count 4 'Core, Install Smoke, and both non-required three-platform probes must run for ordinary pull requests.'
         $expectedPullRequestWorkflows = @(
             '.github/workflows/consumer-transition-probe.yml',
             '.github/workflows/pr8-powershell-validation.yml',
+            '.github/workflows/skill-tools-path-patch.yml',
             '.github/workflows/syp101-production-smoke.yml'
         )
-        Assert-Equal (($pullRequestWorkflows.ToArray() | Sort-Object) -join '|') (($expectedPullRequestWorkflows | Sort-Object) -join '|') 'Only the two required Windows workflows and the reviewed transition probe may add ordinary pull-request jobs.'
+        Assert-Equal (($pullRequestWorkflows.ToArray() | Sort-Object) -join '|') (($expectedPullRequestWorkflows | Sort-Object) -join '|') 'Only the two required Windows workflows and the two reviewed three-platform probes may add ordinary pull-request jobs.'
         $expectedPullRequestJobNames = @('windows-core', 'windows-install-smoke')
         Assert-Equal (($pullRequestJobNames.ToArray() | Sort-Object) -join '|') (($expectedPullRequestJobNames | Sort-Object) -join '|') 'Ordinary pull-request CI must aggregate to exactly Windows Core and Windows Install Smoke.'
 
@@ -735,6 +776,32 @@ jobs:
             "- platform: linux`n            os: ubuntu-latest`n            asset: powershell-7.6.6-linux-x64.tar.gz`n            sha256: DDBC4A2D113BBD46D283CFEDCBCD117A70CAEFD7673F41F2B4E0000BADF103BC",
             "- platform: macos`n            os: macos-latest`n            asset: powershell-7.6.6-osx-arm64.tar.gz`n            sha256: 6DF833D094EBAC1C1A74340D7B3437F4AAF5E03CE640484A1C4359F3CE8B3DB1"
         )) { Assert-True $diagnostic.Replace("`r`n", "`n").Contains($matrixRow) "Standards Conformance is missing reviewed matrix row '$($matrixRow.Split("`n")[0])'." }
+    }
+
+    # Scenario: A temporary probe workflow is present on a probe branch, a pull request, or another ref.
+    # Purpose: Exclude only direct probe-*.yml workflow files on refs/heads/probe/* while rejecting every other workflow addition.
+    It 'UnitT15a_scopes_temporary_probe_workflow_exclusions_to_probe_branches' {
+        $probePath = '.github/workflows/probe-x.yml'
+        $originalRef = $env:GITHUB_REF
+        try {
+            foreach ($ref in @($null, 'refs/pull/1/merge')) {
+                if ($null -eq $ref) { Remove-Item Env:GITHUB_REF -ErrorAction SilentlyContinue } else { $env:GITHUB_REF = $ref }
+                Assert-Throws -Action {
+                    Assert-OrdinaryWorkflowInventory -Paths (Get-OrdinaryWorkflowInventory -Paths ($script:ExpectedOrdinaryWorkflowPaths + $probePath))
+                } -Message "Probe workflow was excluded outside a probe branch: $ref"
+            }
+
+            $env:GITHUB_REF = 'refs/heads/probe/x'
+            Assert-OrdinaryWorkflowInventory -Paths (Get-OrdinaryWorkflowInventory -Paths ($script:ExpectedOrdinaryWorkflowPaths + $probePath))
+            foreach ($path in @('.github/workflows/probe-x.yaml', '.github/workflows/sub/probe-x.yml')) {
+                Assert-Throws -Action {
+                    Assert-OrdinaryWorkflowInventory -Paths (Get-OrdinaryWorkflowInventory -Paths ($script:ExpectedOrdinaryWorkflowPaths + $path))
+                } -Message "Non-matching workflow was excluded on a probe branch: $path"
+            }
+        }
+        finally {
+            if ($null -eq $originalRef) { Remove-Item Env:GITHUB_REF -ErrorAction SilentlyContinue } else { $env:GITHUB_REF = $originalRef }
+        }
     }
 
     # Scenario: A diagnostic leg is softened or the summary accepts incomplete evidence.

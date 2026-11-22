@@ -45,6 +45,7 @@
       "linuxShebang": "kernel-script-path-with-readable-executable-fd"
     },
     "scriptFailurePolicy": "stop-on-error-and-propagate-last-native-exit-code",
+    "scriptArgumentBinding": "trusted parameter metadata separates named, switch, and positional data into a create-only binding consumed by a fixed pwsh -File dispatcher; caller tokens never become command text",
     "runtimeBinding": [
       "apiVersion",
       "manifestSha256",
@@ -77,6 +78,7 @@
     "snapshot": "run-owned copy of verified tracked regular files only; no .git directory or untracked content",
     "skillDiscovery": "discover and compare active Skills only inside the verified tracked-only snapshot",
     "checks": "execute every unique declared local general or Pester check against the snapshot with bounded output, timeout, and owned cleanup",
+    "fileArguments": "candidate-relative -File remains limited to one verified tracked snapshot path; source validation may instead use one absolute trusted frozen -File only with pwsh, an exact frozenFiles path/hash binding, TrustedToolRoot containment, exclusion from candidate/artifacts/authority roots, and canonical regular single-link identity plus pre/post-launch hash revalidation",
     "legacyCapabilities": "no supervisor binding, resolver receipt, external scanner, provider, approval, publish, install, or ten-stage lifecycle prerequisite",
     "filesystemIsolation": "same-account child processes do not have filesystem read isolation; execute untrusted candidates only in platform-provided no-secret low-privilege pull-request environments",
     "localFixture": "local smoke tests use only trusted isolated fixtures"

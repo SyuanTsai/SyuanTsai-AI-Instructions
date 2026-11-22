@@ -5,7 +5,7 @@
 - 狀態：規劃參考，尚未建立或啟用正式 Skill。
 - 更新日期：2026-08-12。
 - 目標環境：Windows、PowerShell 7、以 npm 為優先安裝方式。
-- 涵蓋工具：OpenAI Codex CLI、GitHub Copilot CLI、FELO AI CLI、Google Antigravity CLI（`agy`）與 JetBrains Junie CLI（`junie`）。
+- 涵蓋工具：OpenAI Codex CLI、GitHub Copilot CLI、FELO AI CLI、Google Antigravity CLI（`agy`）、JetBrains Junie CLI（`junie`），以及 Windows 上的 Claude Code Skills 投影。
 - 用途：供後續建立「盤點本機狀態、逐步引導使用者安裝、登入並驗證 AI Agent CLI」的 Skill 使用。
 
 本文件記錄會隨供應商版本改變的操作資料。正式 Skill 每次引導安裝前仍應查閱供應商官方文件，不得把本文件的套件版本、需求或登入畫面視為永久契約。
@@ -20,6 +20,7 @@
 - [FELO AI CLI](#3-felo-ai-cli)
 - [Google Antigravity CLI](#4-google-antigravity-cliagy)
 - [JetBrains Junie CLI](#5-jetbrains-junie-cli)
+- [Windows Claude Code Skills 投影](#6-windows-claude-code-skills-投影)
 - [最終整體驗證](#最終整體驗證)
 - [常見失敗分類與安全處理](#常見失敗分類與安全處理)
 - [未來 Skill 建議結構](#未來-skill-建議結構)
@@ -317,6 +318,62 @@ junie
 - `junie --help` 成功。
 - 互動啟動後不再顯示未認證狀態。
 - 若連接 JetBrains IDE，使用 `/ide` 確認狀態；CLI 本身可用不應依賴 IDE integration 必須成功。
+
+## 6. Windows Claude Code Skills 投影
+
+這是 AI-Instructions runtime 的選擇啟用功能，不是 Claude Code CLI 安裝器。只有 Windows 支援；Linux 與 macOS 的 projection runtime 尚未啟用，追蹤於 SYP-508，明確要求 `V3V5` 時會回 `projection-runtime-unavailable`。
+
+fresh 或既有 v2/v4 安裝的 `-WriterSchema Auto` 仍維持 v2/v4。要啟用 Claude Code projection，必須在可信 AI-Instructions checkout 中明確執行：
+
+```powershell
+.\scripts\install-ai-instructions-bootstrap.ps1 -WriterSchema V3V5
+
+$codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
+  $env:CODEX_HOME
+} else {
+  Join-Path $HOME '.codex'
+}
+& (Join-Path $codexHome 'hooks\update-agent-environment.ps1') -Apply -OutputFormat Json
+& (Join-Path $codexHome 'hooks\update-agent-environment.ps1') -VerifyOnly -OutputFormat Json
+```
+
+安裝成功後，config v5 的 `projections.user` 包含 `user-agents` 與 `user-claude`。兩個 root 的受管檔案來自同一 immutable source，逐檔 bytes／SHA-256 相同；單一 manifest v3 綁定兩個 projections 與同一 lock。後續 installer `Auto`、launcher 自動更新，以及 `update-agent-environment.ps1 -Apply`／`-VerifyOnly` 都會沿用 v3/v5 與原本的 `projections.user`。明確要求 `V2V4` 會以 `downgrade-refused` 停止。
+
+`user-claude` 也會更新 `~/.claude/CLAUDE.md` 的 `Repository Instructions Bootstrap` 受管區段，保留區段外的個人 bytes。Catalog 以外的使用者自有 Skill 目錄，以及受管 Skill 目錄內不屬於 Catalog 的額外檔案，不會被刪除或改寫。
+
+若 `~/.claude/skills/<skill-id>` 已有不同 bytes 且沒有受管 ownership evidence，JSON 結果會包含：
+
+```json
+{
+  "outcome": "failed",
+  "failureDetails": [
+    {
+      "code": "unmanaged-collision",
+      "skillId": "<skill-id>",
+      "path": ".claude/skills/<skill-id>/SKILL.md"
+    }
+  ]
+}
+```
+
+這個拒絕發生在資料 mutation 前；`~/.agents/skills`、`~/.claude/skills`、USER manifest 與 `~/.claude/CLAUDE.md` 維持原 bytes。Runtime 不會自動備份或覆寫。請先自行檢查並把整個舊手動副本移到備份位置：
+
+```powershell
+$manualRoot = Join-Path $HOME '.claude\skills'
+$manualBackup = Join-Path $HOME ('.claude\skills.manual-' + (Get-Date -Format 'yyyyMMddHHmmss'))
+Move-Item -LiteralPath $manualRoot -Destination $manualBackup
+```
+
+如果只有一個 Skill 衝突，也可只備份並移開該目錄：
+
+```powershell
+$skillId = '<skill-id>'
+$conflict = Join-Path $HOME ".claude\skills\$skillId"
+$backup = Join-Path $HOME (".claude\skills.$skillId.manual-" + (Get-Date -Format 'yyyyMMddHHmmss'))
+Move-Item -LiteralPath $conflict -Destination $backup
+```
+
+確認備份可讀且原路徑已移開後，再重跑 `update-agent-environment.ps1 -Apply`。如果既有 bytes 與 immutable candidate 完全相同，runtime 會保留它並在成功發布 manifest 後接管，不需要手動移開。
 
 ## 最終整體驗證
 

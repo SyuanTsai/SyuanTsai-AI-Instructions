@@ -14,9 +14,6 @@ Describe 'AI instructions writer and reader gate' {
     }
     AfterAll {if(Test-Path -LiteralPath $script:ExternalRoot){Remove-Item -LiteralPath $script:ExternalRoot -Recurse -Force}}
 
-    # Scenario: Production explicitly requests V3V5 while the production Catalog remains v2.
-    # Purpose: Enforce D4 before Codex Home staging, lock, journal, or any other target mutation.
-
     # Scenario: A previously verified unchanged project Skill is edited immediately before a changed manifest would be published.
     # Purpose: Recompute its raw-byte SHA-256 inside the project transaction, refuse publication, and roll back every owned mutation.
     It 'InterT134_refuses_project_Skill_drift_rechecked_before_manifest_publication' {
@@ -170,6 +167,7 @@ Describe 'AI instructions writer and reader gate' {
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))|Should Be $excludeBytes
     }
 
+    Context 'Claude ownership evidence producer' {
     # Scenario: Each project-owned CLAUDE.md ownership form is crossed with tracked or untracked Claude Rules/licenses, including a linked worktree.
     # Purpose: Skip the complete Claude family, preserve every protected byte and HEAD, avoid remediation commits, and still update other host families.
     It 'InterT114_preserves_project_owned_Claude_family_for_<Case>' -TestCases @(
@@ -222,6 +220,13 @@ Describe 'AI instructions writer and reader gate' {
         $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $changed.ArchivePath -TargetRoot $target
         $result.ExitCode|Should Be 0
         $result.Output|Should Match 'claude-base-skipped-project-owned'
+        $ownershipLines=@(([string]$result.Output-split'\r?\n')|Where-Object{$_-like'AI instructions Claude ownership evidence: *'})
+        $ownershipLines.Count|Should Be 1
+        $ownershipEvidence=$ownershipLines[0].Substring('AI instructions Claude ownership evidence: '.Length)|ConvertFrom-Json
+        [int]$ownershipEvidence.schemaVersion|Should Be 1
+        [string]$ownershipEvidence.repository|Should Be ([IO.Path]::GetFullPath($target).TrimEnd([char[]]@('\','/')))
+        [bool]$ownershipEvidence.projectOwned|Should Be $true
+        @($ownershipEvidence.protectedPaths)|Should Be @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses')
         [IO.File]::ReadAllBytes($claudePath)|Should Be $claudeBefore
         [IO.File]::ReadAllBytes($companionPath)|Should Be $companionBefore
         (Get-P7eTreeSnapshot (Join-Path $target '.claude'))|Should Be $claudeFamilyBefore
@@ -244,11 +249,19 @@ Describe 'AI instructions writer and reader gate' {
         })
         $output=& $script:PowerShellExecutable -NoProfile -NonInteractive -File (Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1') -SourceArchivePath $source.ArchivePath -ConfigurationPath $configuration -ProvenancePath $provenance -TargetRoot $target -UserHome (Join-Path $root 'user') 2>&1
         $LASTEXITCODE|Should Be 0
+        $ownershipLines=@($output|ForEach-Object{[string]$_}|Where-Object{$_-like'AI instructions Claude ownership evidence: *'})
+        $ownershipLines.Count|Should Be 1
+        $ownershipEvidence=$ownershipLines[0].Substring('AI instructions Claude ownership evidence: '.Length)|ConvertFrom-Json
+        [int]$ownershipEvidence.schemaVersion|Should Be 1
+        [string]$ownershipEvidence.repository|Should Be ([IO.Path]::GetFullPath($target).TrimEnd([char[]]@('\','/')))
+        [bool]$ownershipEvidence.projectOwned|Should Be $false
+        @($ownershipEvidence.protectedPaths).Count|Should Be 0
         $manifest=Get-Content -Raw -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|ConvertFrom-Json
         [int]$manifest.schemaVersion|Should Be 2
         @($manifest.files|Where-Object{[string]$_.targetPath-like'CLAUDE.md'-or[string]$_.targetPath-like'.claude/*'}).Count|Should Be 0
         Test-Path -LiteralPath (Join-Path $target 'CLAUDE.md')|Should Be $false
         Test-Path -LiteralPath (Join-Path $target '.claude')|Should Be $false
+    }
     }
 
     # Scenario: Installed runtime state is mixed, unknown, gate-invalid, or Catalog/Lock-incompatible before fan-out.

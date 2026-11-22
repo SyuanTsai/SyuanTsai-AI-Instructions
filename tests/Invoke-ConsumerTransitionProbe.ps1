@@ -9,7 +9,8 @@ param(
     [Parameter(Mandatory)][ValidateSet('windows','linux','macos','aggregate')][string]$Platform,
     [Parameter(Mandatory)][ValidatePattern('^[0-9]+$')][string]$WorkflowRunId,
     [Parameter(Mandatory)][ValidatePattern('^[1-9][0-9]*$')][string]$WorkflowRunAttempt,
-    [string]$LegReceiptsRoot
+    [string]$LegReceiptsRoot,
+    [switch]$DefineFunctionsOnly
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
@@ -211,6 +212,8 @@ function Invoke-ProbeBootstrap([string]$Bootstrap,[string]$Phase,[string]$GateRo
         throw "Consumer transition probe phase '$Phase' failed with exit code $exitCode."
     }
 }
+
+if($DefineFunctionsOnly){return}
 
 $RepositoryRoot=[IO.Path]::GetFullPath($RepositoryRoot)
 $WorkRoot=[IO.Path]::GetFullPath($WorkRoot)

@@ -114,6 +114,12 @@ function Get-AgentEnvironmentBytesSha256 {
     finally { $algorithm.Dispose() }
 }
 
+function Get-AgentEnvironmentObjectSha256 {
+    param([Parameter(Mandatory=$true)][object]$Value)
+    $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($Value|ConvertTo-Json -Depth 100 -Compress))
+    return Get-AgentEnvironmentBytesSha256 -Bytes $bytes
+}
+
 function Get-AgentEnvironmentVerifiedStreamState {
     param(
         [Parameter(Mandatory=$true)]$Lease,
@@ -459,9 +465,10 @@ function Assert-AgentEnvironmentPathSafe {
             if ($inProjection) { break }
         }
     }
+    $isClaudeInstructions = $RelativePath -ceq '.claude/CLAUDE.md' -or ($AllowProjectionDirectory -and $RelativePath -ceq '.claude')
     if ($RelativePath -cne '.agents/catalog-skills.manifest.json' -and
         $RelativePath -cne '.agents/update-agent-environment.recovery.json' -and -not $inProjection) {
-        throw "User Agent environment mutation is outside the approved scope: $RelativePath"
+        if (-not $isClaudeInstructions) { throw "User Agent environment mutation is outside the approved scope: $RelativePath" }
     }
     $fullPath = Get-AgentEnvironmentFullPath -Root $Root -RelativePath $RelativePath
     $rootPath = [System.IO.Path]::GetFullPath($Root).TrimEnd([char[]]@('\','/'))
@@ -700,10 +707,184 @@ function Import-AgentEnvironmentRecoveryRuntimeModules {
 
 function Assert-UserProjectionRuntimeGate {
     [CmdletBinding()]
-    param([Parameter(Mandatory=$true)][string]$RuntimeRoot)
+    param(
+        [Parameter(Mandatory=$true)][object]$Bundle,
+        [Parameter(Mandatory=$true)][object]$Configuration,
+        [Parameter(Mandatory=$true)][string]$RuntimeRoot,
+        [Parameter(Mandatory=$true)][object]$CapabilityReceipt
+    )
     Import-AgentEnvironmentRuntimeModules -RuntimeRoot $RuntimeRoot
-    # P7e reader/writer selection is intentionally connected here when it lands.
-    throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'Projection-aware production runtime is unavailable until the P7e gate and production pins are installed.')
+    $gate = Assert-AiInstructionsRuntimeGate -Bundle $Bundle -Configuration $Configuration -RuntimeRoot $RuntimeRoot -CapabilityReceipt $CapabilityReceipt
+    if ([string]$gate.generation -cne 'v3v5') {
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'The USER projection coordinator requires a verified v3/v5 runtime generation.')
+    }
+    $utf8=[Text.UTF8Encoding]::new($false)
+    $sha256=[Security.Cryptography.SHA256]::Create()
+    try {
+        $hashObject={param($value)$json=$value|ConvertTo-Json -Depth 100 -Compress;([BitConverter]::ToString($sha256.ComputeHash($utf8.GetBytes($json)))).Replace('-','').ToLowerInvariant()}
+        return [pscustomobject][ordered]@{
+            schemaVersion=1
+            generation='v3v5'
+            runtimeRoot=[IO.Path]::GetFullPath($RuntimeRoot).TrimEnd([char[]]@('\','/'))
+            bundle=$Bundle
+            configuration=$Configuration
+            capabilityReceipt=$CapabilityReceipt
+            bundleSha256=&$hashObject $Bundle
+            configurationSha256=&$hashObject $Configuration
+            capabilityReceiptSha256=&$hashObject $CapabilityReceipt
+        }
+    }
+    finally { $sha256.Dispose() }
+}
+
+function Assert-AgentEnvironmentProjectionGateContext {
+    param([Parameter(Mandatory=$true)][object]$GateContext,[Parameter(Mandatory=$true)][string]$RuntimeRoot)
+    $required=@('schemaVersion','generation','runtimeRoot','bundle','configuration','capabilityReceipt','bundleSha256','configurationSha256','capabilityReceiptSha256')
+    foreach($name in $required){if($null-eq$GateContext.PSObject.Properties[$name]){throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message "USER projection gate context is missing '$name'.")}}
+    foreach($name in @($GateContext.PSObject.Properties.Name)){if($name-cnotin$required){throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message "USER projection gate context contains unsupported property '$name'.")}}
+    if(($GateContext.schemaVersion-isnot[int]-and$GateContext.schemaVersion-isnot[long])-or[int64]$GateContext.schemaVersion-ne1-or[string]$GateContext.generation-cne'v3v5'){
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'USER projection gate context has an unsupported generation.')
+    }
+    $fullRuntime=[IO.Path]::GetFullPath($RuntimeRoot).TrimEnd([char[]]@('\','/'))
+    if(-not[string]::Equals($fullRuntime,[string]$GateContext.runtimeRoot,(Get-AgentEnvironmentPathComparison))){
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'USER projection gate context is bound to a different runtime root.')
+    }
+    $revalidated=Assert-UserProjectionRuntimeGate -Bundle $GateContext.bundle -Configuration $GateContext.configuration -RuntimeRoot $fullRuntime -CapabilityReceipt $GateContext.capabilityReceipt
+    foreach($name in @('bundleSha256','configurationSha256','capabilityReceiptSha256')){
+        if([string]$revalidated.$name-cne[string]$GateContext.$name){throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message "USER projection gate context '$name' binding changed.")}
+    }
+    return $revalidated
+}
+
+function Get-AgentEnvironmentBoundRuntimeArtifactBytes {
+    param(
+        [Parameter(Mandatory=$true)][object]$GateContext,
+        [Parameter(Mandatory=$true)][string]$RelativePath
+    )
+    $entries=@($GateContext.bundle.inventory|Where-Object{[string]$_.path-ceq$RelativePath})
+    if($entries.Count-ne1){
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message "Verified runtime inventory must contain exactly one '$RelativePath' artifact.")
+    }
+    $path=Join-Path ([string]$GateContext.runtimeRoot) $RelativePath
+    if(-not(Test-Path -LiteralPath $path -PathType Leaf)){
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message "Verified runtime artifact is missing: $RelativePath")
+    }
+    [byte[]]$bytes=[IO.File]::ReadAllBytes($path)
+    if((Get-AgentEnvironmentBytesSha256 -Bytes $bytes)-cne[string]$entries[0].sha256){
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message "Verified runtime artifact changed after gate validation: $RelativePath")
+    }
+    return ,$bytes
+}
+
+function Assert-AgentEnvironmentOrdinalSetEqual {
+    param(
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][string[]]$Actual,
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][string[]]$Expected,
+        [Parameter(Mandatory=$true)][string]$Context
+    )
+    [string[]]$actualSorted=@($Actual);[Array]::Sort($actualSorted,[StringComparer]::Ordinal)
+    [string[]]$expectedSorted=@($Expected);[Array]::Sort($expectedSorted,[StringComparer]::Ordinal)
+    if($actualSorted.Count-ne$expectedSorted.Count){
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message "$Context does not match the verified USER projection gate context.")
+    }
+    for($index=0;$index-lt$actualSorted.Count;$index++){
+        if($actualSorted[$index]-cne$expectedSorted[$index]){
+            throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message "$Context does not match the verified USER projection gate context.")
+        }
+    }
+}
+
+function Assert-AgentEnvironmentProjectionDesiredStateBinding {
+    param(
+        [Parameter(Mandatory=$true)][object]$DesiredState,
+        [Parameter(Mandatory=$true)][object]$GateContext
+    )
+    foreach($name in @('Catalog','Lock','CatalogBytes','LockBytes','SkillIds','Files','Manifest','ProjectionIds')){
+        if($null-eq$DesiredState.PSObject.Properties[$name]-or$null-eq$DesiredState.$name){
+            throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message "Projection-aware desired state is missing '$name'.")
+        }
+    }
+    foreach($name in @('projections','files')){
+        if($null-eq$DesiredState.Manifest.PSObject.Properties[$name]-or$null-eq$DesiredState.Manifest.$name){
+            throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message "Projection-aware desired manifest is missing '$name'.")
+        }
+    }
+    [byte[]]$runtimeCatalogBytes=Get-AgentEnvironmentBoundRuntimeArtifactBytes -GateContext $GateContext -RelativePath 'catalog/skills-catalog.json'
+    [byte[]]$runtimeLockBytes=Get-AgentEnvironmentBoundRuntimeArtifactBytes -GateContext $GateContext -RelativePath 'catalog/skills-catalog-lock.json'
+    if([Convert]::ToBase64String($runtimeCatalogBytes)-cne[Convert]::ToBase64String([byte[]]$DesiredState.CatalogBytes)-or
+       [Convert]::ToBase64String($runtimeLockBytes)-cne[Convert]::ToBase64String([byte[]]$DesiredState.LockBytes)){
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'Projection-aware desired state Catalog or Lock bytes do not match the verified runtime inventory.')
+    }
+    $catalogPath=Join-Path ([string]$GateContext.runtimeRoot) 'catalog/skills-catalog.json'
+    $lockPath=Join-Path ([string]$GateContext.runtimeRoot) 'catalog/skills-catalog-lock.json'
+    $trustedCatalog=Test-SkillsCatalogDocument -CatalogPath $catalogPath
+    $trustedLock=Test-SkillsCatalogLockDocument -CatalogPath $catalogPath -LockPath $lockPath
+    [byte[]]$runtimeCatalogBytesAfterParse=Get-AgentEnvironmentBoundRuntimeArtifactBytes -GateContext $GateContext -RelativePath 'catalog/skills-catalog.json'
+    [byte[]]$runtimeLockBytesAfterParse=Get-AgentEnvironmentBoundRuntimeArtifactBytes -GateContext $GateContext -RelativePath 'catalog/skills-catalog-lock.json'
+    if([Convert]::ToBase64String($runtimeCatalogBytes)-cne[Convert]::ToBase64String($runtimeCatalogBytesAfterParse)-or
+       [Convert]::ToBase64String($runtimeLockBytes)-cne[Convert]::ToBase64String($runtimeLockBytesAfterParse)){
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'Verified runtime Catalog or Lock changed while validating USER desired state.')
+    }
+    if((Get-AgentEnvironmentObjectSha256 -Value $DesiredState.Catalog)-cne(Get-AgentEnvironmentObjectSha256 -Value $trustedCatalog)-or
+       (Get-AgentEnvironmentObjectSha256 -Value $DesiredState.Lock)-cne(Get-AgentEnvironmentObjectSha256 -Value $trustedLock)){
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'Projection-aware desired state Catalog or Lock document does not match the verified runtime inventory.')
+    }
+    [string[]]$expectedProjections=@($GateContext.configuration.projections.user)
+    Assert-AgentEnvironmentOrdinalSetEqual -Actual ([string[]]@($DesiredState.ProjectionIds)) -Expected $expectedProjections -Context 'Desired projection selection'
+    Assert-AgentEnvironmentOrdinalSetEqual -Actual ([string[]]@($DesiredState.Manifest.projections)) -Expected $expectedProjections -Context 'Desired manifest projection selection'
+    [object[]]$storedEvidence=@()
+    if($null-ne$GateContext.configuration.PSObject.Properties['capabilityEvidence']){$storedEvidence=@($GateContext.configuration.capabilityEvidence)}
+    [string[]]$selectionInstalledSkillIds=@()
+    if($null-ne$DesiredState.PSObject.Properties['InstalledSkillIds']){$selectionInstalledSkillIds=@($DesiredState.InstalledSkillIds)}
+    [string[]]$expectedSkillIds=@(Resolve-SkillsSelection -Catalog $trustedCatalog -Selection $GateContext.configuration.catalog -CapabilityEvidence $storedEvidence -InstalledSkillIds $selectionInstalledSkillIds -WarningAction SilentlyContinue)
+    Assert-AgentEnvironmentOrdinalSetEqual -Actual ([string[]]@($DesiredState.SkillIds)) -Expected $expectedSkillIds -Context 'Desired Skill selection'
+    [string[]]$manifestSkillIds=@($DesiredState.Manifest.files|ForEach-Object{[string]$_.skillId}|Sort-Object -Unique)
+    Assert-AgentEnvironmentOrdinalSetEqual -Actual $manifestSkillIds -Expected $expectedSkillIds -Context 'Desired manifest Skill inventory'
+    try{
+        Assert-UserSkillsManagedManifestBinding -Manifest $DesiredState.Manifest -CatalogBytes $runtimeCatalogBytes -LockBytes $runtimeLockBytes `
+            -ExpectedCatalogRepository ([string]$GateContext.bundle.repository) -ExpectedCatalogCommit ([string]$GateContext.bundle.commit)|Out-Null
+    }
+    catch{
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message "Projection-aware desired manifest is not bound to the verified runtime inventory: $($_.Exception.Message)" -InnerException $_.Exception)
+    }
+    $manifestByPath=@{}
+    foreach($entry in @($DesiredState.Manifest.files)){$manifestByPath[[string]$entry.targetPath]=$entry}
+    if($manifestByPath.Count-ne@($DesiredState.Files).Count){
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'Projection-aware desired Files do not match the desired manifest inventory.')
+    }
+    foreach($file in @($DesiredState.Files)){
+        $path=[string]$file.targetPath
+        if(-not$manifestByPath.ContainsKey($path)){
+            throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message "Projection-aware desired file is absent from the desired manifest: $path")
+        }
+        $entry=$manifestByPath[$path]
+        foreach($name in @('skillId','sourceId','sourceRepository','sourceRef','sourceCommit','sourceVersion','sourcePath','targetPath','sha256','projectionId')){
+            if($null-eq$file.PSObject.Properties[$name]-or$null-eq$entry.PSObject.Properties[$name]-or[string]$file.$name-cne[string]$entry.$name){
+                throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message "Projection-aware desired file metadata does not match the desired manifest: $path")
+            }
+        }
+    }
+    if(@($expectedProjections)-ccontains'user-claude'){
+        if($null-eq$DesiredState.PSObject.Properties['InstructionsArtifact']-or$null-eq$DesiredState.InstructionsArtifact-or
+           $null-eq$DesiredState.InstructionsArtifact.PSObject.Properties['sectionBytes']-or$null-eq$DesiredState.InstructionsArtifact.sectionBytes){
+            throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'Projection-aware desired state is missing the verified USER Claude instructions artifact.')
+        }
+        [byte[]]$runtimeSectionBytes=Get-AgentEnvironmentBoundRuntimeArtifactBytes -GateContext $GateContext -RelativePath 'bootstrap-section.md'
+        if([Convert]::ToBase64String($runtimeSectionBytes)-cne[Convert]::ToBase64String([byte[]]$DesiredState.InstructionsArtifact.sectionBytes)){
+            throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'USER Claude instructions bytes do not match the verified runtime inventory.')
+        }
+    }
+    elseif($null-ne$DesiredState.PSObject.Properties['InstructionsArtifact']-and$null-ne$DesiredState.InstructionsArtifact){
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'USER Claude instructions artifact is present without the verified user-claude projection.')
+    }
+}
+
+function Get-AgentEnvironmentManifestSkillIds {
+    param([AllowNull()][object]$Manifest)
+    if($null-eq$Manifest){return @()}
+    [string[]]$skillIds=@($Manifest.files|ForEach-Object{[string]$_.skillId}|Sort-Object -Unique)
+    [Array]::Sort($skillIds,[StringComparer]::Ordinal)
+    return $skillIds
 }
 
 function Get-UserSkillsDesiredState {
@@ -715,6 +896,8 @@ function Get-UserSkillsDesiredState {
         [Parameter(Mandatory = $true)][string] $CatalogCommit,
         [Parameter(Mandatory = $true)][string] $WorkingRoot,
         [string[]] $ProjectionIds,
+        [string] $UserHome,
+        [AllowNull()][object] $GateContext,
         [hashtable] $LocalArchiveOverrides = @{}
     )
     Import-AgentEnvironmentRuntimeModules -RuntimeRoot $RuntimeRoot
@@ -725,17 +908,42 @@ function Get-UserSkillsDesiredState {
     [byte[]]$lockBytes = [System.IO.File]::ReadAllBytes($lockPath)
     $catalog = Test-SkillsCatalogDocument -CatalogPath $catalogPath
     $lock = Test-SkillsCatalogLockDocument -CatalogPath $catalogPath -LockPath $lockPath
-    $projectionAware = [int64]$catalog.schemaVersion -eq 3
-    if ($projectionAware -ne ([int64]$lock.schemaVersion -eq 3)) { throw 'Catalog and Lock projection generations are mixed.' }
+    $catalogSupportsProjections = [int64]$catalog.schemaVersion -eq 3
+    if ($catalogSupportsProjections -ne ([int64]$lock.schemaVersion -eq 3)) { throw 'Catalog and Lock projection generations are mixed.' }
+    $projectionAware = $null -ne $GateContext
+    $configurationVersionProperty = $Configuration.PSObject.Properties['schemaVersion']
+    $configurationVersion = if ($null -eq $configurationVersionProperty) { 0 } else { [int64]$configurationVersionProperty.Value }
+    if ($configurationVersion -eq 5 -and -not $projectionAware) {
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'Projection-aware configuration requires a verified USER projection gate context.')
+    }
+    if ($projectionAware -and -not $catalogSupportsProjections) {
+        throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'A verified USER projection gate context requires Catalog and Lock schemaVersion 3.')
+    }
     if ($projectionAware) {
-        if (-not $PSBoundParameters.ContainsKey('ProjectionIds')) {
-            if ($null -eq $Configuration.PSObject.Properties['schemaVersion'] -or [int64]$Configuration.schemaVersion -ne 5) {
-                throw 'Projection-aware desired state requires sync configuration schemaVersion 5.'
-            }
-            $ProjectionIds = [string[]]@($Configuration.projections.user)
+        $GateContext=Assert-AgentEnvironmentProjectionGateContext -GateContext $GateContext -RuntimeRoot $RuntimeRoot
+        if((Get-AgentEnvironmentObjectSha256 -Value $Configuration)-cne[string]$GateContext.configurationSha256){
+            throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'Desired-state configuration does not match the verified USER projection gate context.')
         }
-        [string[]]$ProjectionIds = @($ProjectionIds)
+        $Configuration=$GateContext.configuration
+        if([string]$CatalogRepository-cne[string]$GateContext.bundle.repository-or[string]$CatalogCommit-cne[string]$GateContext.bundle.commit){
+            throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'Desired-state Catalog repository or commit does not match the verified USER projection gate context.')
+        }
+        [string[]]$contextProjectionIds=@($GateContext.configuration.projections.user)
+        if($PSBoundParameters.ContainsKey('ProjectionIds')){
+            Assert-AgentEnvironmentOrdinalSetEqual -Actual ([string[]]@($ProjectionIds)) -Expected $contextProjectionIds -Context 'Caller-supplied projection selection'
+        }
+        [string[]]$ProjectionIds=@($contextProjectionIds)
         [System.Array]::Sort($ProjectionIds,[System.StringComparer]::Ordinal)
+        $catalogBytes=Get-AgentEnvironmentBoundRuntimeArtifactBytes -GateContext $GateContext -RelativePath 'catalog/skills-catalog.json'
+        $lockBytes=Get-AgentEnvironmentBoundRuntimeArtifactBytes -GateContext $GateContext -RelativePath 'catalog/skills-catalog-lock.json'
+        $catalog=Test-SkillsCatalogDocument -CatalogPath $catalogPath
+        $lock=Test-SkillsCatalogLockDocument -CatalogPath $catalogPath -LockPath $lockPath
+        [byte[]]$catalogBytesAfterParse=Get-AgentEnvironmentBoundRuntimeArtifactBytes -GateContext $GateContext -RelativePath 'catalog/skills-catalog.json'
+        [byte[]]$lockBytesAfterParse=Get-AgentEnvironmentBoundRuntimeArtifactBytes -GateContext $GateContext -RelativePath 'catalog/skills-catalog-lock.json'
+        if([Convert]::ToBase64String($catalogBytes)-cne[Convert]::ToBase64String($catalogBytesAfterParse)-or
+           [Convert]::ToBase64String($lockBytes)-cne[Convert]::ToBase64String($lockBytesAfterParse)){
+            throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'Verified runtime Catalog or Lock changed while deriving USER desired state.')
+        }
         if ($ProjectionIds.Count -eq 0 -or $ProjectionIds -cnotcontains 'user-agents' -or @($ProjectionIds | Select-Object -Unique).Count -ne $ProjectionIds.Count) {
             throw "USER projection selection must be unique and include 'user-agents'."
         }
@@ -745,7 +953,14 @@ function Get-UserSkillsDesiredState {
         }
     }
     else { $ProjectionIds = @('user-agents') }
-    $skillIds = @(Resolve-SkillsSelection -Catalog $catalog -Selection $Configuration.catalog)
+    [string[]]$installedSkillIds=@()
+    if(-not[string]::IsNullOrWhiteSpace($UserHome)){
+        $manifestSnapshot=Get-AgentEnvironmentManifestSnapshot -Root ([IO.Path]::GetFullPath($UserHome).TrimEnd([char[]]@('\','/'))) -RelativePath '.agents/catalog-skills.manifest.json'
+        $installedSkillIds=@(Get-AgentEnvironmentManifestSkillIds -Manifest $manifestSnapshot.Manifest)
+    }
+    [object[]]$storedEvidence=@()
+    if($null-ne$Configuration.PSObject.Properties['capabilityEvidence']){$storedEvidence=@($Configuration.capabilityEvidence)}
+    $skillIds = @(Resolve-SkillsSelection -Catalog $catalog -Selection $Configuration.catalog -CapabilityEvidence $storedEvidence -InstalledSkillIds $installedSkillIds)
     $plan = Resolve-SkillsSourcePlan -Catalog $catalog -Lock $lock -SkillIds $skillIds
     $archiveRoot = Join-Path $WorkingRoot 'archives'
     $sourceRoot = Join-Path $WorkingRoot 'sources'
@@ -814,7 +1029,7 @@ function Get-UserSkillsDesiredState {
         [pscustomobject]$manifestEntry
     })
     $manifestData = [ordered]@{
-        schemaVersion = if ($projectionAware) { 3 } elseif ([int64]$catalog.schemaVersion -eq 2) { 2 } else { 1 }
+        schemaVersion = if ($projectionAware) { 3 } elseif ([int64]$catalog.schemaVersion -in @(2,3)) { 2 } else { 1 }
         catalogRepository = $CatalogRepository
         catalogCommit = $CatalogCommit
         catalogId = [string]$catalog.catalogId
@@ -832,10 +1047,20 @@ function Get-UserSkillsDesiredState {
         Assert-UserSkillsManagedManifestBinding -Manifest $manifest -CatalogBytes $catalogBytes -LockBytes $lockBytes `
             -ExpectedCatalogRepository $CatalogRepository -ExpectedCatalogCommit $CatalogCommit | Out-Null
     }
-    return [pscustomobject][ordered]@{
+    $instructionsArtifact=$null
+    if($projectionAware-and$ProjectionIds-ccontains'user-claude'){
+        [byte[]]$sectionBytes=Get-AgentEnvironmentBoundRuntimeArtifactBytes -GateContext $GateContext -RelativePath 'bootstrap-section.md'
+        [byte[]]$validatedSection=Get-InstallerBootstrapSectionContent -ExistingBytes ([byte[]]@()) -SectionBytes $sectionBytes
+        if([Convert]::ToBase64String($validatedSection)-cne[Convert]::ToBase64String($sectionBytes)){throw 'Verified runtime bootstrap section bytes are not canonical.'}
+        $instructionsArtifact=[pscustomobject][ordered]@{targetPath='.claude/CLAUDE.md';sectionBytes=$sectionBytes}
+    }
+    $desiredState=[ordered]@{
         RuntimeRoot=$RuntimeRoot; Catalog=$catalog; Lock=$lock; SkillIds=$skillIds; Files=[object[]]$files.ToArray(); Manifest=$manifest
         LicenseWarnings=[string[]]$licenseWarnings.ToArray(); CatalogBytes=$catalogBytes; LockBytes=$lockBytes; ProjectionIds=[string[]]$ProjectionIds
+        GateContext=$(if($projectionAware){$GateContext}else{$null}); InstructionsArtifact=$instructionsArtifact
     }
+    if(-not[string]::IsNullOrWhiteSpace($UserHome)){$desiredState['InstalledSkillIds']=[string[]]$installedSkillIds}
+    return [pscustomobject]$desiredState
 }
 
 function Get-AgentEnvironmentManifest {
@@ -1596,6 +1821,11 @@ function Invoke-AgentEnvironmentPlatformTransaction {
                 if(-not[bool]$published.exists-or[string]$published.inventorySha256-cne[string]$operation.applied.inventorySha256-or[int64]$published.entryCount-ne[int64]$operation.applied.entryCount){throw "Final published subtree inventory verification failed: $($operation.targetRelativePath)"}
             }
             foreach($file in $DesiredState.Files){$full=Assert-AgentEnvironmentPathSafe $Home ([string]$file.targetPath);if(-not(Test-Path -LiteralPath $full -PathType Leaf)-or(Get-AgentEnvironmentSha256 $full)-cne[string]$file.sha256){throw "Final user Skill inventory verification failed: $($file.targetPath)"}}
+            if($null-ne$DesiredState.PSObject.Properties['InstructionsArtifact']-and$null-ne$DesiredState.InstructionsArtifact){
+                $instructionsPath=Assert-AgentEnvironmentPathSafe $Home ([string]$DesiredState.InstructionsArtifact.targetPath)
+                $instructionsExpected=[string]$DesiredState.InstructionsArtifact.desiredSha256
+                if(-not(Test-Path -LiteralPath $instructionsPath -PathType Leaf)-or(Get-AgentEnvironmentSha256 $instructionsPath)-cne$instructionsExpected){throw 'Final USER Claude instructions byte verification failed.'}
+            }
             foreach($path in $Deletes.Keys){if(Test-Path -LiteralPath (Get-AgentEnvironmentFullPath $Home $path)){throw "Retired managed path still exists after cleanup: $path"}}
             if((Get-AgentEnvironmentSha256 $manifestPath)-cne$ManifestSha){throw 'Final user Skills manifest byte verification failed.'}
         }catch{
@@ -1909,6 +2139,23 @@ function Invoke-UserSkillsReconciliation {
     $hasNewTransactionResidue=(Test-Path -LiteralPath $newTransactionRoot)-and(@(Get-ChildItem -Force -LiteralPath $newTransactionRoot -ErrorAction Stop).Count-gt0)
     if($hasNewTransactionResidue-and$Mode-cne'Apply'){return New-AgentEnvironmentInterruptedResult 'USER transaction residue requires Apply recovery before read-only reconciliation.'}
     Import-AgentEnvironmentRuntimeModules -RuntimeRoot ([string]$DesiredState.RuntimeRoot)
+    $instructionsArtifact=$null
+    if([int64]$DesiredState.Manifest.schemaVersion-eq3){
+        if($null-eq$DesiredState.PSObject.Properties['GateContext']-or$null-eq$DesiredState.GateContext){throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'Projection-aware reconciliation requires a verified USER projection gate context.')}
+        $DesiredState.GateContext=Assert-AgentEnvironmentProjectionGateContext -GateContext $DesiredState.GateContext -RuntimeRoot ([string]$DesiredState.RuntimeRoot)
+        Assert-AgentEnvironmentProjectionDesiredStateBinding -DesiredState $DesiredState -GateContext $DesiredState.GateContext
+        $configurationWantsClaude=@($DesiredState.GateContext.configuration.projections.user)-ccontains'user-claude'
+        $desiredWantsClaude=@($DesiredState.Manifest.projections)-ccontains'user-claude'
+        if($configurationWantsClaude-ne$desiredWantsClaude){throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'USER Claude instructions selection does not match the verified configuration.')}
+        if($desiredWantsClaude){
+            if($null-eq$DesiredState.PSObject.Properties['InstructionsArtifact']-or$null-eq$DesiredState.InstructionsArtifact){throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'USER Claude instructions selection is missing its verified desired artifact.')}
+            $instructionsArtifact=$DesiredState.InstructionsArtifact
+            if([string]$instructionsArtifact.targetPath-cne'.claude/CLAUDE.md'-or$null-eq$instructionsArtifact.PSObject.Properties['sectionBytes']){throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'USER Claude instructions desired artifact is invalid.')}
+            [byte[]]$canonicalSection=Get-InstallerBootstrapSectionContent -ExistingBytes ([byte[]]@()) -SectionBytes ([byte[]]$instructionsArtifact.sectionBytes)
+            if([Convert]::ToBase64String($canonicalSection)-cne[Convert]::ToBase64String([byte[]]$instructionsArtifact.sectionBytes)){throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'USER Claude instructions desired artifact is not canonical.')}
+        }
+        elseif($null-ne$DesiredState.PSObject.Properties['InstructionsArtifact']-and$null-ne$DesiredState.InstructionsArtifact){throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'USER Claude instructions artifact is present without the user-claude projection.')}
+    }
     Assert-AgentEnvironmentProjectionVolumes -Home $home -DesiredState $DesiredState -ExistingManifest $existingManifestSnapshot.Manifest
 
     # Candidate and desired-manifest validation is deliberately completed before Apply
@@ -1961,6 +2208,22 @@ function Invoke-UserSkillsReconciliation {
         return New-AgentEnvironmentResult -Outcome 'failed' -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed $failed -RollbackState 'not-started' -BackupPath $null -FailureDetails ([object[]]$failureDetails.ToArray()) -Ownership ([object[]]$ownership.ToArray())
     }
 
+    # Encoding and managed-boundary failures must be discovered before Apply creates
+    # the persistent USER lock. The bytes are read and merged again under that lock;
+    # this first pass is validation only and does not transfer trust across the race.
+    if($null-ne$instructionsArtifact){
+        $preflightInstructionsPath=Assert-AgentEnvironmentPathSafe -Root $home -RelativePath '.claude/CLAUDE.md'
+        if((Test-Path -LiteralPath $preflightInstructionsPath)-and-not(Test-Path -LiteralPath $preflightInstructionsPath -PathType Leaf)){throw 'USER Claude instructions target must be a regular file.'}
+        [byte[]]$preflightInstructionsBytes=$null
+        if(Test-Path -LiteralPath $preflightInstructionsPath -PathType Leaf){
+            $preflightInstructionsBytes=[IO.File]::ReadAllBytes($preflightInstructionsPath)
+        }
+        else{
+            $preflightInstructionsBytes=[byte[]]::new(0)
+        }
+        Get-InstallerBootstrapSectionContent -ExistingBytes $preflightInstructionsBytes -SectionBytes ([byte[]]$instructionsArtifact.sectionBytes)|Out-Null
+    }
+
     if (Test-Path -LiteralPath $lockPath) {
         $lockItem = Get-Item -Force -LiteralPath $lockPath
         if ($lockItem.PSIsContainer -or ($lockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Agent environment lock must be a non-reparse file.' }
@@ -2011,6 +2274,32 @@ function Invoke-UserSkillsReconciliation {
         $lockedManifestIdentity = $lockedManifestSnapshot.Identity
         if ($existingManifestIdentity -cne $lockedManifestIdentity) {
             return New-AgentEnvironmentResult -Outcome 'concurrent' -DesiredState $DesiredState -Installed @() -Updated @() -Removed @() -Preserved @() -Failed @('User Skills managed manifest changed while acquiring the Agent environment lock.') -RollbackState 'not-started' -BackupPath $null
+        }
+        if($null-ne$DesiredState.PSObject.Properties['InstalledSkillIds']){
+            try{
+                Assert-AgentEnvironmentOrdinalSetEqual -Actual ([string[]]@($DesiredState.InstalledSkillIds)) -Expected ([string[]]@(Get-AgentEnvironmentManifestSkillIds -Manifest $lockedManifestSnapshot.Manifest)) -Context 'Desired-state installed Skill evidence'
+            }
+            catch{
+                return New-AgentEnvironmentResult -Outcome 'concurrent' -DesiredState $DesiredState -Installed @() -Updated @() -Removed @() -Preserved @() -Failed @('User Skills managed manifest no longer matches the installed Skill set used to build desired state.') -RollbackState 'not-started' -BackupPath $null
+            }
+        }
+        $instructionsRelative=$null;$instructionsObservation=$null;$instructionsDesiredBytes=$null;$instructionsDesiredSha=$null;$instructionsChanged=$false
+        if($null-ne$instructionsArtifact){
+            $instructionsRelative='.claude/CLAUDE.md'
+            $instructionsPath=Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $instructionsRelative
+            if((Test-Path -LiteralPath $instructionsPath)-and-not(Test-Path -LiteralPath $instructionsPath -PathType Leaf)){throw 'USER Claude instructions target must be a regular file.'}
+            $instructionsObservation=Get-AgentEnvironmentObservedState -Root $home -RelativePath $instructionsRelative
+            [byte[]]$existingInstructionsBytes=$null
+            if([bool]$instructionsObservation.existed){
+                $existingInstructionsBytes=[IO.File]::ReadAllBytes($instructionsPath)
+            }
+            else{
+                $existingInstructionsBytes=[byte[]]::new(0)
+            }
+            [byte[]]$instructionsDesiredBytes=Get-InstallerBootstrapSectionContent -ExistingBytes $existingInstructionsBytes -SectionBytes ([byte[]]$instructionsArtifact.sectionBytes)
+            $instructionsDesiredSha=Get-AgentEnvironmentBytesSha256 -Bytes $instructionsDesiredBytes
+            $instructionsArtifact|Add-Member -NotePropertyName desiredSha256 -NotePropertyValue $instructionsDesiredSha -Force
+            $instructionsChanged=(-not[bool]$instructionsObservation.existed)-or[string]$instructionsObservation.sha256-cne$instructionsDesiredSha
         }
         if($null-ne$existing-and[int64]$existing.schemaVersion-eq3-and[int64]$DesiredState.Manifest.schemaVersion-lt3){
             $failureDetails.Add((New-AgentEnvironmentFailureDetail -Code 'downgrade-refused' -SkillId 'managed-manifest' -Path $manifestRelative -Classification 'managed' -Owner 'managed-manifest-v3' -Evidence 'A legacy writer cannot replace a USER coordinator manifest v3.' -DestructiveChangeAllowed $false -BackupCreated $false -ExpectedSha256 $null -ActualSha256 $null -Remediation @('Use the projection-aware USER reconciler.')))
@@ -2070,12 +2359,19 @@ function Invoke-UserSkillsReconciliation {
         if ($failed.Count -gt 0) { return New-AgentEnvironmentResult -Outcome 'failed' -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed $failed -RollbackState 'not-started' -BackupPath $null -FailureDetails ([object[]]$failureDetails.ToArray()) -Ownership ([object[]]$ownership.ToArray()) }
         $observationsByPath = @{}
         $observationsByPath[$manifestRelative] = $manifestObservation
+        if($null-ne$instructionsObservation){$observationsByPath[$instructionsRelative]=$instructionsObservation}
         $observedTargetPaths = @(@($oldByPath.Keys) + @($desiredByPath.Keys) + @($migrationPaths.Keys) | Sort-Object -Unique)
         foreach ($path in $observedTargetPaths) {
             $observationsByPath[$path] = Get-AgentEnvironmentObservedState -Root $home -RelativePath $path
         }
         $writes = @{}
         $deletes = @{}
+        if($instructionsChanged){
+            $writes[$instructionsRelative]=[pscustomobject]@{sha256=$instructionsDesiredSha;targetPath=$instructionsRelative}
+            $stagedSnapshots[$instructionsRelative]=[pscustomobject]@{valid=$true;bytes=$instructionsDesiredBytes;expectedSha256=$instructionsDesiredSha;actualSha256=$instructionsDesiredSha}
+            if([bool]$instructionsObservation.existed){$updated.Add($instructionsRelative)}else{$installed.Add($instructionsRelative)}
+        }
+        elseif($null-ne$instructionsArtifact){$preserved.Add($instructionsRelative)}
         foreach ($path in @($oldByPath.Keys)) {
             $observation = $observationsByPath[$path]
             $managedExpected = [string]$oldByPath[$path].sha256

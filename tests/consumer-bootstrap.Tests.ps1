@@ -6,6 +6,7 @@ Describe 'Consumer authority bootstrap v1' {
         $script:BootstrapHooksRoot = Join-Path $TestDrive 'bootstrap-hooks-root'
         [void][IO.Directory]::CreateDirectory($script:BootstrapHooksRoot)
         Initialize-PinnedGitHooks $script:BootstrapHooksRoot
+        Initialize-PinnedGitDeadline prepare
         function Invoke-FixtureGit([string]$Root,[string[]]$Arguments) {
             $output=@(& git -c core.autocrlf=false -C $Root @Arguments 2>&1)
             if($LASTEXITCODE-ne0){throw "fixture git failed: $($output-join' ')"}
@@ -84,6 +85,37 @@ Describe 'Consumer authority bootstrap v1' {
             CandidateRoot=$Root
             BaseRoot=$BaseRoot}
         }
+        function New-SupervisorFixture([string]$Root,[string]$GateSource,$Contract) {
+            $authority=Join-Path $Root 'authority'
+            foreach($directory in @('consumer','scripts/consumer')){[void][IO.Directory]::CreateDirectory((Join-Path $authority $directory))}
+            $runtimeManifest=Import-PowerShellDataFile (Join-Path $script:RepositoryRoot 'scripts/platform-runtime.psd1')
+            foreach($relative in @('platform-runtime.psd1')+@($runtimeManifest.FileList)|Select-Object -Unique){
+                $destination=Join-Path (Join-Path $authority 'scripts') $relative
+                [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
+                Copy-Item -LiteralPath (Join-Path (Join-Path $script:RepositoryRoot 'scripts') $relative) -Destination $destination
+            }
+            foreach($relative in @('ConsumerBootstrapSupervisor.psm1','ConsumerGate.psm1')){
+                Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot "scripts/consumer/$relative") `
+                    -Destination (Join-Path $authority "scripts/consumer/$relative")
+            }
+            $interfacePath=Join-Path $authority 'consumer/consumer-gate-interface.json'
+            [IO.File]::WriteAllText($interfacePath,($Contract|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
+            $gatePath=Join-Path $authority 'scripts/consumer/Invoke-ConsumerSourceGate.ps1'
+            [IO.File]::WriteAllText($gatePath,$GateSource,[Text.UTF8Encoding]::new($false))
+            $work=Join-Path $Root 'work';$base=Join-Path $Root 'base';$candidate=Join-Path $Root 'candidate'
+            foreach($path in @($work,$base,$candidate)){[void][IO.Directory]::CreateDirectory($path)}
+            [pscustomobject]@{AuthorityRoot=$authority;InterfacePath=$interfacePath;GatePath=$gatePath;WorkRoot=$work
+                BaseRoot=$base;CandidateRoot=$candidate;ModulePath=Join-Path $authority 'scripts/consumer/ConsumerBootstrapSupervisor.psm1'}
+        }
+        function Invoke-SupervisorFixture($Fixture,[string]$Phase,[string]$Token='',[int]$DeadlineSeconds=10) {
+            $module=Import-Module $Fixture.ModulePath -Force -PassThru
+            $platform=if($IsWindows){'windows'}elseif($IsMacOS){'macos'}else{'linux'}
+            & $module.ExportedCommands['Invoke-ConsumerGateProcess'] -AuthorityRoot $Fixture.AuthorityRoot `
+                -Executable (Get-Process -Id $PID).Path -GatePath $Fixture.GatePath -InterfacePath $Fixture.InterfacePath `
+                -CurrentPhase $Phase -BindingPath (Join-Path $Fixture.WorkRoot 'binding.json') -BaseRoot $Fixture.BaseRoot `
+                -CandidateRoot $Fixture.CandidateRoot -WorkRoot $Fixture.WorkRoot -Platform $platform -Token $Token `
+                -DeadlineOverrideSeconds $DeadlineSeconds
+        }
     }
 
     if ($IsWindows) {
@@ -159,11 +191,15 @@ Describe 'Consumer authority bootstrap v1' {
         $lines = @(Get-Content -LiteralPath $script:BootstrapPath -Encoding UTF8)
         $lines.Count | Should BeLessThan 401
         $text = $lines -join "`n"
-        $text | Should Not Match '(?im)^\s*(Add-Type|Import-Module)\b|DllImport'
+        $text | Should Not Match '(?im)^\s*Add-Type\b|DllImport'
         ([regex]::Matches($text,[regex]::Escape('https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'))).Count | Should Be 1
         $text | Should Match 'protocol\.file\.allow='
          $text | Should Match 'core\.hooksPath='
          $text | Should Match 'credential\.helper='
+        $text | Should Match 'maintenance\.auto=false'
+        $text | Should Match 'gc\.autoDetach=false'
+        $text | Should Match 'ReadToEndAsync'
+        $text | Should Match 'Kill\(\$true\)'
         $text | Should Match 'merge-base.*--is-ancestor'
         $tokens=$null;$errors=$null
         $ast=[Management.Automation.Language.Parser]::ParseFile($script:BootstrapPath,[ref]$tokens,[ref]$errors)
@@ -185,7 +221,35 @@ Describe 'Consumer authority bootstrap v1' {
          $text | Should Match 'hash-object'
         foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){$text|Should Match ([regex]::Escape("'$name'"))}
         $text|Should Match '(?s)function Invoke-PinnedGit.*SetEnvironmentVariable\(\$name,\$null,''Process''\)'
-        $text | Should Match 'function Invoke-ConsumerGateProcess\([^)]*Token'
+        $text | Should Not Match 'function Invoke-ConsumerGateProcess'
+        $text | Should Match 'Import-ConsumerBootstrapSupervisor'
+        $treeCall=$ast.FindAll({param($node)$node-is[Management.Automation.Language.CommandAst]-and
+                $node.GetCommandName()-ceq'Assert-AuthorityTree'},$true)|Select-Object -Last 1
+        $importCall=$ast.FindAll({param($node)$node-is[Management.Automation.Language.CommandAst]-and
+                $node.GetCommandName()-ceq'Import-ConsumerBootstrapSupervisor'},$true)|Select-Object -Last 1
+        $treeCall.Extent.StartOffset|Should BeLessThan $importCall.Extent.StartOffset
+    }
+
+    # Scenario: A pre-authority Git child and its descendant exceed the shared phase deadline.
+    # Purpose: Fail closed within the fixed deadline and confirm tree-kill cleanup without relying on authority code.
+    It 'UnitT45_bounds_pre_authority_git_and_cleans_its_descendant_tree' {
+        $root=Join-Path $TestDrive 'bounded-bootstrap-git';[void][IO.Directory]::CreateDirectory($root)
+        $pidPath=Join-Path $root 'descendant.pid';$shim=Join-Path $root 'git-shim.ps1'
+        $shimSource=@'
+param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Remaining)
+$child=Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30') -PassThru
+[IO.File]::WriteAllText($env:BOOTSTRAP_GIT_DESCENDANT_PID,[string]$child.Id,[Text.UTF8Encoding]::new($false))
+Start-Sleep -Seconds 30
+'@
+        [IO.File]::WriteAllText($shim,$shimSource,[Text.UTF8Encoding]::new($false))
+        $env:BOOTSTRAP_GIT_DESCENDANT_PID=$pidPath;Initialize-PinnedGitDeadline prepare
+        try{
+            {Invoke-PinnedGit $root @('status') -TimeoutSeconds 1 -GitExecutable (Get-Process -Id $PID).Path `
+                    -GitPrefixArguments @('-NoProfile','-NonInteractive','-File',$shim)}|Should Throw 'bounded deadline'
+            $descendantProcessId=[int](Get-Content -Raw $pidPath);$deadline=[DateTime]::UtcNow.AddSeconds(5)
+            while($null-ne(Get-Process -Id $descendantProcessId -ErrorAction SilentlyContinue)-and[DateTime]::UtcNow-lt$deadline){Start-Sleep -Milliseconds 25}
+            Get-Process -Id $descendantProcessId -ErrorAction SilentlyContinue|Should BeNullOrEmpty
+        }finally{Remove-Item Env:BOOTSTRAP_GIT_DESCENDANT_PID -ErrorAction SilentlyContinue;Initialize-PinnedGitDeadline prepare}
     }
 
     # Scenario: Phase environment and interface retirement are authority-owned data.
@@ -211,33 +275,51 @@ Describe 'Consumer authority bootstrap v1' {
     It 'UnitT55_filters_child_environment_and_normalizes_unknown_exit_codes' {
         $root=Join-Path $TestDrive 'process'
         [void][IO.Directory]::CreateDirectory($root)
-        $interfacePath=Join-Path $root 'interface.json'
-        $childPath=Join-Path $root 'child.ps1'
         $outputPath=Join-Path $root 'environment.json'
         $contract=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/consumer-gate-interface.json')|ConvertFrom-Json
         $contract.phaseEnvironment.validate=@($contract.phaseEnvironment.validate)+@('FIXTURE_EXIT_CODE','FIXTURE_OUTPUT')
-        [IO.File]::WriteAllText($interfacePath,($contract|ConvertTo-Json -Depth 20),(New-Object Text.UTF8Encoding($false)))
         $child=@'
 param([string]$Interface,[string]$Phase,[string]$AuthorityBindingPath,[string]$BaseRoot,[string]$CandidateRoot,[string]$WorkRoot,[string]$Platform,[switch]$TransitionFromLegacy)
 [IO.File]::WriteAllText($env:FIXTURE_OUTPUT,(@{allowed=$env:FIXTURE_EXIT_CODE;unlisted=$env:UNLISTED_SENTINEL}|ConvertTo-Json),(New-Object Text.UTF8Encoding($false)))
 exit [int]$env:FIXTURE_EXIT_CODE
 '@
-        [IO.File]::WriteAllText($childPath,$child,(New-Object Text.UTF8Encoding($false)))
-        $script:BaseRoot=$root
-        $script:CandidateRoot=$root
-        $script:WorkRoot=$root
-        $script:Platform='windows'
-        $script:TransitionFromLegacy=$false
+        $fixture=New-SupervisorFixture $root $child $contract
         $env:FIXTURE_OUTPUT=$outputPath
         $env:UNLISTED_SENTINEL='must-not-cross'
         $env:FIXTURE_EXIT_CODE='9'
-        (Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $childPath $interfacePath 'validate' (Join-Path $root 'binding.json'))|Should Be 30
+        (Invoke-SupervisorFixture $fixture validate)|Should Be 30
         $observed=Get-Content -Raw -Encoding UTF8 $outputPath|ConvertFrom-Json
         $observed.allowed|Should Be '9'
         $observed.unlisted|Should BeNullOrEmpty
         $env:FIXTURE_EXIT_CODE='10'
-        (Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $childPath $interfacePath 'validate' (Join-Path $root 'binding.json'))|Should Be 10
+        (Invoke-SupervisorFixture $fixture validate)|Should Be 10
         Remove-Item Env:FIXTURE_OUTPUT,Env:FIXTURE_EXIT_CODE,Env:UNLISTED_SENTINEL -ErrorAction SilentlyContinue
+    }
+
+    # Scenario: The authority-owned gate process and one descendant exceed a shortened supervisor deadline.
+    # Purpose: Fail closed, verify owned descendant cleanup, and bind Unix execution to the platform process group.
+    It 'UnitT56_bounds_the_authority_gate_and_cleans_its_owned_descendants' {
+        $root=Join-Path $TestDrive 'supervisor-timeout';[void][IO.Directory]::CreateDirectory($root)
+        $pidPath=Join-Path $root 'descendant.pid'
+        $contract=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/consumer-gate-interface.json')|ConvertFrom-Json
+        $contract.phaseEnvironment.validate=@($contract.phaseEnvironment.validate)+@('SUPERVISOR_DESCENDANT_PID')
+        $gate=@'
+param($Interface,$Phase,$AuthorityBindingPath,$BaseRoot,$CandidateRoot,$WorkRoot,$Platform,[switch]$TransitionFromLegacy)
+$child=Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30') -PassThru
+[IO.File]::WriteAllText($env:SUPERVISOR_DESCENDANT_PID,[string]$child.Id,[Text.UTF8Encoding]::new($false))
+Start-Sleep -Seconds 30
+'@
+        $fixture=New-SupervisorFixture $root $gate $contract;$env:SUPERVISOR_DESCENDANT_PID=$pidPath
+        try{
+            (Invoke-SupervisorFixture $fixture validate '' 1)|Should Be 20
+            $descendantProcessId=[int](Get-Content -Raw $pidPath);$deadline=[DateTime]::UtcNow.AddSeconds(5)
+            while($null-ne(Get-Process -Id $descendantProcessId -ErrorAction SilentlyContinue)-and[DateTime]::UtcNow-lt$deadline){Start-Sleep -Milliseconds 25}
+            Get-Process -Id $descendantProcessId -ErrorAction SilentlyContinue|Should BeNullOrEmpty
+            $receipt=Get-ChildItem -LiteralPath (Join-Path $fixture.WorkRoot 'bootstrap-supervisor-diagnostics') `
+                -Filter 'validate-*.process.json'|Select-Object -First 1|Get-Content -Raw|ConvertFrom-Json
+            $receipt.cleanup.cleanedUp|Should Be $true
+            if(-not$IsWindows){$receipt.isolation|Should Match 'process-group'}
+        }finally{Remove-Item Env:SUPERVISOR_DESCENDANT_PID -ErrorAction SilentlyContinue}
     }
 
     # Scenario: A prepare child receives the resolver token while the same child in validate does not.
@@ -245,40 +327,31 @@ exit [int]$env:FIXTURE_EXIT_CODE
     It 'UnitT57_passes_the_resolver_token_only_to_prepare' {
         $root=Join-Path $TestDrive 'phase-environment'
         [void][IO.Directory]::CreateDirectory($root)
-        $interfacePath=Join-Path $script:RepositoryRoot 'consumer/consumer-gate-interface.json'
-        $childPath=Join-Path $root 'child.ps1'
         $outputPath=Join-Path $root 'observed.json'
         $child=@'
 param([string]$Interface,[string]$Phase,[string]$AuthorityBindingPath,[string]$BaseRoot,[string]$CandidateRoot,[string]$WorkRoot,[string]$Platform,[switch]$TransitionFromLegacy)
 [IO.File]::WriteAllText($env:GITHUB_STEP_SUMMARY,(@{phase=$Phase;token=$env:STANDARD_VALIDATION_GITHUB_API_TOKEN;github=$env:GITHUB_TOKEN}|ConvertTo-Json),(New-Object Text.UTF8Encoding($false)))
 exit 0
 '@
-        [IO.File]::WriteAllText($childPath,$child,(New-Object Text.UTF8Encoding($false)))
-        $script:BaseRoot=$root
-        $script:CandidateRoot=$root
-        $script:WorkRoot=$root
-        $script:Platform='windows'
-        $script:TransitionFromLegacy=$false
+        $contract=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/consumer-gate-interface.json')|ConvertFrom-Json
+        $fixture=New-SupervisorFixture $root $child $contract
         $env:GITHUB_STEP_SUMMARY=$outputPath
         $env:STANDARD_VALIDATION_GITHUB_API_TOKEN='phase-token-sentinel'
         $env:GITHUB_TOKEN='must-not-cross'
-        (Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $childPath $interfacePath 'prepare' (Join-Path $root 'binding.json') `
-            'phase-token-sentinel')|Should Be 0
+        (Invoke-SupervisorFixture $fixture prepare 'phase-token-sentinel')|Should Be 0
         $observed=Get-Content -Raw -Encoding UTF8 $outputPath|ConvertFrom-Json
         $observed.phase|Should Be 'prepare'
         $observed.token|Should Be 'phase-token-sentinel'
         $observed.github|Should BeNullOrEmpty
-        (Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $childPath $interfacePath 'validate' (Join-Path $root 'binding.json') `
-            'phase-token-sentinel')|Should Be 0
+        (Invoke-SupervisorFixture $fixture validate 'phase-token-sentinel')|Should Be 0
         $observed=Get-Content -Raw -Encoding UTF8 $outputPath|ConvertFrom-Json
         $observed.phase|Should Be 'validate'
         $observed.token|Should BeNullOrEmpty
         $observed.github|Should BeNullOrEmpty
 
         foreach ($stream in @('Out','Error')) {
-            $leakPath = Join-Path $root "leak-$stream.ps1"
             [IO.File]::WriteAllText(
-                $leakPath,
+                $fixture.GatePath,
                 "param(`$Interface,`$Phase,`$AuthorityBindingPath,`$BaseRoot,`$CandidateRoot,`$WorkRoot,`$Platform)`n" +
                 "[Console]::$stream.WriteLine(`"fixture HTTP timeout diagnostic: `$env:STANDARD_VALIDATION_GITHUB_API_TOKEN`")`nexit 20`n",
                 [Text.UTF8Encoding]::new($false)
@@ -288,8 +361,7 @@ exit 0
             $diagnosticWriter = [IO.StringWriter]::new()
             try {
                 [Console]::SetError($diagnosticWriter)
-                $leakExit = Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $leakPath $interfacePath `
-                    prepare (Join-Path $root 'binding.json') "${stream}-token-sentinel"
+                $leakExit = Invoke-SupervisorFixture $fixture prepare "${stream}-token-sentinel"
             }
             finally {
                 [Console]::SetError($originalError)
@@ -300,22 +372,16 @@ exit 0
             $diagnostic | Should Match 'credential sentinel.*suppressed'
         }
 
-        $bootstrapText = Get-Content -Raw -Encoding UTF8 $script:BootstrapPath
-        $suppressionAssignment = '$credentialLeak = $true'
+        $bootstrapText = Get-Content -Raw -Encoding UTF8 $fixture.ModulePath
+        $suppressionAssignment = '$credentialLeak=$true'
         ([regex]::Matches($bootstrapText,[regex]::Escape($suppressionAssignment))).Count | Should Be 1
         $mutantText = $bootstrapText.Replace($suppressionAssignment, '$credentialLeak = $false')
         $mutantText | Should Not Be $bootstrapText
-        $mutantPath = Join-Path $TestDrive 'Invoke-PinnedAuthority-output-suppression-mutant.ps1'
-        [IO.File]::WriteAllText($mutantPath,$mutantText,[Text.UTF8Encoding]::new($false))
-        $mutantModule = New-Module -Name BootstrapOutputSuppressionMutant -ArgumentList $mutantPath -ScriptBlock {
-            param($path)
-            . $path -DefineFunctionsOnly
-        }
+        [IO.File]::WriteAllText($fixture.ModulePath,$mutantText,[Text.UTF8Encoding]::new($false))
         try {
             foreach ($stream in @('Out','Error')) {
-                $leakPath = Join-Path $root "mutant-leak-$stream.ps1"
                 [IO.File]::WriteAllText(
-                    $leakPath,
+                    $fixture.GatePath,
                     "param(`$Interface,`$Phase,`$AuthorityBindingPath,`$BaseRoot,`$CandidateRoot,`$WorkRoot,`$Platform)`n" +
                     "[Console]::$stream.WriteLine(`"fixture diagnostic: `$env:STANDARD_VALIDATION_GITHUB_API_TOKEN`")`nexit 20`n",
                     [Text.UTF8Encoding]::new($false)
@@ -329,16 +395,7 @@ exit 0
                 try {
                     [Console]::SetOut($outWriter)
                     [Console]::SetError($errorWriter)
-                    $mutantExit = & $mutantModule {
-                        param($root,$leakPath,$interfacePath,$sentinel)
-                        $script:BaseRoot=$root
-                        $script:CandidateRoot=$root
-                        $script:WorkRoot=$root
-                        $script:Platform='windows'
-                        $script:TransitionFromLegacy=$false
-                        Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $leakPath $interfacePath `
-                            prepare (Join-Path $root 'binding.json') $sentinel
-                    } $root $leakPath $interfacePath $sentinel
+                    $mutantExit = Invoke-SupervisorFixture $fixture prepare $sentinel
                 }
                 finally {
                     [Console]::SetOut($originalOut)
@@ -349,7 +406,7 @@ exit 0
             }
         }
         finally {
-            Remove-Module $mutantModule -Force
+            [IO.File]::WriteAllText($fixture.ModulePath,$bootstrapText,[Text.UTF8Encoding]::new($false))
         }
         Remove-Item Env:GITHUB_STEP_SUMMARY,Env:STANDARD_VALIDATION_GITHUB_API_TOKEN,Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
     }
@@ -371,6 +428,30 @@ exit 0
         [IO.File]::WriteAllText((Join-Path $nonEmpty 'pre-commit'), 'malicious')
         { New-PinnedGitHooksDirectory $root $nonEmptyName } | Should Throw 'already exists'
 
+    }
+
+    # Scenario: A caller supplies the validated temp root itself as WorkRoot.
+    # Purpose: Keep the supervisor's sibling capture directory inside the trusted temp boundary on every platform.
+    It 'InterT58_rejects_the_temp_root_itself_as_workroot' {
+        $tempBoundary=Join-Path $TestDrive 'exact-temp-boundary'
+        $baseRoot=Join-Path $TestDrive 'exact-temp-base'
+        $candidateRoot=Join-Path $TestDrive 'exact-temp-candidate'
+        foreach($path in @($tempBoundary,$baseRoot,$candidateRoot)){[void][IO.Directory]::CreateDirectory($path)}
+        $savedRunnerTemp=[Environment]::GetEnvironmentVariable('RUNNER_TEMP','Process')
+        $savedTestTemp=[Environment]::GetEnvironmentVariable('CONSUMER_GATE_TEST_TEMP_ROOT','Process')
+        try{
+            [Environment]::SetEnvironmentVariable('RUNNER_TEMP',$null,'Process')
+            $env:CONSUMER_GATE_TEST_TEMP_ROOT=$tempBoundary
+            $output=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $script:BootstrapPath `
+                -Phase prepare -BaseRoot $baseRoot -CandidateRoot $candidateRoot -WorkRoot $tempBoundary `
+                -TriggerEvent pull_request_target -BaseRevision ('a'*40) -CandidateRevision ('b'*40) `
+                -HeadRevision ('c'*40) -WorkflowRunId 1 -WorkflowRunAttempt 1 -Platform windows 2>&1)
+            $LASTEXITCODE|Should Be 30
+            ($output-join"`n")|Should Match 'WorkRoot must be under RUNNER_TEMP or the local test temp root'
+        }finally{
+            [Environment]::SetEnvironmentVariable('RUNNER_TEMP',$savedRunnerTemp,'Process')
+            [Environment]::SetEnvironmentVariable('CONSUMER_GATE_TEST_TEMP_ROOT',$savedTestTemp,'Process')
+        }
     }
 
     if ($IsWindows) {
@@ -413,15 +494,23 @@ exit 0
         foreach($path in @(
                 'consumer/bootstrap/Invoke-PinnedAuthority.ps1','consumer/workflows/consumer-gate.yml',
                 'consumer/workflows/consumer-gate-transition.yml','scripts/consumer/ConsumerGate.psm1',
+                'scripts/consumer/ConsumerBootstrapSupervisor.psm1',
                 'scripts/consumer/ConsumerManifestClosure.psm1','scripts/consumer/Invoke-ConsumerSourceGate.ps1',
                 'scripts/consumer/Invoke-ConsumerValidationChild.ps1','scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1',
                 'scripts/Validate-UpstreamAdapter.ps1','docs/standards/upstream-adapter.json',
                 'docs/standards/validation-toolchain.json','docs/standards/validation-security-gate.json')){
             Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot $path) -Destination (Join-Path $source $path)
         }
+        $platformRuntimeManifest=Import-PowerShellDataFile (Join-Path $script:RepositoryRoot 'scripts/platform-runtime.psd1')
+        foreach($relative in @('platform-runtime.psd1')+@($platformRuntimeManifest.FileList)|Select-Object -Unique){
+            $destination=Join-Path (Join-Path $source 'scripts') $relative
+            [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
+            Copy-Item -LiteralPath (Join-Path (Join-Path $script:RepositoryRoot 'scripts') $relative) -Destination $destination
+        }
         Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'tests/fixtures/consumer-gate-validation-runner-fixture.ps1') `
             -Destination (Join-Path $source 'scripts/Invoke-StandardValidation.ps1')
         foreach($productionPath in @('consumer/bootstrap/Invoke-PinnedAuthority.ps1','scripts/consumer/ConsumerGate.psm1',
+                'scripts/consumer/ConsumerBootstrapSupervisor.psm1',
                 'scripts/consumer/Invoke-ConsumerSourceGate.ps1')){
             (Get-FileHash -LiteralPath (Join-Path $source $productionPath) -Algorithm SHA256).Hash|Should Be `
                 (Get-FileHash -LiteralPath (Join-Path $script:RepositoryRoot $productionPath) -Algorithm SHA256).Hash
@@ -489,6 +578,9 @@ exit 0
         $runtimeSource=Join-Path $workLease.Root 'runtime-source'
         [void][IO.Directory]::CreateDirectory($runtimeSource)
         $runtimeFixtureFiles=@(Get-ChildItem -LiteralPath $PSHOME -File -Force)
+        if(Test-Path -LiteralPath (Join-Path $PSHOME 'ref') -PathType Container){
+            $runtimeFixtureFiles+=@(Get-ChildItem -LiteralPath (Join-Path $PSHOME 'ref') -Recurse -File -Force)
+        }
         foreach($moduleName in @('Microsoft.PowerShell.Management','Microsoft.PowerShell.Utility')){
             $runtimeFixtureFiles+=@(Get-ChildItem -LiteralPath (Join-Path $PSHOME "Modules/$moduleName") -Recurse -File -Force)
         }
@@ -527,6 +619,7 @@ exit 0
         )
         function Invoke-FormalBootstrap([string]$Phase,[string]$WorkRoot,[string]$Platform) {
             [void][IO.Directory]::CreateDirectory($WorkRoot)
+            $script:FormalBootstrapWorkRoot=$WorkRoot
             $env:CONSUMER_GATE_PHASE_ENV_DUMP_PATH=Join-Path $WorkRoot "environment-$Phase.json"
             $phaseSentinelHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(`
                     [Text.Encoding]::UTF8.GetBytes('phase-token-sentinel'))).ToLowerInvariant()
@@ -539,6 +632,39 @@ exit 0
             $script:FormalBootstrapExitCode = $LASTEXITCODE
             $script:FormalBootstrapExitCode
         }
+        function Protect-FormalBootstrapDiagnostic([string]$Value) {
+            $protected=if($null-eq$Value){''}else{$Value}
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){
+                $secret=[Environment]::GetEnvironmentVariable($name,'Process')
+                if(-not[string]::IsNullOrEmpty($secret)){$protected=$protected.Replace($secret,'[REDACTED]',[StringComparison]::Ordinal)}
+            }
+            $protected
+        }
+        function Get-FormalBootstrapFailureDiagnostics {
+            $sections=[Collections.Generic.List[string]]::new()
+            $bootstrapOutput=@($script:FormalBootstrapOutput|ForEach-Object{[string]$_}|Where-Object{
+                    $_-notmatch'(?i)unapproved verb|未核准的動詞'
+                })-join"`n"
+            $sections.Add("bootstrap stdout/stderr:`n$(Protect-FormalBootstrapDiagnostic $bootstrapOutput)")
+            $work=[string]$script:FormalBootstrapWorkRoot
+            if(-not[string]::IsNullOrWhiteSpace($work)-and(Test-Path -LiteralPath $work -PathType Container)){
+                $files=@(
+                    Get-ChildItem -LiteralPath $work -Recurse -File -Force -ErrorAction SilentlyContinue|
+                        Where-Object{
+                            $_.FullName-match'bootstrap-supervisor-diagnostics|[\\/]diagnostics[\\/]|receipt|authority-binding|gate.*diagnostic'
+                        }|Sort-Object FullName|Select-Object -First 40
+                )
+                foreach($file in $files){
+                    try{
+                        $text=[IO.File]::ReadAllText($file.FullName)
+                        if($text.Length-gt16384){$text=$text.Substring(0,16384)+"`n[TRUNCATED]"}
+                        $relative=[IO.Path]::GetRelativePath($work,$file.FullName)
+                        $sections.Add("$relative`:`n$(Protect-FormalBootstrapDiagnostic $text)")
+                    }catch{$sections.Add("$($file.FullName): [diagnostic read failed: $($_.Exception.Message)]")}
+                }
+            }
+            Protect-FormalBootstrapDiagnostic (($sections|Select-Object -First 41)-join"`n---`n")
+        }
         function Assert-FormalPhaseOutput([string]$Path,[string]$Phase) {
             if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
                 throw "Formal $Phase gate did not create its boundary evidence (exit=$script:FormalBootstrapExitCode): " +
@@ -547,7 +673,7 @@ exit 0
         }
         function Assert-FormalBootstrapExit([int]$Actual,[int]$Expected,[string]$Context) {
             if($Actual-ne$Expected){
-                throw "$Context expected exit $Expected but got $Actual`: $(@($script:FormalBootstrapOutput)-join' | ')"
+                throw "$Context expected exit $Expected but got $Actual`:`n$(Get-FormalBootstrapFailureDiagnostics)"
             }
             $Actual | Should Be $Expected
         }
@@ -555,7 +681,7 @@ exit 0
         $env:STANDARD_VALIDATION_GITHUB_API_TOKEN = 'phase-token-sentinel'
         $prepareExit=Invoke-FormalBootstrap prepare $platformWork windows
         if($prepareExit-ne0){
-            throw "Formal prepare expected exit 0 but got $prepareExit`: $(@($script:FormalBootstrapOutput)-join' | ')"
+            throw "Formal prepare expected exit 0 but got $prepareExit`:`n$(Get-FormalBootstrapFailureDiagnostics)"
         }
         $prepareExit | Should Be 0
         Assert-FormalPhaseOutput (Join-Path $platformWork 'environment-prepare.json') prepare
@@ -597,7 +723,7 @@ exit 0
         foreach ($phase in @('validate','finalize')) {
             $phaseExit=Invoke-FormalBootstrap $phase $platformWork windows
             if($phaseExit-ne0){
-                throw "Formal $phase expected exit 0 but got $phaseExit`: $(@($script:FormalBootstrapOutput)-join' | ')"
+                throw "Formal $phase expected exit 0 but got $phaseExit`:`n$(Get-FormalBootstrapFailureDiagnostics)"
             }
             $phaseExit | Should Be 0
             Assert-FormalPhaseOutput (Join-Path $platformWork "environment-$phase.json") $phase
@@ -696,7 +822,7 @@ exit 0
         }
         $aggregateExit=Invoke-FormalBootstrap aggregate $aggregateWork aggregate
         if($aggregateExit-ne0){
-            throw "Formal aggregate expected exit 0 but got $aggregateExit`: $(@($script:FormalBootstrapOutput)-join' | ')"
+            throw "Formal aggregate expected exit 0 but got $aggregateExit`:`n$(Get-FormalBootstrapFailureDiagnostics)"
         }
         $aggregateExit | Should Be 0
         (Join-Path $aggregateWork 'aggregate-receipt.json')|Should Exist
@@ -710,49 +836,15 @@ exit 0
             @($environment.sentinelValueNames).Count | Should Be 0
             ($environment | ConvertTo-Json -Depth 5) | Should Not Match 'phase-token-sentinel'
         }
-        $phaseMutant=Join-Path $TestDrive 'Invoke-PinnedAuthority-phase-value-mutant.ps1'
-        $phaseMutantText=Get-Content -Raw -LiteralPath $bootstrapCopy;$phaseTokens=$null;$phaseErrors=$null
-        $phaseAst=[Management.Automation.Language.Parser]::ParseInput($phaseMutantText,[ref]$phaseTokens,[ref]$phaseErrors)
-        @($phaseErrors).Count|Should Be 0
-        $processFunction=@($phaseAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
-                    $node.Name-ceq'Invoke-ConsumerGateProcess'},$true))[0]
-        $credentialAssignment=@($processFunction.Body.FindAll({param($node)
-                    $node-is[Management.Automation.Language.AssignmentStatementAst]-and
-                    $node.Left.Extent.Text.Trim()-ceq'$credentialNames'
-                },$true))
-        @($credentialAssignment).Count|Should Be 1
-        $phaseInjection=@'
-$start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=$Token
-[void]$start.Environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
-'@
-        $phaseMutantText=$phaseMutantText.Insert($credentialAssignment[0].Extent.StartOffset,$phaseInjection+[Environment]::NewLine)
-        [IO.File]::WriteAllText($phaseMutant,$phaseMutantText,[Text.UTF8Encoding]::new($false))
-        $bindingPath=Join-Path $platformWork 'authority-binding.json'
-        $bindingOriginal=Get-Content -Raw -LiteralPath $bindingPath
-        $mutantBinding=$bindingOriginal|ConvertFrom-Json
-        $mutantBinding.bootstrapSha256=(Get-FileHash -LiteralPath $phaseMutant -Algorithm SHA256).Hash.ToLowerInvariant()
-        [IO.File]::WriteAllText($bindingPath,($mutantBinding|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
+        $supervisorPath=Join-Path $platformWork 'authority/scripts/consumer/ConsumerBootstrapSupervisor.psm1'
+        $supervisorBytes=[IO.File]::ReadAllBytes($supervisorPath)
+        $diagnosticCount=@(Get-ChildItem -LiteralPath (Join-Path $platformWork 'bootstrap-supervisor-diagnostics') -File).Count
         try{
-            foreach($phase in @('validate','finalize')){
-                $env:STANDARD_VALIDATION_GITHUB_API_TOKEN='phase-token-sentinel'
-                $env:CONSUMER_GATE_PHASE_ENV_DUMP_PATH=Join-Path $platformWork "environment-$phase.json"
-                $phaseSentinelHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
-                        [Text.Encoding]::UTF8.GetBytes('phase-token-sentinel'))).ToLowerInvariant()
-                [IO.File]::WriteAllText("$($env:CONSUMER_GATE_PHASE_ENV_DUMP_PATH).sentinel.sha256",$phaseSentinelHash,
-                    [Text.UTF8Encoding]::new($false))
-                $mutantOutput=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $phaseMutant `
-                    -Phase $phase -WorkRoot $platformWork -Platform windows @common 2>&1)
-                $mutantPhaseExit=$LASTEXITCODE
-                $mutantPhaseExit|Should Be $(if($phase-ceq'validate'){30}else{20})
-                $mutantEnvironment=Get-Content -Raw -LiteralPath (Join-Path $platformWork "environment-$phase.json")|ConvertFrom-Json
-                @($mutantEnvironment.sentinelValueNames)|Should Be @('CONSUMER_GATE_EVENT_REPOSITORY')
-                {if(@($mutantEnvironment.sentinelValueNames).Count-ne0){
-                        throw "PHASE_SENTINEL_VALUE_ORACLE_MISMATCH|$(@($mutantEnvironment.sentinelValueNames)-join',')"
-                    }}|Should Throw 'PHASE_SENTINEL_VALUE_ORACLE_MISMATCH'
-            }
+            [IO.File]::AppendAllText($supervisorPath,"`n# authority-tree-tamper`n",[Text.UTF8Encoding]::new($false))
+            Assert-FormalBootstrapExit (Invoke-FormalBootstrap validate $platformWork windows) 20 'Tampered supervisor authority tree'
+            @(Get-ChildItem -LiteralPath (Join-Path $platformWork 'bootstrap-supervisor-diagnostics') -File).Count|Should Be $diagnosticCount
         }finally{
-            Remove-Item Env:STANDARD_VALIDATION_GITHUB_API_TOKEN -ErrorAction SilentlyContinue
-            [IO.File]::WriteAllText($bindingPath,$bindingOriginal,[Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllBytes($supervisorPath,$supervisorBytes)
         }
         $boundaryEvents=@(Get-Content -LiteralPath (Join-Path $platformWork 'events.log'))
         @($boundaryEvents[0..2])|Should Be @('runtime-installed','source-tools-prepared','source-report-asserted')
@@ -947,6 +1039,7 @@ $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=$Token
     # Scenario: Authority acquisition runs with isolated global Git config and produces a detached worktree with a persistent canonical origin.
     # Purpose: The validator's exact local-origin source-binding path must pass, while deleting the persistent-origin statement must reproduce the hosted-runner failure.
     It 'InterT75_persists_origin_for_validator_binding_with_isolated_git_config' {
+        Initialize-PinnedGitDeadline prepare
         $source=Join-Path $TestDrive 'origin-source'
         [void](New-AuthorityFixture $source)
         [void][IO.Directory]::CreateDirectory((Join-Path $source 'scripts'))
@@ -968,6 +1061,7 @@ $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=$Token
         [IO.File]::WriteAllText($isolatedGlobal,'',[Text.UTF8Encoding]::new($false))
         $savedHome=$env:HOME;$savedGlobal=$env:GIT_CONFIG_GLOBAL;$savedPath=$env:PATH
         $savedHooks=$script:PinnedGitHooksPath
+        $savedGitExecutable=$script:PinnedGitExecutable
         $env:HOME=$isolatedHome;$env:GIT_CONFIG_GLOBAL=$isolatedGlobal
         try{
             $accepted=New-PinnedAuthority (Join-Path $TestDrive 'origin-accepted') $commit $sourceUrl -AllowFileProtocol
@@ -1024,6 +1118,8 @@ $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=$Token
             [IO.File]::WriteAllText($mutant,$mutantText,[Text.UTF8Encoding]::new($false))
             . $mutant -DefineFunctionsOnly
             $script:PinnedGitHooksPath=$savedHooks
+            $script:PinnedGitExecutable=$savedGitExecutable
+            Initialize-PinnedGitDeadline prepare
             $mutated=New-PinnedAuthority (Join-Path $TestDrive 'origin-mutated') $commit $sourceUrl -AllowFileProtocol
             {Invoke-StandardCoreGit -RepositoryRoot $mutated.Root -WorkingDirectory $mutated.Root `
                     -Arguments @('config','--local','--get-all','remote.origin.url')}|Should Throw 'Git source binding command failed'
@@ -1031,12 +1127,15 @@ $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=$Token
             $env:HOME=$savedHome;$env:GIT_CONFIG_GLOBAL=$savedGlobal;$env:PATH=$savedPath
             . $script:BootstrapPath -DefineFunctionsOnly
             $script:PinnedGitHooksPath=$savedHooks
+            $script:PinnedGitExecutable=$savedGitExecutable
+            Initialize-PinnedGitDeadline prepare
         }
     }
 
     # Scenario: An acquired authority worktree is modified, extended, or truncated after checkout.
     # Purpose: Revalidation rejects changed bytes, extra files, and missing files before another phase runs.
     It 'InterT80_rejects_authority_byte_extra_and_missing_file_drift' {
+        Initialize-PinnedGitDeadline prepare
         $source=Join-Path $TestDrive 'tree-source'
         $commit=New-AuthorityFixture $source
         $acquired=New-PinnedAuthority (Join-Path $TestDrive 'tree-acquired') $commit (ConvertTo-FixtureFileUrl $source) -AllowFileProtocol
@@ -1054,6 +1153,7 @@ $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=$Token
     # Scenario: Authority trees carry Git link or gitlink modes.
     # Purpose: Symlinks and submodules never become executable authority bytes.
     It 'InterT90_rejects_symlink_and_submodule_tree_modes' {
+        Initialize-PinnedGitDeadline prepare
         foreach($mode in @('120000','160000')){
             $source=Join-Path $TestDrive "unsafe-$mode"
             $base=New-AuthorityFixture $source

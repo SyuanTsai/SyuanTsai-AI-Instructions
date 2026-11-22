@@ -1,5 +1,6 @@
 $script:RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $script:RolloutModule = Join-Path $script:RepositoryRoot 'scripts\ai-instructions-rollout.psm1'
+$script:IsWindowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 
 function Invoke-RolloutTestGit {
     param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string[]] $Arguments)
@@ -13,6 +14,18 @@ function Set-RolloutTestText {
     $parent = Split-Path -Parent $Path
     if (-not [string]::IsNullOrWhiteSpace($parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
     [System.IO.File]::WriteAllText($Path,$Value,(New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Set-RolloutTestUnixUserExecute {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $existingMode = [IO.File]::GetUnixFileMode($Path)
+    $requestedMode = [IO.UnixFileMode](([uint32]$existingMode) -bor ([uint32][IO.UnixFileMode]::UserExecute))
+    [IO.File]::SetUnixFileMode($Path, $requestedMode)
+    $verifiedMode = [IO.File]::GetUnixFileMode($Path)
+    if ((([uint32]$verifiedMode) -band ([uint32][IO.UnixFileMode]::UserExecute)) -eq 0) {
+        throw "User execute permission was not applied to rollout test Git shim: $Path"
+    }
 }
 
 function New-RolloutTestRepository {
@@ -30,9 +43,17 @@ function New-RolloutTestRepository {
 }
 
 function New-RolloutTestBootstrap {
-    param([Parameter(Mandatory = $true)][string] $Path,[switch] $MutateProduct)
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [switch] $MutateProduct,
+        [switch] $MutateClaudeRule
+    )
     $mutation = if ($MutateProduct) {
         "[System.IO.File]::AppendAllText((Join-Path `$TargetRoot 'product.txt'),'drift')"
+    }
+    else { '' }
+    $claudeMutation = if ($MutateClaudeRule) {
+        "[System.IO.File]::AppendAllText((Join-Path `$TargetRoot '.claude\AI-Rules\Testing.md'),'drift')"
     }
     else { '' }
     Set-RolloutTestText -Path $Path -Value @"
@@ -42,13 +63,60 @@ if (Test-Path -LiteralPath (Join-Path `$TargetRoot 'fail-after-drift.rollout')) 
     [System.IO.File]::AppendAllText((Join-Path `$TargetRoot 'product.txt'),'failed drift')
     throw 'simulated failure after product drift'
 }
+if (-not (Test-Path -LiteralPath (Join-Path `$TargetRoot 'omit-claude-ownership-evidence.rollout'))) {
+    & git -C `$TargetRoot ls-files --error-unmatch -- CLAUDE.md 2>&1 | Out-Null
+    `$projectOwned = `$LASTEXITCODE -eq 0
+    `$protectedPaths = @(if (`$projectOwned) { @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses') })
+    `$evidence = [ordered]@{
+        schemaVersion = 1
+        repository = [System.IO.Path]::GetFullPath(`$TargetRoot).TrimEnd([char[]]@('\','/'))
+        projectOwned = `$projectOwned
+        protectedPaths = `$protectedPaths
+    }
+    Write-Output ('AI instructions Claude ownership evidence: ' + (`$evidence | ConvertTo-Json -Compress))
+}
 $mutation
+$claudeMutation
 if (Test-Path -LiteralPath (Join-Path `$TargetRoot 'remediate.rollout')) {
     Write-Output 'Backed up and migrated tracked Agent artifacts: AGENTS.md, .github/copilot-instructions.md. Backup: C:\safe-backup'
     Write-Output 'Agent artifact remediation commit created: 0123456789012345678901234567890123456789'
 }
 Write-Output 'AI instructions synchronized as local ignored runtime artifacts without Git commit: AGENTS.md'
 "@
+}
+
+function New-RolloutTestGitShim {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][ValidateSet('inside_worktree','symbolic_HEAD','origin')][string] $FailurePoint,
+        [Parameter(Mandatory = $true)][int] $ExitCode
+    )
+    if ($script:IsWindowsHost) {
+        $failureCommand = switch ($FailurePoint) {
+            'inside_worktree' { 'if /I "%~3 %~4"=="rev-parse --is-inside-work-tree" exit /b {0}' -f $ExitCode }
+            'symbolic_HEAD' { 'if /I "%~3 %~4 %~5 %~6"=="symbolic-ref -q --short HEAD" exit /b {0}' -f $ExitCode }
+            'origin' { 'if /I "%~3 %~4 %~5"=="remote get-url origin" exit /b {0}' -f $ExitCode }
+        }
+        Set-RolloutTestText -Path $Path -Value @"
+@echo off
+$failureCommand
+git %*
+exit /b %ERRORLEVEL%
+"@
+        return
+    }
+
+    $failureCommand = switch ($FailurePoint) {
+        'inside_worktree' { 'if [ "$3 $4" = "rev-parse --is-inside-work-tree" ]; then exit {0}; fi' -f $ExitCode }
+        'symbolic_HEAD' { 'if [ "$3 $4 $5 $6" = "symbolic-ref -q --short HEAD" ]; then exit {0}; fi' -f $ExitCode }
+        'origin' { 'if [ "$3 $4 $5" = "remote get-url origin" ]; then exit {0}; fi' -f $ExitCode }
+    }
+    Set-RolloutTestText -Path $Path -Value @"
+#!/bin/sh
+$failureCommand
+exec git "`$@"
+"@
+    Set-RolloutTestUnixUserExecute -Path $Path
 }
 
 Describe 'AI instructions all-repository rollout' {
@@ -75,6 +143,28 @@ Describe 'AI instructions all-repository rollout' {
             $remediation | Should Be $case.Expected
             $rollout | Should Be $case.Expected
             $rollout | Should Be $remediation
+        }
+        $expectedRepository = Join-Path $TestDrive 'expected-repository'
+        foreach ($mismatch in @(
+            @{
+                Line='AI instructions Claude ownership evidence: {"schemaVersion":1,"repository":"C:\\different-repository","projectOwned":true,"protectedPaths":["CLAUDE.md",".claude/AI-Rules",".claude/ai-instructions-licenses"]}'
+                Reason='repository'
+            },
+            @{
+                Line=('AI instructions Claude ownership evidence: {"schemaVersion":2,"repository":"' + ($expectedRepository.Replace('\','\\')) + '","projectOwned":false,"protectedPaths":[]}')
+                Reason='schemaVersion'
+            },
+            @{
+                Line=('AI instructions Claude ownership evidence: {"schemaVersion":1,"repository":"' + ($expectedRepository.Replace('\','\\')) + '","projectOwned":false,"protectedPaths":[".claude/AI-Rules"]}')
+                Reason='protected paths'
+            }
+        )) {
+            $parsed = & $rolloutModule {
+                param($line,$repository)
+                Get-RolloutClaudeOwnershipEvidence -OutputLines @($line) -ExpectedRepository $repository
+            } $mismatch.Line $expectedRepository
+            $parsed.Succeeded | Should Be $false
+            [string]$parsed.FailureReason | Should Match $mismatch.Reason
         }
     }
 
@@ -114,6 +204,114 @@ Describe 'AI instructions all-repository rollout' {
             Remove-Module $fixtureModule -Force -ErrorAction SilentlyContinue
             Import-Module $script:RolloutModule -Force
         }
+    }
+
+    # Scenario: Repository discovery receives negative Windows process exit codes from each Git query that has a normal alternate result.
+    # Purpose: Prevent launch failures and NTSTATUS values from being interpreted as non-repositories, detached or unborn HEADs, missing origins, or absent HEAD trees.
+    It 'UnitT92_rejects_negative_<Case>_Git_exit_code_<ExitCodeLabel>' -TestCases @(
+        foreach ($exitCase in @(
+            @{ ExitCode=-1; ExitCodeLabel='minus_1' },
+            @{ ExitCode=-1073741510; ExitCodeLabel='ntstatus_1073741510' }
+        )) {
+            foreach ($caseName in @('inside_worktree','symbolic_HEAD','verified_HEAD','origin','tracked_HEAD')) {
+                @{ Case=$caseName; ExitCode=$exitCase.ExitCode; ExitCodeLabel=$exitCase.ExitCodeLabel }
+            }
+        }
+    ) {
+        param($Case,$ExitCode,$ExitCodeLabel)
+        $tokens=$null;$parseErrors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($script:RolloutModule,[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count | Should Be 0
+        $functionName=if($Case-ceq'tracked_HEAD'){'Get-RolloutTrackedReservedPaths'}else{'Resolve-RolloutRepositoryIdentity'}
+        $definition=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$functionName},$true))[0].Extent.Text
+        $message=& {
+            param($text,$name,$caseName,$injectedExitCode,$repository)
+            Invoke-Expression $text
+            function Get-RolloutGitExitCode {
+                param([string]$Repository,[string]$GitExecutable,[string[]]$Arguments)
+                $query=$Arguments -join ' '
+                if($caseName-ceq'inside_worktree'-and$query-ceq'rev-parse --is-inside-work-tree'){return $injectedExitCode}
+                if($caseName-ceq'symbolic_HEAD'-and$query-ceq'symbolic-ref -q --short HEAD'){return $injectedExitCode}
+                if($caseName-ceq'verified_HEAD'-and$query-ceq'rev-parse --verify --quiet HEAD'){return $injectedExitCode}
+                if($caseName-ceq'origin'-and$query-ceq'remote get-url origin'){return $injectedExitCode}
+                if($caseName-ceq'tracked_HEAD'-and$query-ceq'rev-parse --verify --quiet HEAD'){return $injectedExitCode}
+                if($query-ceq'symbolic-ref -q --short HEAD' -and $caseName-ceq'verified_HEAD'){return 1}
+                return 0
+            }
+            function Invoke-RolloutGit {
+                param([string]$Repository,[string]$GitExecutable,[string[]]$Arguments)
+                switch($Arguments -join ' '){
+                    'rev-parse --is-inside-work-tree' { return 'true' }
+                    'rev-parse --show-toplevel' { return $repository }
+                    'rev-parse --git-common-dir' { return '.git' }
+                    'symbolic-ref -q --short HEAD' { return 'main' }
+                    'rev-parse --verify --quiet HEAD' { return ('a'*40) }
+                    'remote get-url origin' { return 'https://example.com/team/product.git' }
+                    '-c core.quotePath=true ls-files' { return 'AGENTS.md' }
+                    default { return @() }
+                }
+            }
+            function Get-RolloutFullPath { param([string]$Path);return [IO.Path]::GetFullPath($Path) }
+            function ConvertFrom-RolloutGitPath { param([string]$Path);return $Path }
+            function Test-RolloutReservedAgentPath { param([string]$Path,[string[]]$ProtectedPaths);return $true }
+            try {
+                if($name-ceq'Get-RolloutTrackedReservedPaths'){
+                    Get-RolloutTrackedReservedPaths -Repository $repository -GitExecutable git -ProtectedPaths @() | Out-Null
+                }
+                else {
+                    Resolve-RolloutRepositoryIdentity -Path $repository -GitExecutable git | Out-Null
+                }
+                $null
+            }
+            catch { $_.Exception.Message }
+        } $definition $functionName $Case $ExitCode $TestDrive
+        $message | Should Match ([regex]::Escape([string]$ExitCode))
+    }
+
+    # Scenario: Public repository discovery receives an undefined negative exit code from a Git identity query.
+    # Purpose: Ensure discovery fails closed instead of reporting zero discovered repositories and zero failures.
+    # Register only on the native host because negative and NTSTATUS native process exit codes are Windows semantics.
+    if ($script:IsWindowsHost) {
+      It 'UnitT93_rethrows_discovery_<Case>_Git_exit_code_<ExitCodeLabel>' -TestCases @(
+        foreach ($exitCase in @(
+            @{ ExitCode=-1; ExitCodeLabel='minus_1' },
+            @{ ExitCode=-1073741510; ExitCodeLabel='ntstatus_1073741510' }
+        )) {
+            foreach ($caseName in @('inside_worktree','symbolic_HEAD','origin')) {
+                @{ Case=$caseName; ExitCode=$exitCase.ExitCode; ExitCodeLabel=$exitCase.ExitCodeLabel }
+            }
+        }
+    ) {
+        param($Case,$ExitCode,$ExitCodeLabel)
+        $repository = Join-Path $TestDrive ("discovery-$Case-$ExitCodeLabel")
+        New-RolloutTestRepository -Path $repository
+        $fakeGit = Join-Path $TestDrive ("fake-git-$Case-$ExitCodeLabel.cmd")
+        New-RolloutTestGitShim -Path $fakeGit -FailurePoint $Case -ExitCode $ExitCode
+
+        $failure = $null
+        try { Get-AiInstructionsRepositoryRoots -SearchRoots @($repository) -GitExecutable $fakeGit | Out-Null }
+        catch { $failure = $_.Exception }
+
+        $failure | Should Not BeNullOrEmpty
+        [string]$failure.Message | Should Match ([regex]::Escape([string]$ExitCode))
+      }
+    }
+
+    # Scenario: Public repository discovery finds a .git marker for which Git returns documented fatal exit code 128.
+    # Purpose: Preserve the existing behavior that skips an unusable repository marker without failing rollout.
+    It 'UnitT94_skips_discovery_marker_when_inside_worktree_returns_128' {
+        $candidate = Join-Path $TestDrive 'invalid-git-marker'
+        New-Item -ItemType Directory -Force -Path $candidate | Out-Null
+        Set-RolloutTestText -Path (Join-Path $candidate '.git') -Value 'invalid marker'
+        $fakeGit = Join-Path $TestDrive 'fake-git-fatal-128.cmd'
+        New-RolloutTestGitShim -Path $fakeGit -FailurePoint inside_worktree -ExitCode 128
+
+        $failure = $null
+        try { $repositories = @(Get-AiInstructionsRepositoryRoots -SearchRoots @($candidate) -GitExecutable $fakeGit) }
+        catch { $failure = $_.Exception }
+
+        $failure | Should BeNullOrEmpty
+        @($repositories).Count | Should Be 0
     }
 
     # Given: A fixed-drive-shaped search root includes a product, authority clone, dependency cache, temp fixture, and official global Skill clone.
@@ -182,30 +380,38 @@ Describe 'AI instructions all-repository rollout' {
         [string]$result.Backups[0].Path | Should Be 'C:\safe-backup'
     }
 
-    # Given: A bootstrap reports success but leaves custom FELO content and a tracked reserved artifact.
+    # Given: One bootstrap reports success but leaves custom FELO content and a tracked reserved artifact, while another repository owns its Claude family.
     # When: The required post-rollout scan runs.
-    # Then: The repository is failed with both unsafe postconditions instead of being counted synchronized.
+    # Then: The unsafe repository fails, while project-owned Claude rules do not count as reserved pollution.
     It 'InterT40_fails_post_scan_when_custom_felo_or_tracked_reserved_artifacts_remain' {
-        $repository = Join-Path $TestDrive 'unsafe-postcondition'
+        $searchRoot = Join-Path $TestDrive 'postconditions'
+        $repository = Join-Path $searchRoot 'unsafe-postcondition'
+        $projectOwnedRepository = Join-Path $searchRoot 'project-owned-claude'
         New-RolloutTestRepository -Path $repository
+        New-RolloutTestRepository -Path $projectOwnedRepository
         Set-RolloutTestText -Path (Join-Path $repository 'AGENTS.md') -Value "tracked agent`n"
         Set-RolloutTestText -Path (Join-Path $repository '.agents\skills\search-with-felo\SKILL.md') -Value "retired`n"
         Invoke-RolloutTestGit -Repository $repository -Arguments @('add','--','AGENTS.md') | Out-Null
         Invoke-RolloutTestGit -Repository $repository -Arguments @('commit','--quiet','-m','tracked agent') | Out-Null
+        Set-RolloutTestText -Path (Join-Path $projectOwnedRepository 'CLAUDE.md') -Value "project-owned Claude`n"
+        Set-RolloutTestText -Path (Join-Path $projectOwnedRepository '.claude\AI-Rules\Testing.md') -Value "project rule`n"
+        Invoke-RolloutTestGit -Repository $projectOwnedRepository -Arguments @('add','--','CLAUDE.md','.claude/AI-Rules/Testing.md') | Out-Null
+        Invoke-RolloutTestGit -Repository $projectOwnedRepository -Arguments @('commit','--quiet','-m','project-owned Claude') | Out-Null
         $bootstrap = Join-Path $TestDrive 'unsafe-bootstrap.ps1'
         New-RolloutTestBootstrap -Path $bootstrap
 
-        $result = Invoke-AiInstructionsRollout -SearchRoots @($repository) -BootstrapPath $bootstrap
+        $result = Invoke-AiInstructionsRollout -SearchRoots @($searchRoot) -BootstrapPath $bootstrap
 
-        $result.RepositoriesSynchronized | Should Be 0
+        $result.RepositoriesSynchronized | Should Be 1
         @($result.CustomFeloActiveArtifactsRemaining).Count | Should Be 1
         @($result.TrackedReservedArtifactsRemaining).Count | Should Be 1
+        @($result.TrackedReservedArtifactsRemaining | Where-Object Repository -eq ([IO.Path]::GetFullPath($projectOwnedRepository))).Count | Should Be 0
         [string]$result.Failed[0].Reason | Should Match 'post-rollout verification'
     }
 
-    # Given: A defective bootstrap changes a production file while synchronizing Agent content.
+    # Given: A defective bootstrap changes a production file, and another changes a tracked project-owned Claude rule.
     # When: Rollout compares non-Agent Git state before and after the call.
-    # Then: It records drift and fails the repository without attempting any push.
+    # Then: It records both kinds of drift and fails both repositories without attempting any push.
     It 'InterT50_detects_non_agent_git_drift' {
         $repository = Join-Path $TestDrive 'product-drift'
         New-RolloutTestRepository -Path $repository
@@ -217,6 +423,23 @@ Describe 'AI instructions all-repository rollout' {
         $result.RepositoriesSynchronized | Should Be 0
         @($result.NonAgentGitDrift).Count | Should Be 1
         [string]$result.Failed[0].Reason | Should Match 'non-Agent Git state changed'
+
+        $claudeRepository = Join-Path $TestDrive 'project-owned-claude-drift'
+        New-RolloutTestRepository -Path $claudeRepository
+        Set-RolloutTestText -Path (Join-Path $claudeRepository 'CLAUDE.md') -Value "project-owned Claude`n"
+        Set-RolloutTestText -Path (Join-Path $claudeRepository '.claude\AI-Rules\Testing.md') -Value "project rule`n"
+        Invoke-RolloutTestGit -Repository $claudeRepository -Arguments @('add','--','CLAUDE.md','.claude/AI-Rules/Testing.md') | Out-Null
+        Invoke-RolloutTestGit -Repository $claudeRepository -Arguments @('commit','--quiet','-m','project-owned Claude') | Out-Null
+        $claudeBootstrap = Join-Path $TestDrive 'mutating-claude-bootstrap.ps1'
+        New-RolloutTestBootstrap -Path $claudeBootstrap -MutateClaudeRule
+
+        $claudeResult = Invoke-AiInstructionsRollout -SearchRoots @($claudeRepository) -BootstrapPath $claudeBootstrap
+
+        $claudeResult.RepositoriesSynchronized | Should Be 0
+        @($claudeResult.NonAgentGitDrift).Count | Should Be 1
+        @($claudeResult.NonAgentGitDrift[0].After | Where-Object { $_ -match '\.claude/AI-Rules/Testing\.md' }).Count | Should Be 1
+        @($claudeResult.TrackedReservedArtifactsRemaining).Count | Should Be 0
+        [string]$claudeResult.Failed[0].Reason | Should Match 'non-Agent Git state changed'
         (Get-Content -Raw -LiteralPath $script:RolloutModule) | Should Not Match '(?m)^\s*&?\s*git\s+push\b'
     }
 
@@ -224,20 +447,29 @@ Describe 'AI instructions all-repository rollout' {
     # When: Rollout records the failed repository and continues.
     # Then: Failure-path verification still reports non-Agent drift and remaining custom FELO artifacts.
     It 'InterT60_verifies_repository_state_even_when_bootstrap_throws' {
-        $repository = Join-Path $TestDrive 'failed-with-drift'
+        $searchRoot = Join-Path $TestDrive 'failed-verification'
+        $repository = Join-Path $searchRoot 'failed-with-drift'
+        $missingEvidenceRepository = Join-Path $searchRoot 'missing-evidence'
         New-RolloutTestRepository -Path $repository
+        New-RolloutTestRepository -Path $missingEvidenceRepository
         Set-RolloutTestText -Path (Join-Path $repository 'fail-after-drift.rollout') -Value 'fail'
         Set-RolloutTestText -Path (Join-Path $repository '.agents\skills\search-with-felo\SKILL.md') -Value "retired`n"
+        Set-RolloutTestText -Path (Join-Path $missingEvidenceRepository 'omit-claude-ownership-evidence.rollout') -Value 'omit'
         $bootstrap = Join-Path $TestDrive 'failure-drift-bootstrap.ps1'
         New-RolloutTestBootstrap -Path $bootstrap
 
-        $result = Invoke-AiInstructionsRollout -SearchRoots @($repository) -BootstrapPath $bootstrap
+        $result = Invoke-AiInstructionsRollout -SearchRoots @($searchRoot) -BootstrapPath $bootstrap
 
         $result.RepositoriesSynchronized | Should Be 0
         @($result.NonAgentGitDrift).Count | Should Be 1
         @($result.CustomFeloActiveArtifactsRemaining).Count | Should Be 1
-        [string]$result.Failed[0].Reason | Should Match 'simulated failure after product drift'
-        [string]$result.Failed[0].Reason | Should Match 'non-Agent Git state changed'
+        @($result.Failed).Count | Should Be 2
+        $bootstrapFailure = @($result.Failed | Where-Object Repository -eq ([IO.Path]::GetFullPath($repository)))[0]
+        [string]$bootstrapFailure.Reason | Should Match 'simulated failure after product drift'
+        [string]$bootstrapFailure.Reason | Should Match 'non-Agent Git state changed'
+        [string]$bootstrapFailure.Reason | Should Match 'Claude ownership evidence'
+        $evidenceFailure = @($result.Failed | Where-Object Repository -eq ([IO.Path]::GetFullPath($missingEvidenceRepository)))[0]
+        [string]$evidenceFailure.Reason | Should Match 'Claude ownership evidence'
     }
 
     # Given: The caller relies on rollout's default fixed-drive discovery.
@@ -261,7 +493,9 @@ Describe 'AI instructions all-repository rollout' {
     # Given: Default discovery obtains ready fixed-drive roots from the operating system.
     # When: Those roots pass through rollout path canonicalization.
     # Then: Each value remains an absolute filesystem root instead of becoming drive-relative (for example, C:).
-    It 'InterT75_preserves_absolute_fixed_drive_roots' {
+    # Register only on the native host because fixed-drive enumeration is a Windows drive model.
+    if ($script:IsWindowsHost) {
+      It 'InterT75_preserves_absolute_fixed_drive_roots' {
         $roots = @(Get-AiInstructionsFixedSearchRoots)
 
         $roots.Count | Should BeGreaterThan 0
@@ -269,6 +503,7 @@ Describe 'AI instructions all-repository rollout' {
             $expectedRoot = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath([string]$root))
             [string]$root | Should Be $expectedRoot
         }
+      }
     }
 
     # Given: A reserved Agent artifact remains tracked in HEAD but already has a staged index deletion.
@@ -278,7 +513,8 @@ Describe 'AI instructions all-repository rollout' {
         $repository = Join-Path $TestDrive 'head-only-tracked-agent'
         New-RolloutTestRepository -Path $repository
         Set-RolloutTestText -Path (Join-Path $repository 'AGENTS.md') -Value "tracked agent`n"
-        Invoke-RolloutTestGit -Repository $repository -Arguments @('add','--','AGENTS.md') | Out-Null
+        Set-RolloutTestText -Path (Join-Path $repository '.claude\AI-Rules\Testing.md') -Value "unowned Claude rule`n"
+        Invoke-RolloutTestGit -Repository $repository -Arguments @('add','--','AGENTS.md','.claude/AI-Rules/Testing.md') | Out-Null
         Invoke-RolloutTestGit -Repository $repository -Arguments @('commit','--quiet','-m','tracked agent') | Out-Null
         Invoke-RolloutTestGit -Repository $repository -Arguments @('rm','--cached','--','AGENTS.md') | Out-Null
         $bootstrap = Join-Path $TestDrive 'head-only-bootstrap.ps1'
@@ -287,7 +523,14 @@ Describe 'AI instructions all-repository rollout' {
         $result = Invoke-AiInstructionsRollout -SearchRoots @($repository) -BootstrapPath $bootstrap
 
         $result.RepositoriesSynchronized | Should Be 0
-        @($result.TrackedReservedArtifactsRemaining).Count | Should Be 1
-        [string]$result.TrackedReservedArtifactsRemaining[0].Path | Should Be 'AGENTS.md'
+        @($result.TrackedReservedArtifactsRemaining).Count | Should Be 2
+        @($result.TrackedReservedArtifactsRemaining.Path) | Should Contain 'AGENTS.md'
+        @($result.TrackedReservedArtifactsRemaining.Path) | Should Contain '.claude/AI-Rules/Testing.md'
+        $rolloutModule = Get-Module ai-instructions-rollout
+        $reservedWithExplicitUnownedEvidence = @(& $rolloutModule {
+            param($repo)
+            Get-RolloutTrackedReservedPaths -Repository $repo -GitExecutable 'git' -ProtectedPaths @()
+        } $repository)
+        @($reservedWithExplicitUnownedEvidence) | Should Contain '.claude/AI-Rules/Testing.md'
     }
 }

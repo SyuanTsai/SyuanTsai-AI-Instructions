@@ -2468,7 +2468,7 @@ public sealed class C245SlowTrickleStream : Stream {
         Mock Assert-Command { $script:tailPython }
         Mock Assert-NoConflictingPipEnvironment { }
         Mock Assert-NoConflictingPythonEnvironment { }
-        Set-Item Function:Get-SkillSpectorApprovedSources -Value { [pscustomobject]@{active='1.0.0';activeEntry=[pscustomobject]@{version='1.0.0';releaseTag='v1.0.0';releaseCommit=('a'*40);wheelFileName='skillspector-1.0.0-py3-none-any.whl';wheelSha256=$script:tailHash;analyzerSha256=('b'*64);parserCorrection='none'}} }
+        Set-Item Function:Get-SkillSpectorApprovedSources -Value { [pscustomobject]@{active='1.0.0';activeEntry=[pscustomobject]@{version='1.0.0';releaseTag='v1.0.0';releaseCommit=('a'*40);wheelFileName='skillspector-1.0.0-py3-none-any.whl';wheelSha256=$script:tailHash;analyzerSha256=('b'*64);consoleEntryPoint='skillspector.cli:app';parserCorrection='none'}} }
         Mock Get-GitHubHeaders { @{} }
         Mock Add-ProcessPathValue { }
         Mock Get-PythonWheelMetadata { [pscustomobject]@{ name='skillspector'; version='1.0.0'; requiresDist=@() } }
@@ -2491,7 +2491,7 @@ public sealed class C245SlowTrickleStream : Stream {
             [IO.File]::WriteAllText((Join-Path $script:tailWork 'offline-backtracking-plan.json'), '{"fixture":"completed-plan"}')
             [IO.File]::WriteAllText((Join-Path $script:tailWork 'candidate-inventory.json'), ('{"schemaVersion":1,"inventorySha256":"' + ('e' * 64) + '","entries":[{"file":"verified-candidate.whl"}],"rejectedCandidates":[]}'))
             $script:tailInstall = (Get-ChildItem -LiteralPath $script:tailRoot -Directory | Where-Object Name -match '^ss-[0-9a-f]{12}$').FullName
-            @{ manifest=@{ closureSha256=('b'*64) }; executablePath=(Join-Path $script:tailInstall 'fixture'); executableSha256=('c'*64); installedClosureSha256=('d'*64); consoleEntryPoint='fixture:main'; installedMetadataVerification='fixture'; resolutionEvidence=@{} }
+            @{ manifest=@{ closureSha256=('b'*64) }; executablePath=(Join-Path $script:tailInstall 'fixture'); executableSha256=('c'*64); installedClosureSha256=('d'*64); consoleEntryPoint='skillspector.cli:app'; installedMetadataVerification='fixture'; resolutionEvidence=@{} }
         }
         Mock Remove-BoundedRunOwnedDirectory {
             & $script:tailCleanup -Path $Path -AllowedRoot $AllowedRoot -LeafPattern $LeafPattern
@@ -3323,6 +3323,7 @@ public sealed class C245NonCooperativeStream : Stream {
             schemaVersion=1;toolName='skillspector';source='NVIDIA/SkillSpector';channel='approved-source-registry';frozenForRun=$true
             resolvedVersion=[string]$entry.version;resolvedIdentity=('github:NVIDIA/SkillSpector@'+[string]$entry.releaseTag+'#commit='+[string]$entry.releaseCommit+'#asset=sha256:'+[string]$entry.wheelSha256+'#fixture')
             identityKind='release-commit-asset-metadata-dependency-closure-and-executable';approvedSourceId=[string]$registry.active;parserCorrection=[string]$entry.parserCorrection
+            consoleEntryPoint=[string]$entry.consoleEntryPoint
             installRoot=$toolRoot;executablePath=$executablePath;executableSha256=$executableSha256;installedClosureSha256=(Get-AuthorityDirectoryClosureSha256 -Path $toolRoot)
             launcher=$launcher;launcherDigestSha256=(Get-AuthorityLauncherDigest -Launcher $launcher);dependencyClosureSha256=('a'*64);dependencyClosure=@([pscustomobject]@{name='skillspector';version=[string]$entry.version})
         }
@@ -3331,8 +3332,8 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-InstalledAuthorityToolReceipt -Receipt $receipt -ToolName $expectedToolName -ExpectedSource 'NVIDIA/SkillSpector' -InstallRoot $expectedInstallRoot | Out-Null
         if($expectedInstallRoot -cne $installRoot -or $expectedToolName -cne 'skillspector') { throw 'Authority receipt caller parameters changed after resolver loading.' }
 
-        $retained=$registry.entries.'2.13.0'
-        $receipt.approvedSourceId='2.13.0'
+        $retained=$registry.entries.'2.13.4'
+        $receipt.approvedSourceId='2.13.4'
         $receipt.parserCorrection=[string]$retained.parserCorrection
         $receipt.resolvedVersion=[string]$retained.version
         $receipt.resolvedIdentity='github:NVIDIA/SkillSpector@'+[string]$retained.releaseTag+'#commit='+[string]$retained.releaseCommit+'#asset=sha256:'+[string]$retained.wheelSha256+'#fixture'
@@ -3340,6 +3341,38 @@ public sealed class C245NonCooperativeStream : Stream {
         try { Assert-InstalledAuthorityToolReceipt -Receipt $receipt -ToolName 'skillspector' -ExpectedSource 'NVIDIA/SkillSpector' -InstallRoot $installRoot | Out-Null }
         catch { $failure=$_.Exception.Message }
         Assert-Match $failure 'active approved source entry' 'A retained non-active SkillSpector source must fail closed.'
+    }
+
+    # Scenario: An active SkillSpector receipt reports a console entry point different from its approved source entry.
+    # Purpose: Fail closed when installed entry-point metadata drifts even if every other approved-source identity matches.
+    It 'UnitT33c_rejects_a_SkillSpector_console_entry_point_not_bound_to_its_approved_entry' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+
+        $installRoot=Join-Path $TestDrive 'skillspector-entry-point-install-root'
+        $toolRoot=Join-Path $installRoot 'skillspector'
+        [void](New-Item -ItemType Directory -Path $toolRoot -Force)
+        $executablePath=Join-Path $toolRoot 'skillspector.bin'
+        Write-TestUtf8File -Path $executablePath -Text 'skillspector executable fixture'
+        $executableSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $executablePath).Hash.ToLowerInvariant()
+        $launcher=[pscustomobject][ordered]@{kind='direct-executable';shimPath=$null;shimSha256=$null;payloadPath=$null;payloadSha256=$null;runtimePath=$null;runtimeSha256=$null}
+        $registry=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
+        $entry=$registry.entries.($registry.active)
+        $receipt=[pscustomobject][ordered]@{
+            schemaVersion=1;toolName='skillspector';source='NVIDIA/SkillSpector';channel='approved-source-registry';frozenForRun=$true
+            resolvedVersion=[string]$entry.version;resolvedIdentity=('github:NVIDIA/SkillSpector@'+[string]$entry.releaseTag+'#commit='+[string]$entry.releaseCommit+'#asset=sha256:'+[string]$entry.wheelSha256+'#fixture')
+            identityKind='release-commit-asset-metadata-dependency-closure-and-executable';approvedSourceId=[string]$registry.active;parserCorrection=[string]$entry.parserCorrection
+            consoleEntryPoint='skillspector.cli:app'
+            installRoot=$toolRoot;executablePath=$executablePath;executableSha256=$executableSha256;installedClosureSha256=(Get-AuthorityDirectoryClosureSha256 -Path $toolRoot)
+            launcher=$launcher;launcherDigestSha256=(Get-AuthorityLauncherDigest -Launcher $launcher);dependencyClosureSha256=('a'*64);dependencyClosure=@([pscustomobject]@{name='skillspector';version=[string]$entry.version})
+        }
+        foreach($mutation in @('mismatched','missing')) {
+            $candidate=Copy-TestJsonObject -Value $receipt
+            if($mutation -ceq 'missing') {$candidate.PSObject.Properties.Remove('consoleEntryPoint')}
+            $failure=$null
+            try { Assert-InstalledAuthorityToolReceipt -Receipt $candidate -ToolName 'skillspector' -ExpectedSource 'NVIDIA/SkillSpector' -InstallRoot $installRoot | Out-Null }
+            catch { $failure=$_.Exception.Message }
+            Assert-Match $failure 'does not match its approved source entry' "A $mutation SkillSpector console entry point must fail closed."
+        }
     }
 
     # Scenario: A resolver can emit a plausible Go runtime identity for a different executable or run.
@@ -4061,7 +4094,10 @@ public sealed class C245NonCooperativeStream : Stream {
             'A pin or immutable version update alone MUST NOT transfer ownership',
             'Source-copy equivalence or removal is deferred to downstream adoption',
             'identified item by item', 'normal required three-platform Core CI gate',
-            'Historically, the Code trial protected a repository-local reader set'
+            'Historically, the Code trial protected a repository-local reader set',
+            'Candidate-relative 模式仍只接受 verified tracked snapshot',
+            'Trusted frozen 模式只在 explicit SourceValidation',
+            '啟動前、啟動後及 execution 結束後'
         )) { if(-not $standard.Contains($required)){throw "Central validation ownership contract is missing '$required'."} }
         foreach($required in @('Windows、Linux、macOS 各一個 leg', '缺少 receipt', 'MUST NOT** 被宣稱為三平台 required 驗證')) {
             if(-not $standard.Contains($required)){throw "Standard diagnostic contract is missing '$required'."}
@@ -4648,6 +4684,7 @@ public sealed class C245NonCooperativeStream : Stream {
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
         $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
         $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+        $contract = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardValidationContractPath | ConvertFrom-Json
         . $script:AuthorityGatePath -DefineFunctionsOnly
 
         Assert-AuthoritySchemaInstance -Value $policy -Schema $schema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $true -Message 'Canonical validation/security gate policy must be schema-valid.'
@@ -4765,6 +4802,14 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-Equal $policy.security.aiReview.authentication 'trusted-supervisor-signed-ai-review-v1' 'AI review must require trusted-supervisor authentication.'
         Assert-ExactStringSequence $policy.security.aiReview.digestFields @('reviewFindingsSha256', 'findingDispositionSha256') 'AI review must bind both complete result digests.'
         Assert-Equal $policy.security.aiReview.attestation 'trusted-supervisor-ai-review-v1' 'AI review must use the canonical attestation type.'
+        Assert-Equal $policy.security.trustAnchors.status 'no-active-trust-anchor' 'The machine-readable authority must expose that no production trust anchor is active.'
+        Assert-Equal $policy.security.trustAnchors.supervisorStatus 'revoked' 'The historical supervisor trust anchor must remain revoked.'
+        Assert-Equal $policy.security.trustAnchors.humanApprovalStatus 'revoked' 'The historical human-approval trust anchor must remain revoked.'
+        Assert-Equal $policy.security.trustAnchors.revokedOn '2026-11-20' 'The trust-anchor revocation date must remain auditable.'
+        Assert-Equal $policy.security.trustAnchors.revocationReason 'private-key-custody-unknown' 'The trust-anchor revocation reason must remain explicit.'
+        Assert-Equal $policy.security.trustAnchors.completeLifecycle 'BLOCKED-pending-new-trust-anchor' 'CompleteLifecycle must remain blocked until a new trust anchor is established.'
+        Assert-Equal $contract.cli.lifecycleTrustAnchors.status 'no-active-trust-anchor' 'The v1 contract must publish the same no-active-anchor state.'
+        Assert-Equal $contract.cli.lifecycleTrustAnchors.completeLifecycle 'BLOCKED-pending-new-trust-anchor' 'The v1 contract must keep CompleteLifecycle blocked pending replacement trust.'
         Assert-Equal $policy.security.semanticPreflight.artifactType 'semantic-scan-preflight-v1' 'Semantic preflight must use the canonical unsigned artifact type.'
         Assert-Equal $policy.security.semanticPreflight.authentication 'unsigned-provider-output' 'Semantic preflight must remain explicitly unsigned.'
         Assert-Equal $policy.security.semanticPreflight.sourceBinding 'llm-input-equals-strict-utf8-decoding-of-verified-source-bytes' 'Semantic provider input must be bound to verified source bytes.'
@@ -4914,6 +4959,7 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-True ($coreStart -ge 0 -and $coreEnd -gt $coreStart) 'The ordinary core runner function boundary must remain explicit.'
         $coreRunner = $runner.Substring($coreStart, $coreEnd - $coreStart)
         Assert-Match $coreRunner 'Get-StandardCoreTrackedInventory' 'The ordinary core must bind candidate files through Git tracked inventory.'
+        Assert-False ($coreRunner -match 'Get-StandardValidationTrustAnchorPath|Get-StandardValidationTrustAnchorEvidence') 'The revoked historical trust anchors must not be added to ordinary core or SourceValidation.'
         Assert-Match $coreRunner 'Copy-StandardCoreTrackedSnapshot' 'The ordinary core must copy only its verified tracked inventory.'
         Assert-Match $coreRunner 'Get-StandardValidationSkillSet -CandidateRoot \$snapshotRoot' 'Active Skills must be discovered from the verified tracked-only snapshot.'
         Assert-False ($coreRunner -match 'Get-StandardValidationInventory|Copy-StandardValidationSnapshot') 'The ordinary core must not use recursive whole-root inventory or copy helpers.'
@@ -6739,9 +6785,11 @@ Describe 'SYP481 exact-fingerprint exception authority' {
     It 'UnitT10_requires_exact_baselines_and_retains_release_and_severity_policy' {
         $standard=Get-Content -Raw -Encoding UTF8 (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/skill-repository-standard.md')
         $section=[regex]::Match($standard,'(?s)#### 14\.2\.1 SkillSpector exact-fingerprint exceptions(.*?)### 14\.3').Groups[1].Value
-        foreach($required in @('skillspector-human-approved-exceptions-v1','config/skillspector-exceptions/<skillId>.baseline.json','`rules`','approved source','review.expiresOn','--baseline','suppressedFindings','suppressionReason','High／Critical **MUST NOT**','第 11 節','`releaseEligible` 不變')) {
+        foreach($required in @('skillspector-human-approved-exceptions-v1','config/skillspector-exceptions/<skillId>.baseline.json','`rules`','approved source','review.expiresOn','既有例外集合的縮減或完整移除不是新增例外，不需要 Human Approval','immutable base 與 candidate Git revisions','`100644` blob','candidate 是 base 的子集','例外集合 scope 內 disposition 為 `retain` 的路徑內容變更不受一般 retain byte-identical 規則限制','一般 retain gate 與只減不增 gate **MUST** 使用同一份 scope 定義','以 NUL byte 分割 record','scope 外的非 UTF-8 path 必須略過','無法嚴格解碼時必須 INVALID','NFKC 正規化再做 invariant lowercase','大小寫或 Unicode 變體','object key 以 Ordinal 排序','string 以解碼後的值比較','number 以原始 token 逐字比較','`0` 與 `0.0` 必須視為修改','`(skillId, rule_id, file, hash)`','修改 hash、reason','`review.expiresOn` 續期','Human Approval 的 scanner 版本轉換','candidate 版本是執行中 authority approved-sources 的 `active`','未提供 authority 的舊 gate 呼叫不得允許轉換','2026-11-20','--baseline','suppressedFindings','`line`','每個 candidate fingerprint 恰由一個 suppressed finding 使用','Candidate 可寫檔案或未綁定的中間紀錄不得作為此判定的 authority','suppressionReason','High／Critical **MUST NOT**','第 11 節','`releaseEligible` 不變')) {
             $section.Contains($required) | Should Be $true
         }
+        $capability=[regex]::Match($standard,'(?s)### 9\.5 Capability is not automatically vulnerability(.*?)## 10\.').Groups[1].Value
+        foreach($required in @('`SKILL.md` 或 `references/`','目的地 host 與用途','拆字、編碼、動態字串組合','實際目的地')){$capability.Contains($required)|Should Be $true}
     }
 }
 
@@ -6759,7 +6807,7 @@ Describe 'P11-pin consumer authority Standard contract' {
     It 'UnitT981_requires_the_consumer_gate_workflow_and_remote_boundary' {
         $root=Split-Path -Parent $PSScriptRoot
         $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
-        foreach($required in @('scripts/consumer/Invoke-ConsumerSourceGate.ps1','repositoryChecks','requiredRepositoryChecks','base bootstrap 驗證過的 authority','pull_request_target','strict_required_status_checks_policy=true','event.before','MUST NOT** 使用 App 或 environment','同一 job 內的 candidate 竄改')){$standard.Contains($required)|Should Be $true}
+        foreach($required in @('scripts/consumer/Invoke-ConsumerSourceGate.ps1','repositoryChecks','requiredRepositoryChecks','base bootstrap 驗證過的 authority','pull_request_target','strict_required_status_checks_policy=true','event.before','MUST NOT** 使用 App 或 environment','同一 job 內的 candidate 竄改','pre-authority 最小邊界','maintenance.auto','detached GC','60／300 秒','Linux/macOS 的這段 pre-authority Git 沒有獨立 process group','Assert-AuthorityTree','Authority supervisor','phaseEnvironment','credential sentinel','0／10／20／30／40','單一 PR','candidate pin template bytes','consumer-gate-v1')){$standard.Contains($required)|Should Be $true}
         foreach($retired in @('Protected PR **MUST** 繼續由 exact protected base driver 執行','受保護 reader 的固定 tuple','current governed source-reader set','normal reader PR and merged before')){$standard.Contains($retired)|Should Be $false}
     }
     # Scenario: Internal use and migration text consume the verified authority checkout.
@@ -6777,6 +6825,19 @@ Describe 'P11-pin consumer authority Standard contract' {
         foreach($required in @('cast 的 child 可確定折疊時才傳遞常值','method call 等其他不可折疊形式仍 fail closed')){
             $standard.Contains($required)|Should Be $true
         }
+    }
+}
+
+Describe 'SYP491 fixed skill-tools core path patch authority' {
+    # Scenario: The temporary @skill-tools/core compatibility patch remains part of the normative resolver contract.
+    # Purpose: Bind patch timing, exact package/hash identity, scoring invariance, fail-closed drift, and mandatory removal after an upstream release.
+    It 'UnitT10_defines_the_fixed_skill_tools_core_path_patch_contract' {
+        $root = Split-Path -Parent $PSScriptRoot
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        $standard | Should Match '安裝完成後、計算 installed closure、entry point、executable 或 runtime 等 SHA-256 之前.*MUST.*`@skill-tools/core`.*固定的路徑比較 patch'
+        $standard | Should Match '套件名稱、版本及 patch 前後的 SHA-256.*MUST.*固定值完全相符.*MUST.*fail closed'
+        $standard | Should Match 'patch.*MUST NOT.*改變評分邏輯或門檻'
+        $standard | Should Match '上游修正並升版後.*MUST.*移除此 patch.*不得只更新 pin 後沿用'
     }
 }
 

@@ -304,6 +304,10 @@
       "path": "instructions/common/base.md",
       "license": "Apache-2.0"
     },
+    {
+      "path": "instructions/common/bootstrap-section.md",
+      "license": "Apache-2.0"
+    },
 
     {
       "path": "catalog/README.md",
@@ -918,6 +922,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/trust-anchors/REVOKED.md",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/trust-anchors/human-approval-public-key.xml",
       "license": "Apache-2.0"
     },
@@ -1402,6 +1410,34 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/fixtures/syp500/skillspector-exceptions.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/syp500/skillspector-exceptions/configure-bitbucket-api-access.baseline.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/syp500/skillspector-exceptions/configure-confluence-api-access.baseline.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/syp500/skillspector-exceptions/configure-jira-api-access.baseline.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/syp500/skillspector-exceptions/manage-confluence-docs-as-code.baseline.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/syp500/skillspector-exceptions/publish-requirements-to-confluence.baseline.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/syp500/skillspector-exceptions/review-bitbucket-pull-request.baseline.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/fixtures/internal-source-continuation/syp171-skillspector-2.12.0-shape.json",
       "license": "Apache-2.0"
     },
@@ -1479,6 +1515,10 @@
     },
     {
       "path": "tests/install-ai-instructions-bootstrap.part3.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/install-ai-instructions-bootstrap.part4.Tests.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -1674,6 +1714,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": ".github/workflows/skill-tools-path-patch.yml",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "consumer/README.md",
       "license": "Apache-2.0"
     },
@@ -1710,6 +1754,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/consumer/ConsumerBootstrapSupervisor.psm1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/consumer/ConsumerGate.psm1",
       "license": "Apache-2.0"
     },
@@ -1734,7 +1782,15 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/Invoke-ConsumerRepinProbe.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/Invoke-ConsumerTransitionProbe.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/Invoke-SkillToolsPathPatchProbe.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -1747,6 +1803,10 @@
     },
     {
       "path": "tests/consumer-source-gate.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/windows-git-owned-process-shim.cs",
       "license": "Apache-2.0"
     },
     {
@@ -1763,6 +1823,22 @@
     },
     {
       "path": "tests/fixtures/consumer-transition-probe/candidate/tests/Fixture.Tests.ps1.template",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/skill-tools-path-patch/reference-missing/SKILL.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/skill-tools-path-patch/reference-present/SKILL.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/skill-tools-path-patch/reference-present/references/details.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/skill-tools-core-path-patch.Tests.ps1",
       "license": "Apache-2.0"
     },
     {

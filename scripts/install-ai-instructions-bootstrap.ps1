@@ -14,7 +14,9 @@ param(
     [string] $ExpectedUpdateChannel,
     [string] $ExpectedUpdateRef,
     [ValidateSet('v2v4','v3v5')][string] $ExpectedCurrentGeneration,
-    [ValidateSet('Auto','V2V4','V3V5')][string] $WriterSchema = 'Auto'
+    [ValidateSet('Auto','V2V4','V3V5')][string] $WriterSchema = 'Auto',
+    [string] $CapabilityEvidence,
+    [switch] $ClearCapabilityEvidence
 )
 
 if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7 -or [Environment]::Version.Major -lt 8) {
@@ -23,16 +25,24 @@ if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -l
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$projectionRuntimeAvailable = $false # P7E_TEST_FIXTURE_MARKER: production remains unavailable until production pins are installed.
-if ($WriterSchema -ceq 'V3V5' -and -not $projectionRuntimeAvailable) {
-    throw [System.InvalidOperationException]::new(
-        'Catalog v3 and the projection runtime production pin are not available. [ai-instructions-refusal-code=projection-runtime-unavailable]'
-    )
-}
 
-$bootstrapSection = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String(
-    'IyMgUmVwb3NpdG9yeSBJbnN0cnVjdGlvbnMgQm9vdHN0cmFwCgotIOWPquacieaWsOWinuaIluabtOaWsCBwcm9kdWN0aW9uIGNvZGUg55qE5a+m5L2c6KiI55Wr5pmC77yM5omN5Z+36KGMIGAkY29kZXhIb21lID0gaWYgKC1ub3QgW3N0cmluZ106OklzTnVsbE9yV2hpdGVTcGFjZSgkZW52OkNPREVYX0hPTUUpKSB7ICRlbnY6Q09ERVhfSE9NRSB9IGVsc2UgeyBKb2luLVBhdGggJEhPTUUgJy5jb2RleCcgfTsgJiAoSm9pbi1QYXRoICRjb2RleEhvbWUgJ2hvb2tzXGJvb3RzdHJhcC1haS1pbnN0cnVjdGlvbnMucHMxJylg77yb5Zau57SU5ZWP5ZWP6aGM44CB6YeQ5riF6ZyA5rGC44CB56K66KqN5oiW6Kej6YeL5ZWP6aGM77yM5Lul5Y+K5YW25LuW5bCa5pyq6ZaL5aeL6KaP5YqDIGNvZGUg55qE5bel5L2c5LiN5b6X5Z+36KGMIGJvb3RzdHJhcOOAggotIEJvb3RzdHJhcCDnrKzkuIDmrKHlpLHmlZfoi6XmmI7norrlsazmlrzmspnnrrHmiJbmrIrpmZDmi5LntZXvvIzmiY3lj6/lhYjlj5blvpfmoLjlh4blvozph43oqabkuIDmrKHvvJvlkIzkuIAgdGFzayDkuI3lvpflho3mrKHph43ot5HjgILoi6XliIbpoZ7ngrogY29tcGF0aWJpbGl0eeOAgWNvbmZpZ3VyYXRpb24g5oiWIGludGVncml0ee+8jOW/hemgiOS/neeVmSBmYWlsLWNsb3NlZCDntZDmnpzkuJTkuI3lvpfph43oqabvvJvlm57loLHliIbpoZ7oiIcgcmVtZWRpYXRpb27vvIzkuI3lvpflgb3pgKAgY2FwYWJpbGl0eSBldmlkZW5jZe+8jOS5n+S4jeW+l+WcqCBjb25zdW1lciBSZXBvc2l0b3J5IOW7uueriyB3b3JrYXJvdW5k44CCCi0gYG5vdGlmeS1vbmx5YCDnmoQgYG91dGNvbWU9YXZhaWxhYmxlYCDlj6rmmK/mm7TmlrDpgJrnn6XvvIzooajnpLogdmVyaWZpZWQgY2FuZGlkYXRlIOWwmuacquWuieijne+8m+e5vOe6jOS9v+eUqOebruWJjSB2ZXJpZmllZCBydW50aW1l77yM5Y+q5pyJ5L2/55So6ICF5Y+m6KGM5piO56K65qC45YeG5pu05paw5pmC5omN5Z+36KGMIHVwZGF0ZXLjgIIKLSDlkIzmraXlrozmiJDlvozvvIzlhYjoroDlj5YgUmVwb3NpdG9yeSDmlrDlop7miJbmm7TmlrDnmoQgYEFHRU5UUy5tZGAg6IiH55uu5YmN5Lu75YuZ6YGp55So55qE6KaP5YmH5qih57WE77yb5L2/55So6ICF5piO56K65oyH5a6aIFNraWxsIOaIluS7u+WLmeespuWQiCBgLmFnZW50cy9za2lsbHMvYCDkuK3nmoQgU2tpbGwgZGVzY3JpcHRpb24g5pmC77yM5YaN6K6A5Y+W5bCN5oeJIGBTS0lMTC5tZGDjgIIKLSDku6UgYC5jb2RleC9haS1pbnN0cnVjdGlvbnMubWFuaWZlc3QuanNvbmAg566h55CG5YWx5LqrIEluc3RydWN0aW9ucyDoiIcgQWdlbnQgU2tpbGxz77yb5Y+q5pu05paw5pyq6KKr5YCL5Lq65L+u5pS555qE5Y+X566h55CG5qqU5qGI77yM5LiN6KaG5a+rIGN1c3RvbWl6ZWQgb3IgdW5tYW5hZ2VkIEluc3RydWN0aW9ucyBvciBBZ2VudCBTa2lsbHPjgIIKLSBSZXBvc2l0b3J5IOeahCBvcmlnaW4g6Iul5YiX5Zyo55uu5YmNIENvZGV4IEhvbWUg55qEIGBhaS1pbnN0cnVjdGlvbnMtc3luYy5qc29uYCDkuYsgYGV4Y2x1ZGVkUmVwb3NpdG9yeVVybHNg77yM5oiWIHRhc2sg5ZWf5YuV55uu6YyE5L2N5pa8IGBleGNsdWRlZFJlcG9zaXRvcnlQYXRoc2DvvIznm7TmjqXnlaXpgY7lkIzmraXjgIIKLSBSZXBvc2l0b3J5LWxvY2FsIEluc3RydWN0aW9uc+OAgVNraWxscyDoiIcgbWFuaWZlc3Qg5piv5omA5pyJIGJyYW5jaCDlhbHnlKjnmoTlgIvkurogcnVudGltZSBhcnRpZmFjdHPvvIzlv4XpoIjkv53mjIEgbG9jYWwgaWdub3JlZOOAguiLpSByZXNlcnZlZCBBZ2VudCBhcnRpZmFjdCDlt7LooqsgR2l0IHRyYWNrZWTvvIxib290c3RyYXAg5b+F6aCI5YWI5ZyoIFJlcG9zaXRvcnkg5aSW5a6M5pW05YKZ5Lu95qqU5qGI6IiHIEdpdCDni4DmhYvvvIzku6XpmpTpm6IgaW5kZXgg5bu656uL5Y+q5YyF5ZCr57K+56K6IHJlc2VydmVkIHBhdGggZGVsZXRpb25zIOeahOS4gOasoeaAp+acrOapnyByZW1lZGlhdGlvbiBjb21taXTvvIzkv53nlZnmiYDmnInnhKHpl5zorormm7TvvIzlho3kvp3mnIDmlrDkuK3lpK7kvobmupDph43lu7rkuKbnubznuozlkIzmraXvvJvkuI3lvpfoh6rli5UgcHVzaCBjb25zdW1lciBSZXBvc2l0b3J544CCUmVzZXJ2ZWQg56+E5ZyN5aSWIHRyYWNrZWQgZmlsZSDmiJbnhKHms5XlronlhajpmpTpm6LnmoTni4DmhYvku43poIggZmFpbCBjbG9zZWTjgII='
-))
+$capabilityEvidenceParameterSpecified = $PSBoundParameters.ContainsKey('CapabilityEvidence')
+if ($capabilityEvidenceParameterSpecified -and $ClearCapabilityEvidence) {
+    throw '-CapabilityEvidence and -ClearCapabilityEvidence are mutually exclusive.'
+}
+$capabilityEvidencePersistenceSpecified = $capabilityEvidenceParameterSpecified -or [bool]$ClearCapabilityEvidence
+$capabilityEvidenceEnvironmentSpecified = -not [string]::IsNullOrWhiteSpace([string]$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE)
+$capabilityEvidenceDeclarationSpecified = $capabilityEvidencePersistenceSpecified -or $capabilityEvidenceEnvironmentSpecified
+$capabilityEvidenceJson = if ($capabilityEvidenceParameterSpecified) { $CapabilityEvidence }
+    elseif ($ClearCapabilityEvidence) { '[]' }
+    elseif ($capabilityEvidenceEnvironmentSpecified) { [string]$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE }
+    else { $null }
+
+# BEGIN GENERATED BOOTSTRAP SECTION BASE64
+$bootstrapSectionBytes = [System.Convert]::FromBase64String(
+    'IyMgUmVwb3NpdG9yeSBJbnN0cnVjdGlvbnMgQm9vdHN0cmFwCgotIOWPquacieaWsOWinuaIluabtOaWsCBwcm9kdWN0aW9uIGNvZGUg55qE5a+m5L2c6KiI55Wr5pmC77yM5omN5Z+36KGMIGAkY29kZXhIb21lID0gaWYgKC1ub3QgW3N0cmluZ106OklzTnVsbE9yV2hpdGVTcGFjZSgkZW52OkNPREVYX0hPTUUpKSB7ICRlbnY6Q09ERVhfSE9NRSB9IGVsc2UgeyBKb2luLVBhdGggJEhPTUUgJy5jb2RleCcgfTsgJiAoSm9pbi1QYXRoICRjb2RleEhvbWUgJ2hvb2tzXGJvb3RzdHJhcC1haS1pbnN0cnVjdGlvbnMucHMxJylg77yb5Zau57SU5ZWP5ZWP6aGM44CB6YeQ5riF6ZyA5rGC44CB56K66KqN5oiW6Kej6YeL5ZWP6aGM77yM5Lul5Y+K5YW25LuW5bCa5pyq6ZaL5aeL6KaP5YqDIGNvZGUg55qE5bel5L2c5LiN5b6X5Z+36KGMIGJvb3RzdHJhcOOAggotIEJvb3RzdHJhcCDnrKzkuIDmrKHlpLHmlZfoi6XmmI7norrlsazmlrzmspnnrrHmiJbmrIrpmZDmi5LntZXvvIzmiY3lj6/lhYjlj5blvpfmoLjlh4blvozph43oqabkuIDmrKHvvJvlkIzkuIAgdGFzayDkuI3lvpflho3mrKHph43ot5HjgILoi6XliIbpoZ7ngrogY29tcGF0aWJpbGl0eeOAgWNvbmZpZ3VyYXRpb24g5oiWIGludGVncml0ee+8jOW/hemgiOS/neeVmSBmYWlsLWNsb3NlZCDntZDmnpzkuJTkuI3lvpfph43oqabvvJvlm57loLHliIbpoZ7oiIcgcmVtZWRpYXRpb27vvIzkuI3lvpflgb3pgKAgY2FwYWJpbGl0eSBldmlkZW5jZe+8jOS5n+S4jeW+l+WcqCBjb25zdW1lciBSZXBvc2l0b3J5IOW7uueriyB3b3JrYXJvdW5k44CCCi0gYG5vdGlmeS1vbmx5YCDnmoQgYG91dGNvbWU9YXZhaWxhYmxlYCDlj6rmmK/mm7TmlrDpgJrnn6XvvIzooajnpLogdmVyaWZpZWQgY2FuZGlkYXRlIOWwmuacquWuieijne+8m+e5vOe6jOS9v+eUqOebruWJjSB2ZXJpZmllZCBydW50aW1l77yM5Y+q5pyJ5L2/55So6ICF5Y+m6KGM5piO56K65qC45YeG5pu05paw5pmC5omN5Z+36KGMIHVwZGF0ZXLjgIIKLSDlkIzmraXlrozmiJDlvozvvIzlhYjoroDlj5YgUmVwb3NpdG9yeSDmlrDlop7miJbmm7TmlrDnmoQgYEFHRU5UUy5tZGAg6IiH55uu5YmN5Lu75YuZ6YGp55So55qE6KaP5YmH5qih57WE77yb5L2/55So6ICF5piO56K65oyH5a6aIFNraWxsIOaIluS7u+WLmeespuWQiCBgLmFnZW50cy9za2lsbHMvYCDkuK3nmoQgU2tpbGwgZGVzY3JpcHRpb24g5pmC77yM5YaN6K6A5Y+W5bCN5oeJIGBTS0lMTC5tZGDjgIIKLSDku6UgYC5jb2RleC9haS1pbnN0cnVjdGlvbnMubWFuaWZlc3QuanNvbmAg566h55CG5YWx5LqrIEluc3RydWN0aW9ucyDoiIcgQWdlbnQgU2tpbGxz77yb5Y+q5pu05paw5pyq6KKr5YCL5Lq65L+u5pS555qE5Y+X566h55CG5qqU5qGI77yM5LiN6KaG5a+rIGN1c3RvbWl6ZWQgb3IgdW5tYW5hZ2VkIEluc3RydWN0aW9ucyBvciBBZ2VudCBTa2lsbHPjgIIKLSBSZXBvc2l0b3J5IOeahCBvcmlnaW4g6Iul5YiX5Zyo55uu5YmNIENvZGV4IEhvbWUg55qEIGBhaS1pbnN0cnVjdGlvbnMtc3luYy5qc29uYCDkuYsgYGV4Y2x1ZGVkUmVwb3NpdG9yeVVybHNg77yM5oiWIHRhc2sg5ZWf5YuV55uu6YyE5L2N5pa8IGBleGNsdWRlZFJlcG9zaXRvcnlQYXRoc2DvvIznm7TmjqXnlaXpgY7lkIzmraXjgIIKLSBSZXBvc2l0b3J5LWxvY2FsIEluc3RydWN0aW9uc+OAgVNraWxscyDoiIcgbWFuaWZlc3Qg5piv5omA5pyJIGJyYW5jaCDlhbHnlKjnmoTlgIvkurogcnVudGltZSBhcnRpZmFjdHPvvIzlv4XpoIjkv53mjIEgbG9jYWwgaWdub3JlZOOAguiLpSByZXNlcnZlZCBBZ2VudCBhcnRpZmFjdCDlt7LooqsgR2l0IHRyYWNrZWTvvIxib290c3RyYXAg5b+F6aCI5YWI5ZyoIFJlcG9zaXRvcnkg5aSW5a6M5pW05YKZ5Lu95qqU5qGI6IiHIEdpdCDni4DmhYvvvIzku6XpmpTpm6IgaW5kZXgg5bu656uL5Y+q5YyF5ZCr57K+56K6IHJlc2VydmVkIHBhdGggZGVsZXRpb25zIOeahOS4gOasoeaAp+acrOapnyByZW1lZGlhdGlvbiBjb21taXTvvIzkv53nlZnmiYDmnInnhKHpl5zorormm7TvvIzlho3kvp3mnIDmlrDkuK3lpK7kvobmupDph43lu7rkuKbnubznuozlkIzmraXvvJvkuI3lvpfoh6rli5UgcHVzaCBjb25zdW1lciBSZXBvc2l0b3J544CCUmVzZXJ2ZWQg56+E5ZyN5aSWIHRyYWNrZWQgZmlsZSDmiJbnhKHms5XlronlhajpmpTpm6LnmoTni4DmhYvku43poIggZmFpbCBjbG9zZWTjgIIK'
+)
+# END GENERATED BOOTSTRAP SECTION BASE64
 
 function Invoke-InstallerGit {
     param([Parameter(Mandatory = $true)][string] $WorkingDirectory,[Parameter(Mandatory = $true)][string[]] $Arguments)
@@ -60,17 +70,6 @@ function Get-InstallerMutationRelativePath {
         throw "Installer mutation path is outside Codex Home: $fullPath"
     }
     return $fullPath.Substring($prefix.Length).Replace('\','/')
-}
-
-function Get-InstallerBootstrapSectionContent {
-    param([Parameter(Mandatory = $true)][string] $AgentsPath,[Parameter(Mandatory = $true)][string] $Section)
-    $normalizedSection = $Section.Trim() + "`n"
-    $content = if (Test-Path -LiteralPath $AgentsPath -PathType Leaf) { [System.IO.File]::ReadAllText($AgentsPath).Replace("`r`n","`n").Replace("`r","`n") } else { '' }
-    $pattern = '(?ms)^## Repository Instructions Bootstrap\s*\n.*?(?=^##\s|\z)'
-    $updated = if ([regex]::IsMatch($content,$pattern)) { [regex]::Replace($content,$pattern,$normalizedSection) }
-    elseif ([string]::IsNullOrWhiteSpace($content)) { $normalizedSection }
-    else { $content.TrimEnd() + "`n`n" + $normalizedSection }
-    return $updated
 }
 
 function Test-InstallerHasProperty {
@@ -525,7 +524,7 @@ function Select-InstallerLicenseDeliveryDocumentPaths {
 function Assert-InstallerPlatformRuntimeSourceInventory {
     param([Parameter(Mandatory = $true)][string] $RuntimeRoot)
     $manifestPath = Join-Path $RuntimeRoot 'platform-runtime.psd1'
-    $expectedManifestSha256 = '209160812cc7c98d5c5dd6a6abfe90435553a0a71c28fc946ff61454ce91aca2'
+    $expectedManifestSha256 = 'a648c4836cdb9fe80a6bbee5b02670921562171c7a96a0af01e67e6512f8325e'
     if ((Get-InstallerCanonicalTextSha256 -Path $manifestPath) -cne $expectedManifestSha256) { throw 'Platform runtime manifest differs from the installer trust anchor.' }
     $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath
     if ($null -eq $manifest.PrivateData -or $null -eq $manifest.PrivateData.PlatformRuntime -or
@@ -725,6 +724,9 @@ $relativeSourcePaths = @('scripts/install-ai-instructions-bootstrap.ps1')
 foreach ($fileName in @($runtimeFiles + $stableScripts | Sort-Object -Unique)) { $relativeSourcePaths += "scripts/$fileName" }
 $relativeSourcePaths += 'catalog/skills-catalog.json','catalog/skills-catalog-lock.json'
 $runtimeArtifactPaths = @($relativeSourcePaths)
+$bootstrapSectionAuthorityRelativePath = 'instructions/common/bootstrap-section.md'
+$relativeSourcePaths += $bootstrapSectionAuthorityRelativePath
+$runtimeV3ArtifactPaths = @($runtimeArtifactPaths + $bootstrapSectionAuthorityRelativePath)
 
 $archiveSourceWorkingRoot = $null
 try {
@@ -823,6 +825,15 @@ try { Assert-InstallerPlatformRuntimeSourceInventory -RuntimeRoot $platformRunti
 catch { throw [IO.InvalidDataException]::new("The verified installer platform runtime closure is invalid. $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception) }
 try { Import-Module $runtimeContractSource -Force -ErrorAction Stop }
 catch { throw [IO.InvalidDataException]::new("The verified installer runtime contract is invalid. $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception) }
+$declaredCapabilityEvidence = @()
+if ($capabilityEvidenceDeclarationSpecified) {
+    try {
+        $parsedCapabilityEvidence = $capabilityEvidenceJson | ConvertFrom-Json -NoEnumerate
+        if ($parsedCapabilityEvidence -isnot [System.Array]) { throw 'Capability evidence must be a JSON array.' }
+        $declaredCapabilityEvidence = @(Get-AiInstructionsNormalizedCapabilityEvidence -Evidence @($parsedCapabilityEvidence) -Context 'Installer capability evidence')
+    }
+    catch { throw "CapabilityEvidence is invalid: $($_.Exception.Message)" }
+}
 Import-Module (Join-Path $repositoryRootPath 'scripts\skills-catalog-contract.psm1') -Force
 Import-Module (Join-Path $repositoryRootPath 'scripts\license-delivery.psm1') -Force
 $platformRuntimeModule = Import-Module (Join-Path $platformRuntimeRoot 'platform-runtime.psd1') -Force -PassThru
@@ -831,8 +842,13 @@ catch { throw (New-AiInstructionsRefusalException -Code closure-invalid -Message
 Import-Module (Join-Path $repositoryRootPath 'scripts\ai-instructions-install-transaction.psm1') -Force
 $capabilityReceipt = $null
 $catalogDocument = Test-SkillsCatalogDocument -CatalogPath (Join-Path $repositoryRootPath 'catalog\skills-catalog.json')
-$runtimeLicenses = New-LicenseDeliveryPackage -SourceRoot $repositoryRootPath -ArtifactPaths $runtimeArtifactPaths `
-    -SourceRepository $catalogRepository -SourceCommit $catalogRef -ArtifactId 'ai-instructions-runtime'
+$projectionPlatformAvailable = [int64]$catalogDocument.schemaVersion -eq 3 -and
+    [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+if ($WriterSchema -ceq 'V3V5' -and -not $projectionPlatformAvailable) {
+    throw [System.InvalidOperationException]::new(
+        'Catalog v3 and the Windows projection runtime are not available. [ai-instructions-refusal-code=projection-runtime-unavailable]'
+    )
+}
 
 if ([string]::IsNullOrWhiteSpace($CodexHome)) {
     $CodexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
@@ -851,6 +867,26 @@ $hooksPath = Join-Path $codexHomePath 'hooks.json'
 $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
 $installLockPath = Join-Path $codexHomePath 'ai-instructions-install.lock'
 
+if ($capabilityEvidencePersistenceSpecified) {
+    $preflightState = Get-InstallerExistingRuntimeState -ConfigurationPath $configurationPath -RuntimeDirectory $runtimeDirectory
+    $preflightUsesV3V5 = $WriterSchema -ceq 'V3V5' -or ($WriterSchema -ceq 'Auto' -and [string]$preflightState.Generation -ceq 'v3v5')
+    if (-not $preflightUsesV3V5) {
+        throw 'Capability evidence persistence requires config v5; rerun with -WriterSchema V3V5.'
+    }
+}
+
+# Reject invalid encoding or ambiguous managed boundaries before creating the
+# install lock or any persistent directory. The bytes are merged again while
+# the install lock is held, so this validation pass does not carry trust.
+[byte[]]$preflightAgentsBytes = $null
+if (Test-Path -LiteralPath $agentsPath -PathType Leaf) {
+    $preflightAgentsBytes = [IO.File]::ReadAllBytes($agentsPath)
+}
+else {
+    $preflightAgentsBytes = [byte[]]::new(0)
+}
+Get-InstallerBootstrapSectionContent -ExistingBytes $preflightAgentsBytes -SectionBytes $bootstrapSectionBytes | Out-Null
+
 New-Item -ItemType Directory -Force -Path $codexHomePath | Out-Null
 $rootLease = Open-PlatformDirectory -Root $codexHomePath -RootOnly
 $installLockLease = $null
@@ -868,6 +904,7 @@ try {
 
     $capabilityReceipt = Get-PlatformCapabilities -Required @()
     $capabilityReceipt = Assert-AiInstructionsInstallerCapabilities -Receipt $capabilityReceipt
+    $projectionRuntimeAvailable = Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion $catalogDocument.schemaVersion -CapabilityReceipt $capabilityReceipt # P7E_TEST_FIXTURE_MARKER: production requires Catalog v3 and a Windows capability receipt.
 
     $legacyResidue = @(Get-ChildItem -Force -LiteralPath $codexHomePath | Where-Object { $_.Name -like '.ai-instructions-install-*' -or $_.Name -like '.ai-instructions-backup-*' })
     if ($legacyResidue.Count -gt 0) {
@@ -903,6 +940,12 @@ try {
         -RequestedWriterSchema $WriterSchema
     $selectedWriterSchema = [string]$lockedSelection.Schema
     $capabilityReceipt = $lockedSelection.CapabilityReceipt
+    if ($capabilityEvidencePersistenceSpecified -and $selectedWriterSchema -cne 'v3v5') {
+        throw 'Capability evidence persistence requires config v5; rerun with -WriterSchema V3V5.'
+    }
+    $runtimeLicenseArtifactPaths = if ($selectedWriterSchema -ceq 'v3v5') { $runtimeV3ArtifactPaths } else { $runtimeArtifactPaths }
+    $runtimeLicenses = New-LicenseDeliveryPackage -SourceRoot $repositoryRootPath -ArtifactPaths $runtimeLicenseArtifactPaths `
+        -SourceRepository $catalogRepository -SourceCommit $catalogRef -ArtifactId 'ai-instructions-runtime'
 
     New-Item -ItemType Directory -Force -Path $hookDirectory | Out-Null
     $hookLease = Open-PlatformDirectory -Root $codexHomePath -RelativePath 'hooks'
@@ -935,6 +978,9 @@ try {
         ExistingConfiguration=$existingConfiguration;CatalogRepository=$catalogRepository;CatalogRef=$catalogRef
         AdditionalExcludedRepositoryUrls=$ExcludedRepositoryUrls;AdditionalExcludedRepositoryPaths=$ExcludedRepositoryPaths;Catalog=$catalogDocument
     }
+    if ($selectedWriterSchema -ceq 'v3v5' -and $capabilityEvidenceDeclarationSpecified) {
+        $configurationParameters.CapabilityEvidence = [object[]]$declaredCapabilityEvidence
+    }
     $configuration = if ($selectedWriterSchema -ceq 'v3v5') {
         ConvertTo-AiInstructionsSyncConfigurationV5 @configurationParameters
     }
@@ -959,6 +1005,9 @@ try {
         }
         Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'catalog\skills-catalog.json') -Destination (Join-Path $stagingRuntime 'catalog\skills-catalog.json') -Force
         Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'catalog\skills-catalog-lock.json') -Destination (Join-Path $stagingRuntime 'catalog\skills-catalog-lock.json') -Force
+        if ($selectedWriterSchema -ceq 'v3v5') {
+            Copy-Item -LiteralPath (Join-Path $repositoryRootPath $bootstrapSectionAuthorityRelativePath) -Destination (Join-Path $stagingRuntime 'bootstrap-section.md') -Force
+        }
         Write-LicenseDeliveryPackage -Package $runtimeLicenses -DestinationRoot (Join-Path $stagingRuntime 'licenses')
         $bundle = if ($selectedWriterSchema -ceq 'v3v5') {
             New-AiInstructionsRuntimeBundleV3 -RuntimeRoot $stagingRuntime -Repository $catalogRepository -Commit $catalogRef -Acquisition $Acquisition -ArchiveSha256 $ArchiveSha256 -CapabilityReceipt $capabilityReceipt
@@ -978,7 +1027,14 @@ try {
             if(@($errors).Count -gt 0){throw "Staged installer runtime contains a PowerShell parse error in '$scriptPath': $(@($errors)[0].Message)"}
         }
 
-        $agentsContent = Get-InstallerBootstrapSectionContent -AgentsPath $agentsPath -Section $bootstrapSection
+        [byte[]]$existingAgentsBytes = $null
+        if (Test-Path -LiteralPath $agentsPath -PathType Leaf) {
+            $existingAgentsBytes = [IO.File]::ReadAllBytes($agentsPath)
+        }
+        else {
+            $existingAgentsBytes = [byte[]]::new(0)
+        }
+        [byte[]]$agentsBytes = Get-InstallerBootstrapSectionContent -ExistingBytes $existingAgentsBytes -SectionBytes $bootstrapSectionBytes
         $hooksContent = Get-InstallerHooksWithoutSessionStart -HooksPath $hooksPath -BootstrapHookPath $hookScript
         $operations = New-Object System.Collections.Generic.List[object]
         $fileSpecs = @(
@@ -1002,7 +1058,7 @@ try {
 
         $tailSpecs = New-Object System.Collections.Generic.List[object]
         $tailSpecs.Add([pscustomobject]@{Token='op-06-sync';Relative='ai-instructions-sync.json';Path=$configurationPath;Parent=$rootLease;Bytes=(ConvertTo-InstallerJsonBytes -Document $configuration)})
-        $tailSpecs.Add([pscustomobject]@{Token='op-07-agents';Relative='AGENTS.md';Path=$agentsPath;Parent=$rootLease;Bytes=(New-Object Text.UTF8Encoding($false)).GetBytes($agentsContent)})
+        $tailSpecs.Add([pscustomobject]@{Token='op-07-agents';Relative='AGENTS.md';Path=$agentsPath;Parent=$rootLease;Bytes=$agentsBytes})
         if($null -ne $hooksContent){$tailSpecs.Add([pscustomobject]@{Token='op-08-hooks';Relative='hooks.json';Path=$hooksPath;Parent=$rootLease;Bytes=(New-Object Text.UTF8Encoding($false)).GetBytes($hooksContent)})}
         foreach($spec in $tailSpecs){
             $operation=New-InstallerFileJournalOperation -Sequence ($operations.Count+1) -Token $spec.Token -TargetRelativePath $spec.Relative -TargetPath $spec.Path -ParentLease $spec.Parent -TransactionLease $transactionLease -DesiredBytes $spec.Bytes -PlatformOs ([string]$capabilityReceipt.os)

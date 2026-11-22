@@ -266,7 +266,11 @@ if ($InstructionSourceCommit -cnotmatch '^[0-9a-f]{40}$' -or $InstructionSourceC
     throw 'AI instruction sync configuration catalog ref and InstructionSourceCommit must be the same full lowercase commit SHA.'
 }
 
-$selectedSkillIds = @(Resolve-SkillsSelection -Catalog $catalog -Selection $configuration.catalog)
+$configuredCapabilityEvidence = @()
+if ($null -ne $configuration.PSObject.Properties['capabilityEvidence']) {
+    $configuredCapabilityEvidence = @($configuration.capabilityEvidence)
+}
+$selectedSkillIds = @(Resolve-SkillsSelection -Catalog $catalog -Selection $configuration.catalog -CapabilityEvidence $configuredCapabilityEvidence)
 $plan = Resolve-SkillsSourcePlan -Catalog $catalog -Lock $lock -SkillIds $selectedSkillIds
 
 $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char[]]@('\', '/'))

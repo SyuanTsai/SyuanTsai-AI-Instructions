@@ -809,6 +809,7 @@ class LazyPoolResolver:
         self.entries: Dict[str, PoolEntry] = {}
         self.attempted: Dict[str, Set[str]] = {}
         self.conflict_frontier: List[str] = []
+        self.prerelease_permissions: Set[str] = set()
         self.last_pip_error = ""
 
         if not SHA256_RE.fullmatch(root_sha256) or file_sha256(self.root_wheel) != root_sha256:
@@ -982,9 +983,7 @@ class LazyPoolResolver:
             if not changed:
                 return changed_any
 
-    def _run_offline_plan(self) -> bool:
-        if self.plan_path.exists():
-            self.plan_path.unlink()
+    def _build_offline_pip_command(self, constraints_path: Optional[Path] = None) -> List[str]:
         command = [
             sys.executable,
             "-I",
@@ -999,12 +998,17 @@ class LazyPoolResolver:
             "--no-index",
             f"--find-links={self.candidate_dir}",
             "--only-binary=:all:",
-            "--report",
-            str(self.plan_path),
-            str(self.root_copy),
         ]
+        if constraints_path is not None:
+            command.extend(("-c", str(constraints_path)))
+        command.extend(("--report", str(self.plan_path), str(self.root_copy)))
+        return command
+
+    def _run_offline_pip(self, command: Sequence[str]) -> bool:
+        if self.plan_path.exists():
+            self.plan_path.unlink()
         process = subprocess.Popen(
-            command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            list(command), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         try:
             while True:
@@ -1022,6 +1026,85 @@ class LazyPoolResolver:
             raise
         self.last_pip_error = (stdout + "\n" + stderr).strip()
         return process.returncode == 0 and self.plan_path.is_file()
+
+    @staticmethod
+    def _missing_project_hints(error: str) -> List[str]:
+        hints: List[str] = []
+        in_missing_section = False
+        for line in error.splitlines():
+            if "no matching distributions available for your environment:" in line:
+                in_missing_section = True
+                continue
+            if in_missing_section:
+                name = line.strip()
+                if line.startswith("    ") and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+                    hints.append(canonicalize_name(name))
+                    continue
+                in_missing_section = False
+            match = re.search(r"No matching distribution found for ([A-Za-z0-9][A-Za-z0-9_.-]*)", line)
+            if match:
+                hints.append(canonicalize_name(match.group(1)))
+        return list(dict.fromkeys(hints))
+
+    def _prerelease_permission_projects(self, error: str) -> Set[str]:
+        permitted: Set[str] = set()
+        for project in self._missing_project_hints(error):
+            if project == self.root_project or project not in self.requirements:
+                continue
+            requirements = tuple(self.requirements[project].values())
+            if any(
+                not descriptor.version.is_prerelease
+                and descriptor.filename not in self.attempted.get(project, set())
+                and all(
+                    not requirement.specifier
+                    or requirement.specifier.contains(descriptor.version, prereleases=True)
+                    for requirement in requirements
+                )
+                for descriptor in self.catalog.descriptors(project)
+            ):
+                continue
+            if any(
+                entry.path.parent.resolve() == self.candidate_dir
+                and entry.path.is_file()
+                and entry.metadata.normalized_name == project
+                and entry.descriptor.version.is_prerelease
+                and all(
+                    not requirement.specifier
+                    or requirement.specifier.contains(entry.descriptor.version, prereleases=True)
+                    for requirement in requirements
+                )
+                for entry in self.entries.values()
+            ):
+                permitted.add(project)
+        return permitted
+
+    def _run_offline_plan(self) -> bool:
+        self.prerelease_permissions = set()
+        # Every round first preserves pip's default final-release preference.
+        if self._run_offline_pip(self._build_offline_pip_command()):
+            return True
+        constraints_path = self.plan_path.with_name(
+            self.plan_path.name + ".prerelease-constraints.txt"
+        )
+        for _ in range(len(self.requirements)):
+            eligible = self._prerelease_permission_projects(self.last_pip_error)
+            newly_permitted = eligible.difference(self.prerelease_permissions)
+            if not newly_permitted:
+                return False
+            self.prerelease_permissions.update(newly_permitted)
+            if self.budget is not None:
+                for project in sorted(newly_permitted):
+                    self.budget.record(
+                        phase="prerelease-permission", round_number=self.rounds,
+                        candidate_count=len(self.entries), project=project,
+                        source="offline verified pool fallback",
+                    )
+            with constraints_path.open("w", encoding="utf-8", newline="\n") as output:
+                for project in sorted(self.prerelease_permissions):
+                    output.write(f"{project}>=0.0.dev0\n")
+            if self._run_offline_pip(self._build_offline_pip_command(constraints_path)):
+                return True
+        return False
 
     def _unsatisfied_projects(self) -> List[Tuple[str, List[Requirement], Set[str]]]:
         # A project is a contradiction when no verified entry satisfies all of
@@ -1089,22 +1172,7 @@ class LazyPoolResolver:
     def _hinted_backtrack_project(self) -> Optional[str]:
         # pip's text is a hint only. A project must also be present in the
         # verified wheel requirement graph before it can drive acquisition.
-        hints: List[str] = []
-        in_missing_section = False
-        for line in self.last_pip_error.splitlines():
-            if "no matching distributions available for your environment:" in line:
-                in_missing_section = True
-                continue
-            if in_missing_section:
-                name = line.strip()
-                if line.startswith("    ") and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
-                    hints.append(canonicalize_name(name))
-                    continue
-                in_missing_section = False
-            match = re.search(r"No matching distribution found for ([A-Za-z0-9][A-Za-z0-9_.-]*)", line)
-            if match:
-                hints.append(canonicalize_name(match.group(1)))
-        for project in dict.fromkeys(hints):
+        for project in self._missing_project_hints(self.last_pip_error):
             if project == self.root_project or project not in self.requirements:
                 continue
             if any(
@@ -1145,13 +1213,15 @@ class LazyPoolResolver:
                                     error=self.last_pip_error if not solved else "",
                                     error_class="" if solved else (
                                         "resolution-conflict" if any(marker in self.last_pip_error for marker in (
-                                            "ResolutionImpossible", "Cannot install", "No matching distribution found"
+                                            "ResolutionImpossible", "Cannot install", "No matching distribution found",
+                                            "no matching distributions available for your environment:"
                                         )) else "pip-process-failure"
                                     ))
             if solved:
                 return rounds
             if not any(marker in self.last_pip_error for marker in (
-                "ResolutionImpossible", "Cannot install", "No matching distribution found"
+                "ResolutionImpossible", "Cannot install", "No matching distribution found",
+                "no matching distributions available for your environment:"
             )):
                 raise ClosureError("Offline pip failed without a dependency-resolution conflict: " + self.last_pip_error[-12000:])
             self._remember_conflict_parents()
@@ -1723,6 +1793,152 @@ def self_test_falls_back_to_prerelease() -> None:
     self_test_prerelease_candidate_priority("dep>=0.28.0", ("1.0.dev6",), "1.0.dev6")
 
 
+def self_test_multiple_prerelease_permissions() -> None:
+    # Scenario: Two required projects only offer development releases.
+    # Purpose: Grant every project-specific permission needed within the same pip round.
+    with tempfile.TemporaryDirectory(prefix="wheel-prerelease-multiple-") as temporary:
+        root = Path(temporary)
+        sources = root / "sources"
+        sources.mkdir()
+        root_wheel = make_test_wheel(
+            sources, "prerelease-multiple-root", "1.0", ("dep-a>=1.0", "dep-b>=1.0")
+        )
+        wheels = [
+            make_test_wheel(sources, "dep-a", "2.0.dev1"),
+            make_test_wheel(sources, "dep-b", "2.0.dev1"),
+        ]
+        resolver = LazyPoolResolver(
+            LocalCatalog([local_descriptor(path) for path in wheels]),
+            root_wheel, file_sha256(root_wheel), root / "pool", root / "plan.json",
+        )
+        resolver.resolve()
+        selection = validate_and_select_plan(root / "plan.json", resolver, root / "selected")
+        selected = {entry["normalizedName"]: entry["version"] for entry in selection["entries"]}
+        if selected.get("dep-a") != "2.0.dev1" or selected.get("dep-b") != "2.0.dev1":
+            raise AssertionError(f"Both prerelease-only projects must resolve; got {selected!r}")
+
+
+def self_test_prerelease_permission_waits_for_final_attempt() -> None:
+    # Scenario: A verified prerelease is pooled while a satisfying final remains unattempted.
+    # Purpose: Explore the final candidate before permitting prerelease fallback.
+    with tempfile.TemporaryDirectory(prefix="wheel-prerelease-final-attempt-") as temporary:
+        root = Path(temporary)
+        sources = root / "sources"
+        sources.mkdir()
+        root_wheel = make_test_wheel(sources, "prerelease-final-root", "1.0", ("dep>=1.0",))
+        wheels = [
+            make_test_wheel(sources, "dep", "2.0.dev1"),
+            make_test_wheel(sources, "dep", "1.5"),
+        ]
+        descriptors = [local_descriptor(path) for path in wheels]
+        resolver = LazyPoolResolver(
+            LocalCatalog(descriptors),
+            root_wheel, file_sha256(root_wheel), root / "pool", root / "plan.json",
+        )
+        prerelease = descriptors[0]
+        prerelease_path = resolver.catalog.materialize(prerelease, resolver.candidate_dir)
+        prerelease_metadata = verify_candidate(prerelease_path, prerelease)
+        resolver.entries[prerelease_path.name] = PoolEntry(
+            prerelease, prerelease_path, prerelease_metadata, "pypi-simple-json"
+        )
+        resolver.attempted.setdefault("dep", set()).add(prerelease.filename)
+        missing = "ERROR: No matching distribution found for dep"
+        if resolver._prerelease_permission_projects(missing):
+            raise AssertionError("An unattempted satisfying final must block prerelease permission")
+        if not resolver._add_next_candidate("dep"):
+            raise AssertionError("The final candidate fixture must remain available for an attempt")
+        if resolver._prerelease_permission_projects(missing) != {"dep"}:
+            raise AssertionError("An attempted final must no longer block a satisfying prerelease")
+
+
+def self_test_prerelease_permissions_reset_each_round() -> None:
+    # Scenario: One round needs prerelease fallback and the next succeeds without constraints.
+    # Purpose: Keep permissions local to the most recent offline pip round.
+    with tempfile.TemporaryDirectory(prefix="wheel-prerelease-round-reset-") as temporary:
+        root = Path(temporary)
+        sources = root / "sources"
+        sources.mkdir()
+        root_wheel = make_test_wheel(sources, "prerelease-reset-root", "1.0", ("dep>=1.0",))
+        wheel = make_test_wheel(sources, "dep", "2.0.dev1")
+        resolver = LazyPoolResolver(
+            LocalCatalog([local_descriptor(wheel)]),
+            root_wheel, file_sha256(root_wheel), root / "pool", root / "plan.json",
+        )
+        resolver._seed_new_projects()
+        outcomes = iter((False, True))
+
+        def first_round(_command: Sequence[str]) -> bool:
+            solved = next(outcomes)
+            resolver.last_pip_error = "" if solved else "ERROR: No matching distribution found for dep"
+            return solved
+
+        resolver._run_offline_pip = first_round  # type: ignore[method-assign]
+        if not resolver._run_offline_plan() or resolver.prerelease_permissions != {"dep"}:
+            raise AssertionError("The first round must record its prerelease permission")
+
+        def second_round(_command: Sequence[str]) -> bool:
+            resolver.last_pip_error = ""
+            return True
+
+        resolver._run_offline_pip = second_round  # type: ignore[method-assign]
+        if not resolver._run_offline_plan() or resolver.prerelease_permissions:
+            raise AssertionError("Prerelease permissions must reset before the next round")
+
+
+def self_test_prerelease_permission_is_scoped() -> None:
+    # Scenario: One project requires prerelease fallback while another has final and prerelease candidates.
+    # Purpose: Keep the fallback permission project-scoped and preserve final-first selection elsewhere.
+    with tempfile.TemporaryDirectory(prefix="wheel-prerelease-scope-") as temporary:
+        root = Path(temporary)
+        sources = root / "sources"
+        sources.mkdir()
+        root_wheel = make_test_wheel(
+            sources, "prerelease-scope-root", "1.0", ("dep>=0.28.0", "other>=1.0")
+        )
+        wheels = [
+            make_test_wheel(sources, "dep", "1.0.dev6"),
+            make_test_wheel(sources, "other", "3.0.dev1"),
+            make_test_wheel(sources, "other", "2.0"),
+        ]
+        resolver = LazyPoolResolver(
+            LocalCatalog([local_descriptor(path) for path in wheels]),
+            root_wheel, file_sha256(root_wheel), root / "pool", root / "plan.json",
+        )
+        resolver._seed_new_projects()
+        if not resolver._add_next_candidate("other"):
+            raise AssertionError("Scoped prerelease fixture must materialize both other candidates")
+        resolver.resolve()
+        selection = validate_and_select_plan(root / "plan.json", resolver, root / "selected")
+        selected = {entry["normalizedName"]: entry["version"] for entry in selection["entries"]}
+        if selected.get("dep") != "1.0.dev6" or selected.get("other") != "2.0":
+            raise AssertionError(f"Prerelease permission must remain scoped to dep; got {selected!r}")
+        if "other" in resolver.prerelease_permissions or not resolver.prerelease_permissions.issubset({"dep"}):
+            raise AssertionError(
+                f"Prerelease permission escaped dep; got {resolver.prerelease_permissions!r}"
+            )
+
+
+def self_test_first_prerelease_attempt_has_no_constraints() -> None:
+    # Scenario: A round may later need a project-scoped prerelease constraint.
+    # Purpose: Keep the first pip invocation constraint-free so final releases remain preferred.
+    with tempfile.TemporaryDirectory(prefix="wheel-prerelease-command-") as temporary:
+        root = Path(temporary)
+        sources = root / "sources"
+        sources.mkdir()
+        root_wheel = make_test_wheel(sources, "prerelease-command-root", "1.0")
+        resolver = LazyPoolResolver(
+            LocalCatalog([]), root_wheel, file_sha256(root_wheel),
+            root / "pool", root / "plan.json",
+        )
+        first_command = resolver._build_offline_pip_command()
+        if "-c" in first_command:
+            raise AssertionError("The first pip invocation of a round must not carry constraints")
+        constraints = root / "plan.json.prerelease-constraints.txt"
+        retry_command = resolver._build_offline_pip_command(constraints)
+        if retry_command.count("-c") != 1 or retry_command[retry_command.index("-c") + 1] != str(constraints):
+            raise AssertionError("The prerelease retry must carry exactly its run-owned constraints file")
+
+
 def self_test_honors_explicit_prerelease_requirement() -> None:
     # Scenario: A requirement's specifier explicitly opts into development releases.
     # Purpose: Keep prerelease candidates eligible under explicit PEP 440 prerelease semantics.
@@ -1899,6 +2115,11 @@ def self_test_command(arguments: argparse.Namespace) -> None:
     self_test_root_missing_dependency_fails_closed()
     self_test_prefers_final_over_prerelease()
     self_test_falls_back_to_prerelease()
+    self_test_multiple_prerelease_permissions()
+    self_test_prerelease_permission_waits_for_final_attempt()
+    self_test_prerelease_permissions_reset_each_round()
+    self_test_prerelease_permission_is_scoped()
+    self_test_first_prerelease_attempt_has_no_constraints()
     self_test_honors_explicit_prerelease_requirement()
     self_test_sequential_https()
     with tempfile.TemporaryDirectory(prefix="python-wheel-closure-self-test-") as temporary:

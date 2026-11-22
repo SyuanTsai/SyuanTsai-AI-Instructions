@@ -95,6 +95,7 @@ Keep this section too.
                 -Destination $destination -Force
         }
         Copy-Item -LiteralPath (Join-Path $repositoryRoot 'licensing-scope.json') -Destination (Join-Path $invalidSource 'licensing-scope.json') -Force
+        Copy-TestInstallerBootstrapAuthority -SourceRoot $repositoryRoot -DestinationRoot $invalidSource
         [System.IO.File]::AppendAllText((Join-Path $invalidSource 'scripts\skills-selection.psm1'), "`nfunction Invalid-StagingFixture {`n")
 
         $result = Invoke-InstallExpectFailure -RepositoryRoot $invalidSource -CodexHome $codexHome
@@ -618,6 +619,7 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
         $candidateRoot = Join-Path $TestDrive 'installer-runtime-candidate'
         New-Item -ItemType Directory -Force -Path $candidateRoot | Out-Null
         Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts'),(Join-Path $repositoryRoot 'catalog') -Destination $candidateRoot -Recurse
+        Copy-TestInstallerBootstrapAuthority -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
         foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){Copy-Item -LiteralPath (Join-Path $repositoryRoot $leaf) -Destination (Join-Path $candidateRoot $leaf)}
         $candidateSourcePath = Join-Path $candidateRoot 'scripts\safe-zip.psm1'
         [System.IO.File]::AppendAllText($candidateSourcePath,"`n# runtime rollback candidate`n",(New-Object System.Text.UTF8Encoding($false)))
@@ -1001,6 +1003,199 @@ finally {
         $idempotentExit|Should Be 0
         (Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome)|Should Be $before
         @(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Force -ErrorAction SilentlyContinue).Count|Should Be 0
+    }
+    }
+
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    # Scenario: AGENTS.md has a UTF-8 BOM, CRLF personal bytes, trailing spaces, an old section, and a later H2.
+    # Purpose: Reinstall without normalizing any byte outside the canonical managed section and never cross into USER .claude.
+    It 'InterT93_preserves_AGENTS_personal_bytes_and_does_not_write_USER_Claude' {
+        New-Item -ItemType Directory -Force -Path $codexHome|Out-Null
+        $agentsPath=Join-Path $codexHome 'AGENTS.md';$utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$bom=@(0xEF,0xBB,0xBF);[byte[]]$prefix=$utf8.GetBytes("# Personal`r`nkeep  `r`n## Repository Instructions Bootstrap`r`nold`r`n");[byte[]]$suffix=$utf8.GetBytes("## Tail`r`nvalue  `r`n")
+        [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($bom+$prefix+$suffix))
+        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$expected=[byte[]]@($bom+$utf8.GetBytes("# Personal`r`nkeep  `r`n")+$authority+$suffix)
+        $isolatedHome=Join-Path $TestDrive 'installer-isolated-user-home'
+        $isolatedEnvironment=Initialize-InstallerIsolatedProcessEnvironment -IsolatedHome $isolatedHome
+        Set-TestText -Path (Join-Path $isolatedHome 'personal.txt') -Value "preserve`n"
+        Set-TestText -Path (Join-Path $isolatedEnvironment.UserProfile 'personal.txt') -Value "preserve profile`n"
+        $powerShellCacheAllowlist=@(
+            '^AppData/Local/Microsoft$',
+            '^AppData/Local/Microsoft/PowerShell$',
+            '^AppData/Local/Microsoft/PowerShell/ModuleAnalysisCache-[0-9A-F]{8}$',
+            '^AppData/Local/Microsoft/PowerShell/StartupProfileData-NonInteractive$',
+            '^AppData/Local/Microsoft/PowerShell/telemetry\.uuid$'
+        )
+        $isolatedHomeBefore=Get-InstallerFullTreeSnapshot -Root $isolatedHome
+        $isolatedProfileBefore=Get-InstallerFullTreeSnapshot -Root $isolatedEnvironment.UserProfile -ExcludedRelativePathPatterns $powerShellCacheAllowlist
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome -IsolatedUserHome $isolatedHome
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($expected))
+        (Get-InstallerFullTreeSnapshot -Root $isolatedHome)|Should Be $isolatedHomeBefore
+        (Get-InstallerFullTreeSnapshot -Root $isolatedEnvironment.UserProfile -ExcludedRelativePathPatterns $powerShellCacheAllowlist)|Should Be $isolatedProfileBefore
+        Test-Path -LiteralPath (Join-Path $isolatedHome '.claude')|Should Be $false
+        Test-Path -LiteralPath (Join-Path $isolatedEnvironment.UserProfile '.claude')|Should Be $false
+    }
+    }
+
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    # Scenario: A legacy LF/no-BOM AGENTS.md has personal content and no managed section.
+    # Purpose: Lock the 031866b append result as golden bytes while the new byte-oriented implementation preserves compatibility.
+    It 'InterT94_matches_the_legacy_LF_no_BOM_golden_bytes' {
+        New-Item -ItemType Directory -Force -Path $codexHome|Out-Null
+        $agentsPath=Join-Path $codexHome 'AGENTS.md';$utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$personal=$utf8.GetBytes("# Personal`nkeep`n");[IO.File]::WriteAllBytes($agentsPath,$personal)
+        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$golden=[byte[]]@($utf8.GetBytes("# Personal`nkeep`n`n")+$authority)
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($golden))
+    }
+    }
+
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    # Scenario: Existing AGENTS.md spans every rejected encoding and ambiguous boundary form.
+    # Purpose: Fail closed with the reason plus actionable remediation and leave the entire Codex home unchanged.
+    It 'InterT95_rejects_invalid_or_ambiguous_AGENTS_bytes_before_target_mutation' -TestCases @(
+        @{Name='UTF-16 LE BOM';Bytes=[byte[]]@(0xFF,0xFE,0x41,0x00);Reason='UTF-16';Remediation='Save the file as UTF-8'},
+        @{Name='UTF-16 BE BOM';Bytes=[byte[]]@(0xFE,0xFF,0x00,0x41);Reason='UTF-16';Remediation='Save the file as UTF-8'},
+        @{Name='UTF-32 LE BOM';Bytes=[byte[]]@(0xFF,0xFE,0x00,0x00,0x41,0x00,0x00,0x00);Reason='UTF-32';Remediation='Save the file as UTF-8'},
+        @{Name='UTF-32 BE BOM';Bytes=[byte[]]@(0x00,0x00,0xFE,0xFF,0x00,0x00,0x00,0x41);Reason='UTF-32';Remediation='Save the file as UTF-8'},
+        @{Name='UTF-16 LE without BOM';Bytes=[Text.Encoding]::Unicode.GetBytes('ASCII');Reason='NUL bytes';Remediation='Save the file as UTF-8'},
+        @{Name='UTF-16 BE without BOM';Bytes=[Text.Encoding]::BigEndianUnicode.GetBytes('ASCII');Reason='NUL bytes';Remediation='Save the file as UTF-8'},
+        @{Name='UTF-32 LE without BOM';Bytes=[Text.Encoding]::UTF32.GetBytes('ASCII');Reason='NUL bytes';Remediation='Save the file as UTF-8'},
+        @{Name='UTF-32 BE without BOM';Bytes=[Text.UTF32Encoding]::new($true,$false).GetBytes('ASCII');Reason='NUL bytes';Remediation='Save the file as UTF-8'},
+        @{Name='embedded NUL';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("personal`0text");Reason='NUL bytes';Remediation='Save the file as UTF-8'},
+        @{Name='invalid UTF-8';Bytes=[byte[]]@(0xC3,0x28);Reason='invalid UTF-8';Remediation='Save the file as UTF-8'},
+        @{Name='duplicate heading';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n## Repository Instructions Bootstrap`nold`n");Reason='duplicate';Remediation='Remove the duplicate section'},
+        @{Name='ambiguous heading';Bytes=[Text.UTF8Encoding]::new($false).GetBytes(" ## Repository Instructions Bootstrap`nold`n");Reason='ambiguous';Remediation='Keep one exact H2 heading'},
+        @{Name='bare CR';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("personal`rold");Reason='bare CR';Remediation='LF or CRLF'}
+    ) {
+        param($Name,$Bytes,$Reason,$Remediation)
+        New-Item -ItemType Directory -Force -Path $codexHome|Out-Null
+        $agentsPath=Join-Path $codexHome 'AGENTS.md';[IO.File]::WriteAllBytes($agentsPath,[byte[]]$Bytes);$before=[Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))
+        $result=Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $diagnostic=ConvertTo-TestNormalizedDiagnosticText $result.Output
+        $result.ExitCode|Should Not Be 0
+        $diagnostic|Should Match ([regex]::Escape($Reason))
+        $diagnostic|Should Match ([regex]::Escape($Remediation))
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be $before
+        Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-sync.json')|Should Be $false
+        Test-Path -LiteralPath (Join-Path $codexHome 'hooks/ai-instructions-runtime')|Should Be $false
+        @((Get-ChildItem -Force -LiteralPath $codexHome).Name)|Should Be @('AGENTS.md')
+    }
+    }
+
+    # Scenario: A candidate archive omits the tracked bootstrap section authority.
+    # Purpose: Prove the archive helper cannot borrow Repository bytes and production rejects the incomplete closure before mutation.
+    It 'InterT96_rejects_a_candidate_missing_the_bootstrap_section_authority' {
+        $candidateRoot=Join-Path $TestDrive 'candidate-without-bootstrap-authority'
+        New-Item -ItemType Directory -Force -Path $candidateRoot|Out-Null
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts'),(Join-Path $repositoryRoot 'catalog') -Destination $candidateRoot -Recurse
+        foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){Copy-Item -LiteralPath (Join-Path $repositoryRoot $leaf) -Destination $candidateRoot}
+        $archivePath=Join-Path $TestDrive 'candidate-without-bootstrap-authority.zip'
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join'').Trim()
+        $arguments=@('-NonInteractive','-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $output=& $script:TestPowerShellExecutable @arguments 2>&1
+        $LASTEXITCODE|Should Not Be 0
+        (Get-AiInstructionsRefusalCode ($output-join[Environment]::NewLine))|Should Be closure-invalid
+        ($output-join[Environment]::NewLine)|Should Match 'bootstrap-section\.md'
+        Test-Path -LiteralPath $codexHome|Should Be $false
+    }
+
+    # Scenario: AGENTS.md does not exist before a standalone install.
+    # Purpose: Materialize exactly the canonical section bytes without a BOM or surrounding bytes.
+    It 'InterT97_creates_a_missing_AGENTS_file_with_only_canonical_section_bytes' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $codexHome 'AGENTS.md')))|Should Be ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))))
+    }
+
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    # Scenario: An old managed AGENTS.md section is followed by a two-space-indented H2 with CRLF personal bytes.
+    # Purpose: Treat the CommonMark H2 as the exact replacement boundary and preserve every suffix byte.
+    It 'InterT98_preserves_personal_bytes_after_an_indented_AGENTS_H2' {
+        New-Item -ItemType Directory -Force -Path $codexHome|Out-Null
+        $agentsPath=Join-Path $codexHome 'AGENTS.md';$utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$prefix=$utf8.GetBytes("# Personal`r`nkeep`r`n## Repository Instructions Bootstrap`r`nold`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("  ## Personal Tail`r`nvalue  `r`n")
+        [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($prefix+$suffix))
+        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$expected=[byte[]]@($utf8.GetBytes("# Personal`r`nkeep`r`n")+$authority+$suffix)
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: Personal AGENTS.md contains a fenced managed-heading example before the real section and a Setext H2 suffix after it.
+    # Purpose: Ignore the fenced example, replace the one real section, and retain the Setext paragraph and all surrounding bytes exactly.
+    It 'InterT99_preserves_fenced_examples_and_a_Setext_AGENTS_boundary' {
+        New-Item -ItemType Directory -Force -Path $codexHome|Out-Null
+        $agentsPath=Join-Path $codexHome 'AGENTS.md';$utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$personalPrefix=$utf8.GetBytes("# Personal`r`n~~~md`r`n## Repository Instructions Bootstrap`r`nexample`r`n~~~~`r`n")
+        [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("Personal notes`r`n--------------`r`nKEEP  `r`n")
+        [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($personalPrefix+$oldSection+$suffix))
+        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$expected=[byte[]]@($personalPrefix+$authority+$utf8.GetBytes("`r`n")+$suffix)
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: Personal AGENTS.md has a managed-heading example in an HTML comment and another in a list-item fence before the real section.
+    # Purpose: Treat both examples as container content, replace only the document-level section, and preserve every personal byte exactly.
+    It 'InterT99b_preserves_HTML_comment_and_list_fenced_AGENTS_examples' {
+        New-Item -ItemType Directory -Force -Path $codexHome|Out-Null
+        $agentsPath=Join-Path $codexHome 'AGENTS.md';$utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$personalPrefix=$utf8.GetBytes("<!--`r`n## Repository Instructions Bootstrap`r`n## Hidden HTML H2`r`n-->`r`n- ~~~md`r`n  ## Repository Instructions Bootstrap`r`n  ## Hidden list H2`r`n  ~~~~`r`n")
+        [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("## Personal Tail`r`nKEEP  `r`n")
+        [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($personalPrefix+$oldSection+$suffix))
+        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$expected=[byte[]]@($personalPrefix+$authority+$suffix)
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: A managed AGENTS.md section contains a spaced thematic break before a two-space-indented personal H2 suffix.
+    # Purpose: Apply thematic-break precedence before list parsing and retain the complete personal suffix byte-for-byte.
+    It 'InterT99c_preserves_personal_bytes_after_a_thematic_break_in_AGENTS' {
+        New-Item -ItemType Directory -Force -Path $codexHome|Out-Null
+        $agentsPath=Join-Path $codexHome 'AGENTS.md';$utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n* * *`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("  ## Personal Tail`r`nKEEP  `r`n")
+        [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($oldSection+$suffix))
+        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$expected=[byte[]]@($authority+$suffix)
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: A CRLF AGENTS.md has a managed section followed by a personal Setext H2 and is installed twice.
+    # Purpose: Preserve personal bytes, restore the Setext separator, and keep the second install byte-for-byte idempotent.
+    It 'InterT99d_installs_a_Setext_AGENTS_suffix_twice_without_byte_drift' {
+        New-Item -ItemType Directory -Force -Path $codexHome|Out-Null
+        $agentsPath=Join-Path $codexHome 'AGENTS.md';$utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$personalPrefix=$utf8.GetBytes("# Personal`r`nkeep  `r`n")
+        [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("Personal notes`r`n--------------`r`nKEEP  `r`n")
+        [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($personalPrefix+$oldSection+$suffix))
+        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$expected=[byte[]]@($personalPrefix+$authority+$utf8.GetBytes("`r`n")+$suffix)
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($expected))
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($expected))
     }
     }
 

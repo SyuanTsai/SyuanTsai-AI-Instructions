@@ -44,34 +44,68 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         $expectedResult=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $expectedTarget
         if($expectedResult.ExitCode-ne0){throw "Index expected-state bootstrap failed: $($expectedResult.Output)"}
         $expectedAgentsBytes=[IO.File]::ReadAllBytes((Join-Path $expectedTarget 'AGENTS.md'))
+        $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'r152') -Failpoint RecoveryOnly
+        $failpointCases=New-Object System.Collections.Generic.List[object];$caseIndex=0
         foreach($failpoint in @('after-index-lock-write-before-rename','after-index-rename-before-reacquire','after-index-operation-before-journal')){
             $actualFailpoint=if($failpoint-ceq'after-index-operation-before-journal'){"after-operation-$sequence-before-journal"}else{$failpoint}
             foreach($recoveryPath in @('InProcess','NextRun')){
-                $target=Join-Path $script:ExternalRoot ("index-$failpoint-$recoveryPath");Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $target -Recurse;$before=Get-P9cPublicationStateSnapshot $target
-                $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot ("index-runtime-"+[Guid]::NewGuid().ToString('N'))) -Failpoint $actualFailpoint -RecoveryPath $recoveryPath
-                (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap).ExitCode|Should -Not -Be 0
-                if($recoveryPath-ceq'NextRun'){
-                    $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot ("index-recovery-"+[Guid]::NewGuid().ToString('N'))) -Failpoint RecoveryOnly
-                    (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
-                }
-                (Get-P9cPublicationStateSnapshot $target)|Should -Be $before
-                $indexPath=(& git -C $target rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($indexPath)){$indexPath=Join-Path $target $indexPath};Test-Path -LiteralPath ($indexPath+'.lock')|Should -Be $false
-                $rerun=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target
-                if($rerun.ExitCode-ne0){throw "Index recovery rerun failed for $failpoint/$recoveryPath`: $($rerun.Output)"}
-                $agentsPath=Join-Path $target 'AGENTS.md';Test-Path -LiteralPath $agentsPath -PathType Leaf|Should -Be $true
-                [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should -Be ([Convert]::ToBase64String($expectedAgentsBytes))
+                $caseParent=Join-Path $script:ExternalRoot ("p152f-"+$caseIndex);New-Item -ItemType Directory -Path $caseParent|Out-Null
+                $failpointCases.Add([pscustomobject]@{Index=$caseIndex;Failpoint=$failpoint;ActualFailpoint=$actualFailpoint;RecoveryPath=$recoveryPath;CaseParent=$caseParent;Seed=$script:P9cSeeds.True;Context=$script:P9cUpdated.Context;ArchivePath=$script:P9cChanged.ArchivePath;Recovery=$recovery});$caseIndex++
             }
         }
+        $failpointWorker={param($case)
+            $caseParent=$case.CaseParent
+            $target=Join-Path $caseParent 'repo';Copy-Item -LiteralPath $case.Seed -Destination $target -Recurse;$before=Get-P9cPublicationStateSnapshot $target
+            $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $caseParent 'fp') -Failpoint $case.ActualFailpoint -RecoveryPath $case.RecoveryPath
+            $failed=Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap
+            $observation=[ordered]@{FailedExitCode=$failed.ExitCode;Before=$before}
+            if($case.RecoveryPath-ceq'NextRun'){$observation.RecoveryExitCode=(Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $target -BootstrapPath $case.Recovery).ExitCode}
+            $observation.AfterRecovery=Get-P9cPublicationStateSnapshot $target
+            $indexPath=(& git -C $target rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($indexPath)){$indexPath=Join-Path $target $indexPath};$observation.LockExists=Test-Path -LiteralPath ($indexPath+'.lock')
+            $rerun=Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $target;$observation.RerunExitCode=$rerun.ExitCode;$observation.RerunOutput=$rerun.Output
+            if($rerun.ExitCode-eq0){$agentsPath=Join-Path $target 'AGENTS.md';$observation.AgentsExists=Test-Path -LiteralPath $agentsPath -PathType Leaf;if($observation.AgentsExists){$observation.AgentsBytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))}}
+            return [pscustomobject]$observation
+        }
+        $failpointResults=@(Invoke-P9cParallelCases -Cases $failpointCases.ToArray() -Worker $failpointWorker);$resultIndex=0
+        foreach($failpoint in @('after-index-lock-write-before-rename','after-index-rename-before-reacquire','after-index-operation-before-journal')){
+            foreach($recoveryPath in @('InProcess','NextRun')){
+                $result=$failpointResults[$resultIndex++];if($null-ne$result.ErrorMessage){throw $result.ErrorMessage};$observation=$result.Value
+                $observation.FailedExitCode|Should -Not -Be 0
+                if($recoveryPath-ceq'NextRun'){$observation.RecoveryExitCode|Should -Not -Be 0}
+                $observation.AfterRecovery|Should -Be $observation.Before
+                $observation.LockExists|Should -Be $false
+                if($observation.RerunExitCode-ne0){throw "Index recovery rerun failed for $failpoint/$recoveryPath`: $($observation.RerunOutput)"}
+                $observation.AgentsExists|Should -Be $true
+                $observation.AgentsBytes|Should -Be ([Convert]::ToBase64String($expectedAgentsBytes))
+            }
+        }
+        $tamperCases=New-Object System.Collections.Generic.List[object];$caseIndex=0
         foreach($tamperKind in @('EmptyBytes','MismatchedBytes','CommittedPhase','NoJournal')){
             foreach($recoveryPath in @('InProcess','NextRun')){
-                $target=Join-Path $script:ExternalRoot ("index-refusal-$tamperKind-$recoveryPath");Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $target -Recurse
-                Get-P9cPublicationStateSnapshot $target|Out-Null
-                $index=(& git -C $target rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($index)){$index=Join-Path $target $index};$indexBefore=[IO.File]::ReadAllBytes($index)
-                $bootstrap=New-P9cIndexLockTamperBootstrap -Root (Join-Path $script:ExternalRoot ("index-refusal-runtime-"+[Guid]::NewGuid().ToString('N'))) -TamperKind $tamperKind -RecoveryPath $recoveryPath
-                $failed=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap;$failed.ExitCode|Should -Not -Be 0
-                if($recoveryPath-ceq'NextRun'){$retry=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target;$retry.ExitCode|Should -Not -Be 0;(Get-AiInstructionsRefusalCode $retry.Output)|Should -Be interrupted-install}
-                [Convert]::ToBase64String([IO.File]::ReadAllBytes($index))|Should -Be ([Convert]::ToBase64String($indexBefore))
-                Test-Path -LiteralPath ($index+'.lock') -PathType Leaf|Should -Be $true
+                $caseParent=Join-Path $script:ExternalRoot ("p152t-"+$caseIndex);New-Item -ItemType Directory -Path $caseParent|Out-Null
+                $tamperCases.Add([pscustomobject]@{Index=$caseIndex;TamperKind=$tamperKind;RecoveryPath=$recoveryPath;CaseParent=$caseParent;Seed=$script:P9cSeeds.True;Context=$script:P9cUpdated.Context;ArchivePath=$script:P9cChanged.ArchivePath});$caseIndex++
+            }
+        }
+        $tamperWorker={param($case)
+            $caseParent=$case.CaseParent
+            $target=Join-Path $caseParent 'repo';Copy-Item -LiteralPath $case.Seed -Destination $target -Recurse
+            Get-P9cPublicationStateSnapshot $target|Out-Null
+            $index=(& git -C $target rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($index)){$index=Join-Path $target $index};$indexBefore=[IO.File]::ReadAllBytes($index)
+            $bootstrap=New-P9cIndexLockTamperBootstrap -Root (Join-Path $caseParent 'fp') -TamperKind $case.TamperKind -RecoveryPath $case.RecoveryPath
+            $failed=Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap
+            $observation=[ordered]@{FailedExitCode=$failed.ExitCode;IndexBefore=[Convert]::ToBase64String($indexBefore)}
+            if($case.RecoveryPath-ceq'NextRun'){$retry=Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $target;$observation.RetryExitCode=$retry.ExitCode;$observation.RetryRefusalCode=Get-AiInstructionsRefusalCode $retry.Output}
+            $observation.IndexAfter=[Convert]::ToBase64String([IO.File]::ReadAllBytes($index));$observation.LockExists=Test-Path -LiteralPath ($index+'.lock') -PathType Leaf
+            return [pscustomobject]$observation
+        }
+        $tamperResults=@(Invoke-P9cParallelCases -Cases $tamperCases.ToArray() -Worker $tamperWorker);$resultIndex=0
+        foreach($tamperKind in @('EmptyBytes','MismatchedBytes','CommittedPhase','NoJournal')){
+            foreach($recoveryPath in @('InProcess','NextRun')){
+                $result=$tamperResults[$resultIndex++];if($null-ne$result.ErrorMessage){throw $result.ErrorMessage};$observation=$result.Value
+                $observation.FailedExitCode|Should -Not -Be 0
+                if($recoveryPath-ceq'NextRun'){$observation.RetryExitCode|Should -Not -Be 0;$observation.RetryRefusalCode|Should -Be interrupted-install}
+                $observation.IndexAfter|Should -Be $observation.IndexBefore
+                $observation.LockExists|Should -Be $true
             }
         }
         $foreign=Join-Path $script:ExternalRoot 'index-foreign';Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $foreign -Recurse
@@ -122,25 +156,45 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
             [pscustomobject]@{Name='committed-after';Seed=$script:P9cSeeds.True;Failpoint='after-committed-journal-write';Phase='committed';Expected='after';HasIndex=$true},
             [pscustomobject]@{Name='prepared-no-index';Seed=$script:P9cSeeds.False;Failpoint='after-journal-prepared';Phase='prepared';Expected='prefill';HasIndex=$false}
         )
-        foreach($case in $cases){
-            $target=Join-Path $script:ExternalRoot ("prefill-phase-"+$case.Name);Copy-Item -LiteralPath $case.Seed -Destination $target -Recurse
-            $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot ("prefill-phase-runtime-"+$case.Name)) -Failpoint $case.Failpoint -RecoveryPath NextRun
-            (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap).ExitCode|Should -Not -Be 0
-            $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$transaction.Count|Should -Be 1
+        $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'r163') -Failpoint RecoveryOnly
+        $parallelCases=@(for($index=0;$index-lt$cases.Count;$index++){$caseParent=Join-Path $script:ExternalRoot ("p163-"+$index);New-Item -ItemType Directory -Path $caseParent|Out-Null;[pscustomobject]@{Index=$index;Name=$cases[$index].Name;Seed=$cases[$index].Seed;Failpoint=$cases[$index].Failpoint;Phase=$cases[$index].Phase;Expected=$cases[$index].Expected;HasIndex=$cases[$index].HasIndex;CaseParent=$caseParent;Context=$script:P9cUpdated.Context;ArchivePath=$script:P9cChanged.ArchivePath;Recovery=$recovery}})
+        $worker={param($case)
+            $caseParent=$case.CaseParent
+            $target=Join-Path $caseParent 'repo';Copy-Item -LiteralPath $case.Seed -Destination $target -Recurse
+            $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $caseParent 'fp') -Failpoint $case.Failpoint -RecoveryPath NextRun
+            $failed=Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap
+            $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force)
+            $observation=[ordered]@{FailedExitCode=$failed.ExitCode;TransactionCount=$transaction.Count}
+            if($transaction.Count-ne1){return [pscustomobject]$observation}
             $journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
-            [string]$journal.phase|Should -BeExactly $case.Phase
-            $lockPath=([string]$journal.scope.indexPath)+'.lock';Test-Path -LiteralPath $lockPath -PathType Leaf|Should -Be $true
-            $lockSha=(Get-FileHash -Algorithm SHA256 -LiteralPath $lockPath).Hash.ToLowerInvariant()
+            $lockPath=([string]$journal.scope.indexPath)+'.lock'
+            $observation.JournalPhase=[string]$journal.phase;$observation.LockPath=$lockPath;$observation.LockExistsBeforeRecovery=Test-Path -LiteralPath $lockPath -PathType Leaf
+            if(-not$observation.LockExistsBeforeRecovery){return [pscustomobject]$observation}
+            $lockSha=(Get-FileHash -Algorithm SHA256 -LiteralPath $lockPath).Hash.ToLowerInvariant();$observation.LockSha=$lockSha
             if($case.HasIndex){
                 $indexOperation=@($journal.operations|Where-Object kind -ceq replace-git-index)[0]
-                [string]$indexOperation.before.sha256|Should -BeExactly ([string]$journal.scope.indexLockContentSha256)
-                $expectedSha=if($case.Expected-ceq'before'){[string]$indexOperation.before.sha256}else{[string]$indexOperation.after.sha256}
-                $lockSha|Should -BeExactly $expectedSha
-            }else{@($journal.operations|Where-Object kind -ceq replace-git-index).Count|Should -Be 0;$lockSha|Should -BeExactly ([string]$journal.scope.indexLockContentSha256)}
-            $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot ("prefill-phase-recovery-"+$case.Name)) -Failpoint RecoveryOnly
-            (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
-            Test-Path -LiteralPath $lockPath|Should -Be $false
-            @(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force -ErrorAction SilentlyContinue).Count|Should -Be 0
+                $observation.IndexBeforeSha=[string]$indexOperation.before.sha256;$observation.ScopeLockSha=[string]$journal.scope.indexLockContentSha256
+                $observation.ExpectedLockSha=if($case.Expected-ceq'before'){[string]$indexOperation.before.sha256}else{[string]$indexOperation.after.sha256}
+            }else{$observation.IndexOperationCount=@($journal.operations|Where-Object kind -ceq replace-git-index).Count;$observation.ScopeLockSha=[string]$journal.scope.indexLockContentSha256}
+            $observation.RecoveryExitCode=(Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $target -BootstrapPath $case.Recovery).ExitCode
+            $observation.LockExistsAfterRecovery=Test-Path -LiteralPath $lockPath
+            $observation.ResidueCount=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force -ErrorAction SilentlyContinue).Count
+            return [pscustomobject]$observation
+        }
+        $results=@(Invoke-P9cParallelCases -Cases $parallelCases -Worker $worker)
+        for($index=0;$index-lt$cases.Count;$index++){
+            $case=$cases[$index];$result=$results[$index];if($null-ne$result.ErrorMessage){throw $result.ErrorMessage};$observation=$result.Value
+            $observation.FailedExitCode|Should -Not -Be 0
+            $observation.TransactionCount|Should -Be 1
+            $observation.JournalPhase|Should -BeExactly $case.Phase
+            $observation.LockExistsBeforeRecovery|Should -Be $true
+            if($case.HasIndex){
+                $observation.IndexBeforeSha|Should -BeExactly $observation.ScopeLockSha
+                $observation.LockSha|Should -BeExactly $observation.ExpectedLockSha
+            }else{$observation.IndexOperationCount|Should -Be 0;$observation.LockSha|Should -BeExactly $observation.ScopeLockSha}
+            $observation.RecoveryExitCode|Should -Not -Be 0
+            $observation.LockExistsAfterRecovery|Should -Be $false
+            $observation.ResidueCount|Should -Be 0
         }
     }
 

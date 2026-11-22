@@ -19,12 +19,62 @@ Describe 'Authority-owned consumer source gate' {
         if($LASTEXITCODE-ne0){throw "fixture git failed: $($output-join' ')"}
         $output}
         function Get-SourceFixtureGitScalar([string]$Root,[string[]]$Arguments){([string](@(Invoke-SourceFixtureGit $Root $Arguments)[0])).Trim()}
+        function Invoke-SourceFixtureGitWithInputBytes([string]$Root,[string[]]$Arguments,[byte[]]$InputBytes) {
+            $start=[Diagnostics.ProcessStartInfo]::new()
+            $start.FileName=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+            $start.UseShellExecute=$false;$start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true
+            $start.RedirectStandardError=$true
+            foreach($argument in @('-c','core.autocrlf=false','-C',$Root)+$Arguments){[void]$start.ArgumentList.Add($argument)}
+            $process=[Diagnostics.Process]::new();$process.StartInfo=$start
+            try{
+                [void]$process.Start()
+                $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+                $process.StandardInput.BaseStream.Write($InputBytes,0,$InputBytes.Length);$process.StandardInput.Close()
+                $process.WaitForExit();$output=$stdout.GetAwaiter().GetResult();$errorText=$stderr.GetAwaiter().GetResult()
+                if($process.ExitCode-ne0){throw "fixture git failed: $errorText"}
+                $output.Trim()
+            }finally{$process.Dispose()}
+        }
+        function Invoke-SourceFixtureGitBytes([string]$Root,[string[]]$Arguments) {
+            $start=[Diagnostics.ProcessStartInfo]::new()
+            $start.FileName=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+            $start.UseShellExecute=$false;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+            foreach($argument in @('-C',$Root)+$Arguments){[void]$start.ArgumentList.Add($argument)}
+            $process=[Diagnostics.Process]::new();$process.StartInfo=$start;$memory=[IO.MemoryStream]::new()
+            try{
+                [void]$process.Start();$copy=$process.StandardOutput.BaseStream.CopyToAsync($memory);$errorRead=$process.StandardError.ReadToEndAsync()
+                $process.WaitForExit();$null=$copy.GetAwaiter().GetResult();$errorText=$errorRead.GetAwaiter().GetResult()
+                if($process.ExitCode-ne0){throw "fixture git failed: $errorText"}
+                Write-Output -NoEnumerate ([byte[]]$memory.ToArray())
+            }finally{$memory.Dispose();$process.Dispose()}
+        }
+        function New-WindowsGitOwnedProcessShim([string]$Root,[ValidateSet('credential','hang')][string]$Mode,
+            [string]$ObservationPath,[string]$ShimPidPath,[string]$DescendantPidPath) {
+            $csc=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+            if(-not(Test-Path -LiteralPath $csc -PathType Leaf)){throw "Required Windows .NET Framework compiler is missing: $csc"}
+            [void][IO.Directory]::CreateDirectory($Root)
+            $shim=Join-Path $Root 'git.exe'
+            $source=Join-Path $script:RepositoryRoot 'tests/fixtures/windows-git-owned-process-shim.cs'
+            $compilerOutput=@(& $csc /nologo /target:exe "/out:$shim" $source 2>&1)
+            if($LASTEXITCODE-ne0-or-not(Test-Path -LiteralPath $shim -PathType Leaf)){
+                throw "Windows Git owned-process shim compilation failed: $($compilerOutput-join' ')"
+            }
+            [IO.File]::WriteAllText((Join-Path $Root 'mode.txt'),$Mode,[Text.UTF8Encoding]::new($false))
+            if($Mode-ceq'credential'){
+                $realGit=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+                [IO.File]::WriteAllText((Join-Path $Root 'real-git-path.txt'),$realGit,[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $Root 'observation-path.txt'),$ObservationPath,[Text.UTF8Encoding]::new($false))
+            }else{
+                [IO.File]::WriteAllText((Join-Path $Root 'shim-pid-path.txt'),$ShimPidPath,[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $Root 'descendant-pid-path.txt'),$DescendantPidPath,[Text.UTF8Encoding]::new($false))
+            }
+            $Root
+        }
         function New-GitCredentialPresenceShim([string]$Root,[string]$ObservationPath) {
             [void][IO.Directory]::CreateDirectory($Root)
             $realGit=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
             if($IsWindows){
-                $path=Join-Path $Root 'git.cmd'
-                $text="@echo off`r`nset s=0`r`nset g=0`r`nset h=0`r`nif defined STANDARD_VALIDATION_GITHUB_API_TOKEN set s=1`r`nif defined GITHUB_TOKEN set g=1`r`nif defined GH_TOKEN set h=1`r`n>>`"$ObservationPath`" echo %s%,%g%,%h%`r`nset args=%*`r`nset args=%args:{tree}=^^^^{tree}%`r`nset args=%args:{commit}=^^^^{commit}%`r`n`"$realGit`" %args%`r`nexit /b %errorlevel%`r`n"
+                return New-WindowsGitOwnedProcessShim $Root credential $ObservationPath $null $null
             }else{
                 $path=Join-Path $Root 'git';$log=$ObservationPath.Replace('"','\"');$git=$realGit.Replace('"','\"')
                 $text="#!/bin/sh`ns=0; g=0; h=0`n[ -n `"`${STANDARD_VALIDATION_GITHUB_API_TOKEN+x}`" ] && s=1`n[ -n `"`${GITHUB_TOKEN+x}`" ] && g=1`n[ -n `"`${GH_TOKEN+x}`" ] && h=1`nprintf '%s,%s,%s\n' `"`$s`" `"`$g`" `"`$h`" >> `"$log`"`nexec `"$git`" `"`$@`"`n"
@@ -34,6 +84,170 @@ Describe 'Authority-owned consumer source gate' {
             $Root
         }
         function Copy-FixtureValue($Value){$Value|ConvertTo-Json -Depth 30|ConvertFrom-Json}
+        function Set-FixturePendingPrerequisites($Manifest,[string]$RepositoryId='skill-darktide-translate') {
+            $entry=@($Manifest.repositories|Where-Object{$_.id-eq$RepositoryId})[0]
+            $entry.status='pending-prerequisites'
+            $entry|Add-Member -Force prerequisites @([pscustomobject]@{
+                    id='fixture-prerequisite'
+                    path=[string]$entry.files[0].path
+                    requirement='Fixture prerequisite remains incomplete.'
+                })
+            $entry
+        }
+        $script:ExceptionFixtureConfigRoot = Join-Path $script:RepositoryRoot 'tests/fixtures/syp500'
+        function New-ExceptionFixtureRepository([string]$Name,[switch]$WithoutExceptionSet) {
+            $root=Join-Path $TestDrive $Name
+            [void][IO.Directory]::CreateDirectory($root)
+            [void](Invoke-SourceFixtureGit $root @('init','-q','-b','main'))
+            [void](Invoke-SourceFixtureGit $root @('config','user.name','Fixture'))
+            [void](Invoke-SourceFixtureGit $root @('config','user.email','fixture@example.test'))
+            if($WithoutExceptionSet){
+                [IO.File]::WriteAllText((Join-Path $root 'README.md'),'fixture',[Text.UTF8Encoding]::new($false))
+            }else{
+                Copy-Item -LiteralPath $script:ExceptionFixtureConfigRoot -Destination (Join-Path $root 'config') -Recurse
+                $registry=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root 'config/skillspector-exceptions.json')|ConvertFrom-Json
+                foreach($exception in @($registry.exceptions)){
+                    $path=Join-Path $root "skills/$($exception.skillId)/$($exception.file)"
+                    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $path))
+                    if(-not(Test-Path -LiteralPath $path)){[IO.File]::WriteAllText($path,"fixture: $($exception.file)",[Text.UTF8Encoding]::new($false))}
+                }
+            }
+            [void](Invoke-SourceFixtureGit $root @('add','.'))
+            [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','base'))
+            [pscustomobject]@{Root=$root;Base=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')}
+        }
+        function Save-ExceptionFixtureCandidate([string]$Root,[string]$Message) {
+            [void](Invoke-SourceFixtureGit $Root @('add','-A'))
+            [void](Invoke-SourceFixtureGit $Root @('commit','-q','-m',$Message))
+            Get-SourceFixtureGitScalar $Root @('rev-parse','HEAD')
+        }
+        function New-ExceptionFixtureRawPathCandidate([string]$Root,[string]$Base,[byte[]]$PathBytes,[string]$Message) {
+            $blob=Get-SourceFixtureGitScalar $Root @('rev-parse','HEAD:config/skillspector-exceptions.json')
+            $indexInput=[Collections.Generic.List[byte]]::new()
+            $indexInput.AddRange([Text.Encoding]::ASCII.GetBytes("100644 $blob`t"))
+            $indexInput.AddRange($PathBytes);$indexInput.Add(0)
+            [void](Invoke-SourceFixtureGitWithInputBytes $Root @('update-index','--add','-z','--index-info') $indexInput.ToArray())
+            $tree=Get-SourceFixtureGitScalar $Root @('write-tree')
+            Get-SourceFixtureGitScalar $Root @('commit-tree',$tree,'-p',$Base,'-m',$Message)
+        }
+        function Get-ExceptionFixtureRegistry([string]$Root) {
+            Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $Root 'config/skillspector-exceptions.json')|ConvertFrom-Json
+        }
+        function Set-ExceptionFixtureRegistry([string]$Root,$Registry) {
+            # Candidate JSON is intentionally reformatted: semantic comparison must ignore object/array presentation and member order.
+            Write-FixtureJson (Join-Path $Root 'config/skillspector-exceptions.json') $Registry
+        }
+        function Get-ExceptionFixtureBaseline([string]$Root,[string]$SkillId='review-bitbucket-pull-request') {
+            Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $Root "config/skillspector-exceptions/$SkillId.baseline.json")|ConvertFrom-Json
+        }
+        function Set-ExceptionFixtureBaseline([string]$Root,$Baseline,[string]$SkillId='review-bitbucket-pull-request') {
+            Write-FixtureJson (Join-Path $Root "config/skillspector-exceptions/$SkillId.baseline.json") $Baseline
+        }
+        function New-ScannerTransitionFixture {
+            param(
+                [string]$Name,
+                [string]$OldVersion='2.13.4',
+                [string]$OldWheel='c5e7f290897c65018013a6e37022fabdd2ba1aeeb4994b65df2de8b0d536bea0',
+                [string]$NewVersion='2.13.6',
+                [string]$NewWheel='e7b46c55e726405b2a068d375d1ee8e799e15d86f3fc05f84feb5ba962198b15',
+                [scriptblock]$BaseMutation,
+                [scriptblock]$Mutation
+            )
+            $fixture=New-ExceptionFixtureRepository $Name
+            if($null-ne$BaseMutation){
+                $baseRegistry=Get-ExceptionFixtureRegistry $fixture.Root
+                $baseBaseline=Get-ExceptionFixtureBaseline $fixture.Root
+                & $BaseMutation $baseRegistry $baseBaseline $fixture.Root
+                Set-ExceptionFixtureRegistry $fixture.Root $baseRegistry
+                Set-ExceptionFixtureBaseline $fixture.Root $baseBaseline
+                $fixture.Base=Save-ExceptionFixtureCandidate $fixture.Root 'establish scanner transition base mutation'
+            }
+            if($OldVersion-cne'2.13.4'-or$OldWheel-cne'c5e7f290897c65018013a6e37022fabdd2ba1aeeb4994b65df2de8b0d536bea0'){
+                $oldRegistry=Get-ExceptionFixtureRegistry $fixture.Root
+                $oldRegistry.scanner.version=$OldVersion;$oldRegistry.scanner.wheelSha256=$OldWheel
+                Set-ExceptionFixtureRegistry $fixture.Root $oldRegistry
+                foreach($file in @(Get-ChildItem -LiteralPath (Join-Path $fixture.Root 'config/skillspector-exceptions') -Filter '*.baseline.json')){
+                    $oldBaseline=Get-Content -Raw -Encoding UTF8 -LiteralPath $file.FullName|ConvertFrom-Json
+                    $oldBaseline.scanner_version=$OldVersion;Write-FixtureJson $file.FullName $oldBaseline
+                }
+                $fixture.Base=Save-ExceptionFixtureCandidate $fixture.Root 'establish retained scanner base'
+            }
+            $registry=Get-ExceptionFixtureRegistry $fixture.Root
+            $registry.scanner.version=$NewVersion;$registry.scanner.wheelSha256=$NewWheel
+            $registry.baselines=@($registry.baselines|Where-Object skillId -ceq 'review-bitbucket-pull-request')
+            $registry.exceptions=@($registry.exceptions|Where-Object skillId -ceq 'review-bitbucket-pull-request')
+            $baseline=Get-ExceptionFixtureBaseline $fixture.Root
+            $baseline.scanner_version=$NewVersion
+            $newHashes=@(
+                'sha256:cd03ffaa57a764f8a960ca4af6dc774b56f8374b008a9e116be86274b81bcb13',
+                'sha256:9cd21ec5e6c12ebcfd4e4c5161fccfbfe197a8c56f81aa6ce872ba2d21f61d03',
+                'sha256:07daccad20dd2bc1d865c5d7657d9242d4866c66017c25256139f14163c97806'
+            )
+            for($index=0;$index-lt$baseline.fingerprints.Count;$index++){
+                $oldHash=[string]$baseline.fingerprints[$index].hash;$newHash=$newHashes[$index]
+                $exception=@($registry.exceptions|Where-Object fingerprint -ceq $oldHash)
+                if($exception.Count-ne1){throw "Transition fixture fingerprint '$oldHash' has no unique exception."}
+                $baseline.fingerprints[$index].hash=$newHash;$exception[0].fingerprint=$newHash
+            }
+            if($null-ne$Mutation){& $Mutation $registry $baseline $fixture.Root}
+            Set-ExceptionFixtureRegistry $fixture.Root $registry
+            Set-ExceptionFixtureBaseline $fixture.Root $baseline
+            Get-ChildItem -LiteralPath (Join-Path $fixture.Root 'config/skillspector-exceptions') -Filter '*.baseline.json'|Where-Object Name -cne `
+                'review-bitbucket-pull-request.baseline.json'|Remove-Item -Force
+            [pscustomobject]@{Root=$fixture.Root;Base=$fixture.Base;Candidate=Save-ExceptionFixtureCandidate $fixture.Root 'scanner transition candidate'}
+        }
+        function Get-ScannerTransitionSuppressedFindings($Fixture) {
+            @(Get-GateCandidateTransitionExpectations $Fixture.Root $Fixture.Candidate|ForEach-Object{
+                [pscustomobject]@{skillId=$_.skillId;ruleId=$_.ruleId;severity='medium';file=$_.file;line=[long]$_.startLine;suppressionReason=$_.reason}
+            })
+        }
+        function Get-ScannerTransitionOutputHash([string]$Stdout,[string]$Stderr) {
+            $sha=[Security.Cryptography.SHA256]::Create()
+            try{
+                $bytes=[Text.UTF8Encoding]::new($false).GetBytes($Stdout+"`n---stderr---`n"+$Stderr)
+                ([BitConverter]::ToString($sha.ComputeHash($bytes))-replace'-','').ToLowerInvariant()
+            }finally{$sha.Dispose()}
+        }
+        function New-ScannerTransitionEvidenceFixture($Fixture,[object[]]$Suppressed,[string]$Status='passed') {
+            $artifacts=Join-Path $TestDrive ('transition-evidence-'+[guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($artifacts)
+            $eventId=[guid]::NewGuid().ToString();$stageId='skillspector-static';$candidateId='candidate-fixture'
+            $eventPath=Join-Path $artifacts "event-$eventId.json"
+            $envelope=if($Status-ceq'platform-unavailable'){
+                [ordered]@{schemaVersion=1;status='platform-unavailable';decision='PLATFORM_UNAVAILABLE'}
+            }else{[ordered]@{suppressedFindings=@($Suppressed)}}
+            $stdout=$envelope|ConvertTo-Json -Depth 20 -Compress;$stderr=''
+            $process=[ordered]@{startedAt='2026-11-20T00:00:00Z';endedAt='2026-11-20T00:00:01Z'
+                exitCode=if($Status-ceq'platform-unavailable'){1}else{0};status=$Status;stdout=$stdout;stderr=$stderr
+                cleanedUp=$true;processOwnership=$null}
+            Write-FixtureJson $eventPath ([ordered]@{schemaVersion=1;eventId=$eventId;stageId=$stageId;toolId='static-analyzer'
+                skillId=$null;candidateId=$candidateId;process=$process;stdout=$stdout;stderr=$stderr})
+            $report=[pscustomobject]@{sourceValidation=[pscustomobject]@{events=@([pscustomobject]@{
+                eventId=$eventId;stageId=$stageId;toolId='static-analyzer';skillId=$null;candidateId=$candidateId
+                commandSha256=('a'*64);exitCode=$process.exitCode;status=$Status
+                outputPath=$eventPath;outputSha256=Get-ScannerTransitionOutputHash $stdout $stderr;cleanedUp=$true;processOwnership=$null
+            })}}
+            [pscustomobject]@{Artifacts=$artifacts;EventPath=$eventPath;Report=$report}
+        }
+        function Assert-ScannerTransitionEvidenceFixture($Fixture,[object[]]$Suppressed,[string]$Status='passed') {
+            $evidence=New-ScannerTransitionEvidenceFixture $Fixture $Suppressed $Status
+            Assert-GateExceptionScannerTransitionEvidence $script:RepositoryRoot $Fixture.Root $Fixture.Base $Fixture.Candidate `
+                $evidence.Report $evidence.Artifacts
+        }
+        function Replace-ExceptionFixtureRegistryText([string]$Root,[string]$Pattern,[string]$Replacement) {
+            $path=Join-Path $Root 'config/skillspector-exceptions.json'
+            $text=[IO.File]::ReadAllText($path,[Text.Encoding]::UTF8)
+            $updated=[regex]::new($Pattern).Replace($text,$Replacement,1)
+            if($updated-ceq$text){throw "Fixture registry pattern was not found: $Pattern"}
+            [IO.File]::WriteAllText($path,$updated,[Text.UTF8Encoding]::new($false))
+        }
+        function Move-ExceptionFixtureIndexPath([string]$Root,[string]$Source,[string]$Destination) {
+            $oid=Get-SourceFixtureGitScalar $Root @('rev-parse',"HEAD:$Source")
+            [void](Invoke-SourceFixtureGit $Root @('update-index','--force-remove','--',$Source))
+            [void](Invoke-SourceFixtureGit $Root @('update-index','--add','--cacheinfo',"100644,$oid,$Destination"))
+            [void](Invoke-SourceFixtureGit $Root @('commit','-q','-m','case-only rename'))
+            Get-SourceFixtureGitScalar $Root @('rev-parse','HEAD')
+        }
         function Assert-ExactObjectShape($Value,[string[]]$Properties){
             (@($Value.PSObject.Properties.Name)-join',')|Should Be ($Properties-join',')
         }
@@ -58,6 +272,17 @@ Describe 'Authority-owned consumer source gate' {
                 throw 'Source-gate fixture lease escaped its cleanup boundary.'
             }
             Remove-Item -LiteralPath $root -Recurse -Force
+        }
+        function Copy-GatePlatformRuntimeFixture([string]$AuthorityRoot) {
+            $sourceRoot=Join-Path $script:RepositoryRoot 'scripts'
+            $manifestPath=Join-Path $sourceRoot 'platform-runtime.psd1'
+            $manifest=Import-PowerShellDataFile $manifestPath
+            foreach($relative in @('platform-runtime.psd1')+@($manifest.FileList)|Select-Object -Unique){
+                $source=Join-Path $sourceRoot $relative
+                $destination=Join-Path (Join-Path $AuthorityRoot 'scripts') $relative
+                [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
+                Copy-Item -LiteralPath $source -Destination $destination
+            }
         }
         . (Join-Path $script:RepositoryRoot 'tests/fixtures/consumer-gate-credential-oracle.ps1')
         function New-MinimalConsumerFixture([string]$Root,$Entry,[string]$SkillId){
@@ -86,9 +311,13 @@ Describe 'Authority-owned consumer source gate' {
         }
     }
 
+    BeforeEach {
+        Restore-GateFixtureModule
+    }
+
     # Scenario: The legacy manifest is consumed as the exact five-repository conversion contract.
-    # Purpose: Keep four ready migrations and the blocked Darktide prerequisites explicit.
-    It 'UnitT10_binds_five_unique_legacy_inventories_and_blocks_darktide_prerequisites' {
+    # Purpose: Keep all five ready migrations and the refreshed Darktide inventory explicit.
+    It 'UnitT10_binds_five_unique_ready_legacy_inventories_and_the_refreshed_darktide_tree' {
         $manifestText = Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/legacy-migration.json')
         $schemaText = Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/schemas/consumer-legacy-migration-v1.schema.json')
         Test-Json -Json $manifestText -Schema $schemaText | Should Be $true
@@ -98,15 +327,20 @@ Describe 'Authority-owned consumer source gate' {
         (@($manifest.repositories.id)-join"`n") | Should Be (@(
                 'skill-general','skill-atlassian-ecosystem','skill-code-collaboration','skill-knowledge-content','skill-darktide-translate'
             )-join"`n")
-        @($manifest.repositories | Where-Object status -eq ready).Count | Should Be 4
+        @($manifest.repositories | Where-Object status -eq ready).Count | Should Be 5
         $darktide = @($manifest.repositories | Where-Object id -eq skill-darktide-translate)[0]
-        $darktide.status | Should Be pending-prerequisites
+        $darktide.status | Should Be ready
+        $darktide.inventoryCommit | Should Be '44c9fef7e36c36ecab0011ba35c799ddc79a3927'
+        $darktide.inventoryTree | Should Be '648234d5fed2d75817b67663ecc4483b33bac30e'
+        $null -ne $darktide.PSObject.Properties['prerequisites'] | Should Be $false
         $darktide.additionalScope | Should Be @('skills/auto-update-darktide-mod/scripts/')
         $expectedFileRows=@(
             '.github/workflows/standard-v1-candidate-windows.yml|delete||','config/standard-v1.json|delete||',
             'scripts/Get-SourcePin.ps1|delete||','scripts/Install-LatestPowerShell.ps1|delete||',
-            'scripts/Invoke-PrePushValidation.ps1|delete||','scripts/PowerShellRelease.psm1|delete||',
-            'scripts/Test-CleanRepositoryHead.ps1|retain||','scripts/Test-Repository.ps1|split||scripts/Test-DarktideRepository.ps1',
+            'scripts/Invoke-PrePushValidation.ps1|delete||','scripts/New-SkillSourcePin.ps1|retain||',
+            'scripts/PowerShellRelease.psm1|delete||',
+            'scripts/Test-CleanRepositoryHead.ps1|retain||','scripts/Test-DarktideRepository.ps1|retain||',
+            'scripts/Test-Repository.ps1|split||scripts/Test-DarktideRepository.ps1',
             'scripts/Validate.ps1|delete||',
             'skills/auto-update-darktide-mod/scripts/Apply-LocalizationWorkset.ps1|retain||',
             'skills/auto-update-darktide-mod/scripts/Expand-Schema14Reference.ps1|retain||',
@@ -123,75 +357,34 @@ Describe 'Authority-owned consumer source gate' {
             'skills/auto-update-darktide-mod/scripts/Test-ModUpdateCandidate.ps1|retain||',
             'skills/auto-update-darktide-mod/scripts/Test-ReferenceIntegrity.ps1|retain||',
             'skills/auto-update-darktide-mod/scripts/Test-SourceReceipt.ps1|retain||',
-            'tests/AtomicValidationOutput.Tests.ps1|update-tests|rewrite|','tests/BootstrapTransition.Tests.ps1|update-tests|rewrite|',
-            'tests/CanonicalValidation.Tests.ps1|update-tests|rewrite|','tests/InstalledClosureOrdering.Tests.ps1|update-tests|rewrite|',
-            'tests/Invoke-Tests.ps1|retain||','tests/LocalizationWorkset.Tests.ps1|update-tests|rewrite|',
-            'tests/ModUpdateAutomation.Tests.ps1|update-tests|rewrite|','tests/RepositoryContract.Tests.ps1|update-tests|rewrite|',
-            'tests/RepositoryValidation.Tests.ps1|update-tests|rewrite|','tests/Schema15Coordination.Tests.ps1|update-tests|rewrite|',
-            'tests/Schema15SourceAcquisition.Tests.ps1|update-tests|rewrite|','tests/SkillContract.Tests.ps1|update-tests|rewrite|',
-            'tests/SkillSpectorOutput.Tests.ps1|update-tests|rewrite|','tests/SourcePin.Tests.ps1|update-tests|rewrite|',
-            'tests/StandardV1Conformance.Tests.ps1|update-tests|rewrite|','tests/Test-Repository.Tests.ps1|update-tests|rewrite|',
-            'tests/TestSupport.ps1|update-tests|rewrite|','tests/ValidationTransition.Tests.ps1|update-tests|rewrite|'
+            'tests/AtomicValidationOutput.Tests.ps1|update-tests|delete|','tests/BootstrapTransition.Tests.ps1|update-tests|delete|',
+            'tests/CanonicalValidation.Tests.ps1|update-tests|delete|','tests/InstalledClosureOrdering.Tests.ps1|retain||',
+            'tests/Invoke-Tests.ps1|retain||','tests/LocalizationWorkset.Tests.ps1|retain||',
+            'tests/ModUpdateAutomation.Tests.ps1|retain||','tests/PathSafetyAst.Tests.ps1|update-tests|rewrite|',
+            'tests/RepositoryContract.Tests.ps1|retain||','tests/RepositoryValidation.Tests.ps1|retain||',
+            'tests/Schema15Coordination.Tests.ps1|retain||','tests/Schema15SourceAcquisition.Tests.ps1|retain||',
+            'tests/SkillContract.Tests.ps1|retain||','tests/SkillSourcePinGenerator.Tests.ps1|retain||',
+            'tests/SkillSpectorOutput.Tests.ps1|retain||',
+            'tests/SourcePin.Tests.ps1|update-tests|delete|','tests/StandardV1Conformance.Tests.ps1|update-tests|delete|',
+            'tests/support/ProcessEnvironment.psm1|retain||','tests/Test-DarktideRepository.Tests.ps1|retain||',
+            'tests/Test-Repository.Tests.ps1|update-tests|delete|','tests/TestSupport.ps1|retain||',
+            'tests/TestSupportLayout.Tests.ps1|retain||','tests/ValidationTransition.Tests.ps1|update-tests|delete|'
         )
         $actualFileRows=@($darktide.files|ForEach-Object{
                 $outcome=if($null-ne$_.PSObject.Properties['expectedOutcome']){[string]$_.expectedOutcome}else{''}
                 $target=if($null-ne$_.PSObject.Properties['target']){[string]$_.target}else{''}
                 "$($_.path)|$($_.disposition)|$outcome|$target"
             })
-        @($actualFileRows).Count | Should Be 42
+        @($actualFileRows).Count | Should Be 49
         (@($actualFileRows)-join"`n") | Should Be (@($expectedFileRows)-join"`n")
         $expectedChecks=@(
             'repository-darktide|general|scripts/Test-DarktideRepository.ps1','repository-pester|pester|tests'
         )
         (@($darktide.requiredRepositoryChecks|ForEach-Object{"$($_.id)|$($_.kind)|$($_.path)"})-join"`n") |
             Should Be (@($expectedChecks)-join"`n")
-        $portableRequirement='S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips.'
-        $scriptRequirement='S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS.'
-        $expectedPrerequisiteRows=@(
-            "portable-01|tests/InstalledClosureOrdering.Tests.ps1|$portableRequirement",
-            "portable-02|tests/LocalizationWorkset.Tests.ps1|$portableRequirement",
-            "portable-03|tests/ModUpdateAutomation.Tests.ps1|$portableRequirement",
-            "portable-04|tests/RepositoryContract.Tests.ps1|$portableRequirement",
-            "portable-05|tests/Schema15Coordination.Tests.ps1|$portableRequirement",
-            "portable-06|tests/Schema15SourceAcquisition.Tests.ps1|$portableRequirement",
-            "portable-07|tests/SkillContract.Tests.ps1|$portableRequirement",
-            "portable-08|tests/SkillSpectorOutput.Tests.ps1|$portableRequirement",
-            "portable-09|tests/TestSupport.ps1|$portableRequirement","portable-10|tests/Invoke-Tests.ps1|$portableRequirement",
-            "portable-12|scripts/Test-CleanRepositoryHead.ps1|$portableRequirement",
-            'portable-13|scripts/Test-Repository.ps1|S8 must extract the Darktide-specific contract into portable scripts/Test-DarktideRepository.ps1 and remove the split source before re-inventory.',
-            "portable-skill-script-01|skills/auto-update-darktide-mod/scripts/Apply-LocalizationWorkset.ps1|$scriptRequirement",
-            "portable-skill-script-02|skills/auto-update-darktide-mod/scripts/Expand-Schema14Reference.ps1|$scriptRequirement",
-            "portable-skill-script-03|skills/auto-update-darktide-mod/scripts/Finalize-LocalizationWorksetEvidence.ps1|$scriptRequirement",
-            "portable-skill-script-04|skills/auto-update-darktide-mod/scripts/Finalize-ModUpdateMerge.ps1|$scriptRequirement",
-            "portable-skill-script-05|skills/auto-update-darktide-mod/scripts/Invoke-ModUpdateQueue.ps1|$scriptRequirement",
-            "portable-skill-script-06|skills/auto-update-darktide-mod/scripts/LuaLocalizationScanner.psm1|$scriptRequirement",
-            "portable-skill-script-07|skills/auto-update-darktide-mod/scripts/New-LocalizationWorkset.ps1|$scriptRequirement",
-            "portable-skill-script-08|skills/auto-update-darktide-mod/scripts/PathSafety.psm1|$scriptRequirement",
-            "portable-skill-script-09|skills/auto-update-darktide-mod/scripts/Receive-NexusMainFile.ps1|$scriptRequirement",
-            "portable-skill-script-10|skills/auto-update-darktide-mod/scripts/SharedCoordinationLock.psm1|$scriptRequirement",
-            "portable-skill-script-11|skills/auto-update-darktide-mod/scripts/Test-LocalizationWorksetReceipt.ps1|$scriptRequirement",
-            "portable-skill-script-12|skills/auto-update-darktide-mod/scripts/Test-ModUpdateCandidate.ps1|$scriptRequirement",
-            "portable-skill-script-13|skills/auto-update-darktide-mod/scripts/Test-ReferenceIntegrity.ps1|$scriptRequirement",
-            "portable-skill-script-14|skills/auto-update-darktide-mod/scripts/Test-SourceReceipt.ps1|$scriptRequirement",
-            "portable-skill-script-15|skills/auto-update-darktide-mod/scripts/mod-update.ps1|$scriptRequirement",
-            'remove-legacy-installed-closure|tests/InstalledClosureOrdering.Tests.ps1|Remove extraction of helpers from scripts/Validate.ps1 and rewrite the test for the consumer layout.',
-            'remove-legacy-repository-contract|tests/RepositoryContract.Tests.ps1|Remove assertions and execution paths for deleted workflow, configuration, scripts/Validate.ps1, and legacy-layout branches.',
-            'remove-legacy-skillspector-output|tests/SkillSpectorOutput.Tests.ps1|Remove the dependency on scripts/Validate.ps1 and exercise the consumer gate evidence contract instead.',
-            'support-consumer-layout|tests/TestSupport.ps1|Support the consumer layout with config/authority-pin.json and config/consumer-gate.json while preserving the required transition coverage.',
-            'replace-legacy-pre-push|scripts/Invoke-PrePushValidation.ps1|Delete this legacy entry or replace it with a separate portable consumer bootstrap development entry before re-inventory.',
-            'portable-link-helper|tests/RepositoryContract.Tests.ps1|Replace the unconditional Junction fixture with the existing platform-aware link helper.',
-            'portable-pwsh-fixture|tests/SkillSpectorOutput.Tests.ps1|Resolve pwsh or pwsh.exe by platform and use a native shell fixture on Unix.',
-            'portable-long-path-expectations|tests/ModUpdateAutomation.Tests.ps1|Register Windows long-path assertions only on Windows and add corresponding Unix behavior assertions.',
-            'portable-path-comparer|tests/ModUpdateAutomation.Tests.ps1|Register the case-insensitive InterT109 only on Windows and add Unix case-sensitive coverage.',
-            'portable-path-safety-native|skills/auto-update-darktide-mod/scripts/PathSafety.psm1|Exercise and verify the non-Windows branch without requiring the Windows-only native type.',
-            'portable-multiprocess-coordination|tests/Schema15Coordination.Tests.ps1|Demonstrate InterT180 completes on Windows, Linux, and macOS.'
-        )
-        $actualPrerequisiteRows=@($darktide.prerequisites|ForEach-Object{"$($_.id)|$($_.path)|$($_.requirement)"})
-        @($actualPrerequisiteRows).Count | Should Be 38
-        (@($actualPrerequisiteRows)-join"`n") | Should Be (@($expectedPrerequisiteRows)-join"`n")
         $fileCountOracle=[ordered]@{
-            'skill-general'=45;'skill-atlassian-ecosystem'=99;'skill-code-collaboration'=23
-            'skill-knowledge-content'=17;'skill-darktide-translate'=42
+            'skill-general'=46;'skill-atlassian-ecosystem'=100;'skill-code-collaboration'=23
+            'skill-knowledge-content'=17;'skill-darktide-translate'=49
         }
         foreach ($entry in $manifest.repositories) {
             $entry.inventoryCommit | Should Match '^[0-9a-f]{40}$'
@@ -246,10 +439,10 @@ Describe 'Authority-owned consumer source gate' {
         }
         $schemaCases=@(
             @{Id='ready-prerequisites';Apply={param($m)$e=@($m.repositories|Where-Object{$_.id-eq'skill-general'})[0];$e|Add-Member prerequisites @([pscustomobject]@{id='x';path=$e.files[0].path;requirement='x'})}},
-            @{Id='pending-missing-prerequisites';Apply={param($m)$e=@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0];$e.PSObject.Properties.Remove('prerequisites')}},
-            @{Id='pending-empty-prerequisites';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).prerequisites=@()}},
+            @{Id='pending-missing-prerequisites';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).status='pending-prerequisites'}},
+            @{Id='pending-empty-prerequisites';Apply={param($m)$e=@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0];$e.status='pending-prerequisites';$e|Add-Member prerequisites @()}},
             @{Id='retired-deferred-status';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).status='deferred'}},
-            @{Id='prerequisite-glob';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).prerequisites[0].path='tests/*.ps1'}},
+            @{Id='prerequisite-glob';Apply={param($m)$e=Set-FixturePendingPrerequisites $m;$e.prerequisites[0].path='tests/*.ps1'}},
             @{Id='scope-glob';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).additionalScope=@('skills/*/')}},
             @{Id='scope-dot';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).additionalScope=@('skills/./scripts/')}},
             @{Id='scope-dotdot';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).additionalScope=@('skills/x/../scripts/')}},
@@ -303,8 +496,8 @@ Describe 'Authority-owned consumer source gate' {
         }
 
         $semanticCases=@(
-            @{Id='duplicate-prerequisite-id';RepositoryId='skill-darktide-translate';Apply={param($m)$e=@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0];$x=Copy-FixtureValue $e.prerequisites[0];$x.path=$e.prerequisites[1].path;$e.prerequisites=@($e.prerequisites)+@($x)}},
-            @{Id='prerequisite-path-not-in-files';RepositoryId='skill-darktide-translate';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).prerequisites[0].path='tests/not-listed.ps1'}},
+            @{Id='duplicate-prerequisite-id';RepositoryId='skill-darktide-translate';Apply={param($m)$e=Set-FixturePendingPrerequisites $m;$x=Copy-FixtureValue $e.prerequisites[0];$x.path=$e.files[1].path;$e.prerequisites=@($e.prerequisites)+@($x)}},
+            @{Id='prerequisite-path-not-in-files';RepositoryId='skill-darktide-translate';Apply={param($m)$e=Set-FixturePendingPrerequisites $m;$e.prerequisites[0].path='tests/not-listed.ps1'}},
             @{Id='duplicate-required-check-path';RepositoryId='skill-general';Apply={param($m)$e=@($m.repositories|Where-Object{$_.id-eq'skill-general'})[0];$x=Copy-FixtureValue $e.requiredRepositoryChecks[0];$x.id='different-id';$e.requiredRepositoryChecks=@($e.requiredRepositoryChecks)+@($x)}},
             @{Id='scope-overlaps-basic-scope';RepositoryId='skill-darktide-translate';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).additionalScope=@('scripts/additional/')}},
             @{Id='exemption-file-not-listed';RepositoryId='skill-general';Exemption='file-missing'},
@@ -382,8 +575,8 @@ Describe 'Authority-owned consumer source gate' {
             'Candidate bootstrap differs'
     }
 
-    # Scenario: The migration manifest preserves repository behavior while removing authority-owned copies.
-    # Purpose: General history, CC catalog checks, and each legacy driver receive an explicit disposition.
+    # Scenario: The migration manifest preserves portable Darktide regressions while removing authority-owned copies.
+    # Purpose: General history, legacy-only tests, the split target, and the pathname-ledger rewrite stay explicit.
     It 'UnitT20_records_the_required_delete_split_and_history_decisions' {
         $manifest = Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/legacy-migration.json') | ConvertFrom-Json
         $text = $manifest | ConvertTo-Json -Depth 30
@@ -402,15 +595,28 @@ Describe 'Authority-owned consumer source gate' {
         foreach ($path in @(
                 'tests/LocalizationWorkset.Tests.ps1','tests/ModUpdateAutomation.Tests.ps1',
                 'tests/Schema15Coordination.Tests.ps1','tests/Schema15SourceAcquisition.Tests.ps1',
-                'tests/SkillContract.Tests.ps1'
+                'tests/SkillContract.Tests.ps1','tests/TestSupport.ps1'
+            )) {
+            $record = @($darktide.files | Where-Object path -eq $path)[0]
+            $record.disposition | Should Be 'retain'
+            $null -ne $record.PSObject.Properties['expectedOutcome'] | Should Be $false
+            $record.reason | Should Match 'Portable|portable'
+        }
+        $pathSafety = @($darktide.files | Where-Object path -eq 'tests/PathSafetyAst.Tests.ps1')[0]
+        $pathSafety.disposition | Should Be 'update-tests'
+        $pathSafety.expectedOutcome | Should Be 'rewrite'
+        $pathSafety.reason | Should Match 'literal entries for legacy files'
+        foreach ($path in @(
+                'tests/AtomicValidationOutput.Tests.ps1','tests/BootstrapTransition.Tests.ps1',
+                'tests/CanonicalValidation.Tests.ps1','tests/SourcePin.Tests.ps1',
+                'tests/StandardV1Conformance.Tests.ps1','tests/Test-Repository.Tests.ps1',
+                'tests/ValidationTransition.Tests.ps1'
             )) {
             $record = @($darktide.files | Where-Object path -eq $path)[0]
             $record.disposition | Should Be 'update-tests'
-            $record.expectedOutcome | Should Be 'rewrite'
-            $record.reason | Should Match 'dot-sources tests/TestSupport.ps1'
+            $record.expectedOutcome | Should Be 'delete'
         }
-        @($darktide.prerequisites | Where-Object id -eq 'portable-11').Count | Should Be 0
-        @($darktide.prerequisites | Where-Object id -eq 'replace-legacy-pre-push').Count | Should Be 1
+        $null -ne $darktide.PSObject.Properties['prerequisites'] | Should Be $false
     }
 
     # Scenario: Synthetic retained files use the supported PowerShell folds, unsafe parameter forms, aliases, and text encodings.
@@ -1273,7 +1479,7 @@ Write-Output 'scripts/Legacy.ps1'
         $mutantLease=New-SourceFixtureLease 'resolver-home-token-mutant'
         try{
         $mutantRoot=$mutantLease.Root
-        foreach($relative in @(& git -C $script:RepositoryRoot ls-files)){
+        foreach($relative in @(& git -C $script:RepositoryRoot ls-files|Where-Object{Test-Path -LiteralPath (Join-Path $script:RepositoryRoot $_) -PathType Leaf})){
             $destination=Join-Path $mutantRoot $relative
             [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
             Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot $relative) -Destination $destination
@@ -1292,11 +1498,11 @@ Write-Output 'scripts/Legacy.ps1'
                     $node.Name-ceq'Invoke-GateResolver'},$true))[0]
         $tokenEnvironmentWrite=@($resolver.Body.FindAll({param($node)
                     $node-is[Management.Automation.Language.AssignmentStatementAst]-and
-                    $node.Left.Extent.Text-ceq"`$start.Environment['STANDARD_VALIDATION_GITHUB_API_TOKEN']"-and
+                    $node.Left.Extent.Text-ceq"`$environment['STANDARD_VALIDATION_GITHUB_API_TOKEN']"-and
                     $node.Right.Extent.Text-ceq'$Token'
                 },$true))
         @($tokenEnvironmentWrite).Count|Should Be 1
-        $replacement="`$start.Environment['HOME']=`$Token"
+        $replacement="`$environment['HOME']=`$Token"
         $moduleText=$moduleText.Remove($tokenEnvironmentWrite[0].Extent.StartOffset,
             $tokenEnvironmentWrite[0].Extent.EndOffset-$tokenEnvironmentWrite[0].Extent.StartOffset).Insert(
                 $tokenEnvironmentWrite[0].Extent.StartOffset,$replacement)
@@ -1382,21 +1588,18 @@ Write-Output 'scripts/Legacy.ps1'
         $sources=[ordered]@{
             'scripts/consumer/ConsumerGate.psm1'=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerGate.psm1')
             'consumer/bootstrap/Invoke-PinnedAuthority.ps1'=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/bootstrap/Invoke-PinnedAuthority.ps1')
+            'scripts/consumer/ConsumerBootstrapSupervisor.psm1'=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerBootstrapSupervisor.psm1')
             'scripts/consumer/Invoke-ConsumerSourceGate.ps1'=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-ConsumerSourceGate.ps1')
         }
         $expectedHolders=@'
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|<script>|bootstrapToken
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|<script>|message
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|preserved
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|process
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|sentinel
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|standardError
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|standardOutput
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|start
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|stderr
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|stdout
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|Token
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|value
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|Invoke-ConsumerGateProcess|environment
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|Invoke-ConsumerGateProcess|sentinel
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|Invoke-ConsumerGateProcess|standardError
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|Invoke-ConsumerGateProcess|standardOutput
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|Invoke-ConsumerGateProcess|Token
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|New-ConsumerBootstrapEnvironment|Token
 scripts/consumer/ConsumerGate.psm1|Assert-GateCredentialAbsent|content
 scripts/consumer/ConsumerGate.psm1|Assert-GateCredentialAbsent|needle
 scripts/consumer/ConsumerGate.psm1|Assert-GateCredentialAbsent|Token
@@ -1410,12 +1613,9 @@ scripts/consumer/ConsumerGate.psm1|Invoke-GateAcquisitionRequest|request
 scripts/consumer/ConsumerGate.psm1|Invoke-GateAcquisitionRequest|response
 scripts/consumer/ConsumerGate.psm1|Invoke-GateAcquisitionRequest|stream
 scripts/consumer/ConsumerGate.psm1|Invoke-GateCredentialScopedPreparation|Token
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|process
+scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|environment
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|standardError
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|standardOutput
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|start
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|stderr
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|stdout
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|Token
 scripts/consumer/ConsumerGate.psm1|New-GateSourceSetup|Token
 scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|message
@@ -1429,25 +1629,17 @@ consumer/bootstrap/Invoke-PinnedAuthority.ps1|<script>|environment-null|[Environ
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|<script>|null|$bootstrapToken=$null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|<script>|null|$message=$null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|<script>|remove-variable|Remove-Variable bootstrapToken,message -ErrorAction SilentlyContinue
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|clear|$start.Environment.Clear()
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|clear|$start.Environment.Clear()
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|null|$value=$null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|remove-variable|Remove-Variable value -ErrorAction SilentlyContinue
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|null|$sentinel = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|remove-variable|Remove-Variable sentinel -ErrorAction SilentlyContinue
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|remove|[void]$start.Environment.Remove([string]$name)
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|null|$preserved[$name] = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|remove|[void]$preserved.Remove($name)
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|null|$standardOutput = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|null|$standardError = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|null|$stdout = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|null|$stderr = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|clear|$preserved.Clear()
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|clear|$start.Environment.Clear()
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|dispose|$process.Dispose()
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|null|$value = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|null|$Token=$null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|remove-variable|Remove-Variable standardOutput, standardError, stdout, stderr, credentialLeak, preserved, process, value, Token -ErrorAction SilentlyContinue
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|Invoke-ConsumerGateProcess|null|$sentinel=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|Invoke-ConsumerGateProcess|remove-variable|Remove-Variable sentinel -ErrorAction SilentlyContinue
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|Invoke-ConsumerGateProcess|remove|[void]$environment.Remove([string]$name)
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|Invoke-ConsumerGateProcess|null|$standardOutput=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|Invoke-ConsumerGateProcess|null|$standardError=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|Invoke-ConsumerGateProcess|null|$sentinel=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|Invoke-ConsumerGateProcess|null|$Token=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|Invoke-ConsumerGateProcess|clear|$environment.Clear()
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|Invoke-ConsumerGateProcess|remove-variable|Remove-Variable standardOutput,standardError,sentinel,Token,credentialLeak -ErrorAction SilentlyContinue
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|New-ConsumerBootstrapEnvironment|null|$Token=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1|New-ConsumerBootstrapEnvironment|remove-variable|Remove-Variable Token -ErrorAction SilentlyContinue
 scripts/consumer/ConsumerGate.psm1|Assert-GateCredentialAbsent|null|$content=$null
 scripts/consumer/ConsumerGate.psm1|Assert-GateCredentialAbsent|null|$content=$null
 scripts/consumer/ConsumerGate.psm1|Assert-GateCredentialAbsent|null|$needle=$null
@@ -1476,17 +1668,12 @@ scripts/consumer/ConsumerGate.psm1|Invoke-GateAcquisitionRequest|remove-variable
 scripts/consumer/ConsumerGate.psm1|Invoke-GateCredentialScopedPreparation|environment-null|[Environment]::SetEnvironmentVariable($name,$null,'Process')
 scripts/consumer/ConsumerGate.psm1|Invoke-GateCredentialScopedPreparation|null|$Token=$null
 scripts/consumer/ConsumerGate.psm1|Invoke-GateCredentialScopedPreparation|remove-variable|Remove-Variable runtime,receipt,Token -ErrorAction SilentlyContinue
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|clear|$start.Environment.Clear()
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|remove|[void]$start.Environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|clear|$start.Environment.Clear()
+scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|remove|[void]$environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
+scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|clear|$environment.Clear()
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$standardOutput=$null
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$standardError=$null
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$stdout=$null
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$stderr=$null
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|dispose|$process.Dispose()
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$start=$null
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$Token=$null
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|remove-variable|Remove-Variable standardOutput,standardError,stdout,stderr,credentialLeak,preserved,process,start,Token -ErrorAction SilentlyContinue
+scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|remove-variable|Remove-Variable standardOutput,standardError,credentialLeak,executionFailure,result,runtime,environment,Token -ErrorAction SilentlyContinue
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|environment-null|[Environment]::SetEnvironmentVariable($name,$null,'Process')
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$Token=$null
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|remove-variable|Remove-Variable Token -ErrorAction SilentlyContinue
@@ -1507,9 +1694,9 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|remove-variable|Remove-V
         $oracle=Get-ConsumerCredentialOracle $sources
         $actualHolders=@($oracle.Holders|ForEach-Object{"$($_.Source)|$($_.Function)|$($_.Variable)"})
         $actualCleanups=@($oracle.Cleanups|ForEach-Object{"$($_.Source)|$($_.Function)|$($_.Shape)|$($_.Text)"})
-        @($actualHolders).Count|Should Be 38
+        @($actualHolders).Count|Should Be 31
         (@($actualHolders)-join"`n")|Should Be (@($expectedHolders)-join"`n")
-        @($actualCleanups).Count|Should Be 78
+        @($actualCleanups).Count|Should Be 65
         (@($actualCleanups)-join"`n")|Should Be (@($expectedCleanups)-join"`n")
         foreach($holder in $oracle.Holders){
             @($oracle.Cleanups|Where-Object{$_.Source-ceq$holder.Source-and$_.Function-ceq$holder.Function-and$_.InFinally-and
@@ -1543,6 +1730,8 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|remove-variable|Remove-V
         }
         @($scriptBlockParameters).Count|Should Be 0
         $expectedSeams=@'
+scripts/consumer/ConsumerGate.psm1|Get-GateDeadlineBudget|CONSUMER_GATE_TEST_RESOLVER_TIMEOUT_SECONDS|env
+scripts/consumer/ConsumerGate.psm1|Get-GateDeadlineBudget|CONSUMER_GATE_RESOLVER_SCRIPT_PATH|env
 scripts/consumer/ConsumerGate.psm1|Write-GateBoundaryEvent|CONSUMER_GATE_EVENT_LOG_PATH|env
 scripts/consumer/ConsumerGate.psm1|Install-GatePowerShell|CONSUMER_GATE_POWERSHELL_METADATA_URI|env
 scripts/consumer/ConsumerGate.psm1|Install-GatePowerShell|CONSUMER_GATE_POWERSHELL_METADATA_URI|env
@@ -1563,7 +1752,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|CONSUMER_GATE_PHASE_ENV_
         $mutantLease=New-SourceFixtureLease 'credential-authority-copy'
         try{
         $mutantRoot=$mutantLease.Root
-        foreach($relative in @(& git -C $script:RepositoryRoot ls-files)){
+        foreach($relative in @(& git -C $script:RepositoryRoot ls-files|Where-Object{Test-Path -LiteralPath (Join-Path $script:RepositoryRoot $_) -PathType Leaf})){
             $destination=Join-Path $mutantRoot $relative
             [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
             Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot $relative) -Destination $destination
@@ -1674,15 +1863,15 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|CONSUMER_GATE_PHASE_ENV_
             $mutantTokens=$null;$mutantErrors=$null
             [void][Management.Automation.Language.Parser]::ParseFile($path,[ref]$mutantTokens,[ref]$mutantErrors)
             if(@($mutantErrors).Count-ne0){throw "CLEANUP_MUTANT_HARNESS_PARSE_FAILED|$($cleanup.Source):$($cleanup.Line):$($cleanup.Column)"}
-            $case=if($cleanup.Function-ceq'Invoke-GateAcquisitionRequest'-and$cleanup.Line-in@(841,842)){'redirect-success'}
-                elseif($cleanup.Function-ceq'Invoke-GateResolver'-and$cleanup.Line-ge192){'resolver-error'}
+            $case=if($cleanup.Function-ceq'Invoke-GateAcquisitionRequest'-and$cleanup.Line-in@(1143,1144)){'redirect-success'}
+                elseif($cleanup.Function-ceq'Invoke-GateResolver'-and$cleanup.Line-ge285){'resolver-error'}
                 elseif($cleanup.Function-ceq'New-GateSourceSetup'){'resolver-error'}
                 elseif($cleanup.Source-ceq'scripts/consumer/Invoke-ConsumerSourceGate.ps1'-and
                     (@($cleanup.Targets)-icontains'message'-or@($cleanup.Targets)-icontains'tokenVariable'-or$cleanup.Line-eq73)){'http-error'}
                 else{'success'}
-            $leak=if($cleanup.Function-ceq'Assert-GateCredentialAbsent'-and$cleanup.Line-ge814){'summary'}else{'none'}
+            $leak=if($cleanup.Function-ceq'Assert-GateCredentialAbsent'-and$cleanup.Line-ge1111){'summary'}else{'none'}
             $key="$($cleanup.Source):$($cleanup.Line):$($cleanup.Column)|$($cleanup.Text)"
-            if($cleanup.Source-ceq'consumer/bootstrap/Invoke-PinnedAuthority.ps1'){
+            if($cleanup.Source-in@('consumer/bootstrap/Invoke-PinnedAuthority.ps1','scripts/consumer/ConsumerBootstrapSupervisor.psm1')){
                 $records=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File (Join-Path $mutantRoot 'tests/fixtures/consumer-bootstrap-cleanup-fixture.ps1') `
                     -RepositoryRoot $mutantRoot -FixtureRoot $fixtureRoot -Sentinel 'credential-cleanup-sentinel' 2>&1)
             }else{
@@ -1702,55 +1891,48 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|CONSUMER_GATE_PHASE_ENV_
             }finally{Remove-SourceFixtureLease $fixtureLease}
         }
         $expectedEquivalent=@'
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:399:5|$bootstrapToken=$null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:399:27|$message=$null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:250:82|$value=$null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:269:27|$sentinel = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:291:9|$standardOutput = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:292:9|$standardError = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:293:9|$stdout = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:294:9|$stderr = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:298:28|$value = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:299:9|$Token=$null
-scripts/consumer/ConsumerGate.psm1:912:13|$content=$null
-scripts/consumer/ConsumerGate.psm1:915:9|$content=$null
-scripts/consumer/ConsumerGate.psm1:915:24|$needle=$null
-scripts/consumer/ConsumerGate.psm1:915:38|$Token=$null
-scripts/consumer/ConsumerGate.psm1:140:14|$headers.Remove('Authorization')
-scripts/consumer/ConsumerGate.psm1:141:5|$Token=$null
-scripts/consumer/ConsumerGate.psm1:142:5|[Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')
-scripts/consumer/ConsumerGate.psm1:942:34|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:942:53|$request=$null
-scripts/consumer/ConsumerGate.psm1:943:35|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:943:55|$response=$null
-scripts/consumer/ConsumerGate.psm1:974:18|$stream.Dispose()
-scripts/consumer/ConsumerGate.psm1:974:36|$memory.Dispose()
-scripts/consumer/ConsumerGate.psm1:982:31|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:982:73|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:983:9|$bytes=$null
-scripts/consumer/ConsumerGate.psm1:983:22|$buffer=$null
-scripts/consumer/ConsumerGate.psm1:983:36|$response=$null
-scripts/consumer/ConsumerGate.psm1:983:52|$request=$null
-scripts/consumer/ConsumerGate.psm1:983:67|$stream=$null
-scripts/consumer/ConsumerGate.psm1:983:81|$memory=$null
-scripts/consumer/ConsumerGate.psm1:983:95|$Headers=$null
-scripts/consumer/ConsumerGate.psm1:324:95|[Environment]::SetEnvironmentVariable($name,$null,'Process')
-scripts/consumer/ConsumerGate.psm1:326:43|$Token=$null
-scripts/consumer/ConsumerGate.psm1:197:9|$start.Environment.Clear()
-scripts/consumer/ConsumerGate.psm1:213:17|[void]$start.Environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
-scripts/consumer/ConsumerGate.psm1:213:108|$start.Environment.Clear()
-scripts/consumer/ConsumerGate.psm1:214:13|$standardOutput=$null
-scripts/consumer/ConsumerGate.psm1:214:35|$standardError=$null
-scripts/consumer/ConsumerGate.psm1:214:56|$stdout=$null
-scripts/consumer/ConsumerGate.psm1:214:70|$stderr=$null
-scripts/consumer/ConsumerGate.psm1:214:106|$process.Dispose()
-scripts/consumer/ConsumerGate.psm1:214:125|$start=$null
-scripts/consumer/ConsumerGate.psm1:214:138|$Token=$null
-scripts/consumer/ConsumerGate.psm1:215:13|Remove-Variable standardOutput,standardError,stdout,stderr,credentialLeak,preserved,process,start,Token -ErrorAction SilentlyContinue
-scripts/consumer/ConsumerGate.psm1:216:100|[Environment]::SetEnvironmentVariable($name,$null,'Process')
-scripts/consumer/ConsumerGate.psm1:217:5|$Token=$null
-scripts/consumer/ConsumerGate.psm1:301:13|[Environment]::SetEnvironmentVariable($name,$null,'Process')
-scripts/consumer/ConsumerGate.psm1:303:9|$Token=$null
+consumer/bootstrap/Invoke-PinnedAuthority.ps1:366:5|$bootstrapToken=$null
+consumer/bootstrap/Invoke-PinnedAuthority.ps1:366:27|$message=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1:218:22|$sentinel=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1:241:9|$standardOutput=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1:241:31|$standardError=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1:241:52|$sentinel=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1:241:68|$Token=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1:139:9|$Token=$null
+scripts/consumer/ConsumerGate.psm1:1120:13|$content=$null
+scripts/consumer/ConsumerGate.psm1:1123:9|$content=$null
+scripts/consumer/ConsumerGate.psm1:1123:24|$needle=$null
+scripts/consumer/ConsumerGate.psm1:1123:38|$Token=$null
+scripts/consumer/ConsumerGate.psm1:222:14|$headers.Remove('Authorization')
+scripts/consumer/ConsumerGate.psm1:223:5|$Token=$null
+scripts/consumer/ConsumerGate.psm1:224:5|[Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')
+scripts/consumer/ConsumerGate.psm1:1151:34|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:1151:53|$request=$null
+scripts/consumer/ConsumerGate.psm1:1152:35|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:1152:55|$response=$null
+scripts/consumer/ConsumerGate.psm1:1183:18|$stream.Dispose()
+scripts/consumer/ConsumerGate.psm1:1183:36|$memory.Dispose()
+scripts/consumer/ConsumerGate.psm1:1191:31|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:1191:73|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:1192:9|$bytes=$null
+scripts/consumer/ConsumerGate.psm1:1192:22|$buffer=$null
+scripts/consumer/ConsumerGate.psm1:1192:36|$response=$null
+scripts/consumer/ConsumerGate.psm1:1192:52|$request=$null
+scripts/consumer/ConsumerGate.psm1:1192:67|$stream=$null
+scripts/consumer/ConsumerGate.psm1:1192:81|$memory=$null
+scripts/consumer/ConsumerGate.psm1:1192:95|$Headers=$null
+scripts/consumer/ConsumerGate.psm1:407:95|[Environment]::SetEnvironmentVariable($name,$null,'Process')
+scripts/consumer/ConsumerGate.psm1:409:43|$Token=$null
+scripts/consumer/ConsumerGate.psm1:295:13|[void]$environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
+scripts/consumer/ConsumerGate.psm1:295:79|$environment.Clear()
+scripts/consumer/ConsumerGate.psm1:296:13|$standardOutput=$null
+scripts/consumer/ConsumerGate.psm1:296:35|$standardError=$null
+scripts/consumer/ConsumerGate.psm1:296:131|$Token=$null
+scripts/consumer/ConsumerGate.psm1:297:13|Remove-Variable standardOutput,standardError,credentialLeak,executionFailure,result,runtime,environment,Token -ErrorAction SilentlyContinue
+scripts/consumer/ConsumerGate.psm1:299:100|[Environment]::SetEnvironmentVariable($name,$null,'Process')
+scripts/consumer/ConsumerGate.psm1:300:5|$Token=$null
+scripts/consumer/ConsumerGate.psm1:384:13|[Environment]::SetEnvironmentVariable($name,$null,'Process')
+scripts/consumer/ConsumerGate.psm1:386:9|$Token=$null
 scripts/consumer/Invoke-ConsumerSourceGate.ps1:41:9|$phaseEnvironment=$null
 scripts/consumer/Invoke-ConsumerSourceGate.ps1:41:130|$value=$null
 scripts/consumer/Invoke-ConsumerSourceGate.ps1:76:91|[Environment]::SetEnvironmentVariable($name,$null,'Process')
@@ -1766,7 +1948,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
     }
 
     # Scenario: Prepare receives all GitHub token aliases while production launches Git for config and closure inspection.
-    # Purpose: Every non-resolver Git child must explicitly remove the three credential aliases from its process environment.
+    # Purpose: Every non-resolver Git child removes all credential aliases, and the oracle still detects a fully stripped defense stack.
     It 'UnitT33_removes_credentials_from_every_consumer_git_launcher' {
         $sources=@(
             (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerGate.psm1')),
@@ -1777,6 +1959,48 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         }
         $sources[0]|Should Match 'SetEnvironmentVariable\(\$name,\$null,''Process''\)'
         $sources[1]|Should Match 'Environment\.Remove\(\$name\)'
+        foreach($source in $sources){
+            $source|Should Match '\$environment\.ContainsKey\(\$name\)'
+            $source|Should Match 'credential alias'
+        }
+        $gateModule=(Get-Command Invoke-GateOwnedGitCapture -CommandType Function -ErrorAction Stop).Module
+        $previousRuntime=$gateModule.SessionState.PSVariable.GetValue('GatePlatformRuntimeModule')
+        $previousCaptureRoot=$gateModule.SessionState.PSVariable.GetValue('GateGitCaptureRoot')
+        $previousRemaining=$gateModule.SessionState.PSVariable.GetValue('GateGitRemainingMilliseconds')
+        $captureRoot=Join-Path $TestDrive 'git-environment-capture';[void][IO.Directory]::CreateDirectory($captureRoot)
+        $global:Syp497GitEnvironment=$null;$global:Syp497GitCaptureProfile=$null
+        $fakeRuntime=[pscustomobject]@{ExportedCommands=@{
+                'Resolve-PlatformPhysicalPath'={param($Path)[IO.Path]::GetFullPath($Path)}
+                'Open-PlatformDirectory'={param($Root,[switch]$RootOnly)$directory=[pscustomobject]@{};$directory|Add-Member ScriptMethod Dispose {}; $directory}
+                'Start-PlatformOwnedProcess'={
+                    param($ExecutablePath,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$StdoutPath,$StderrPath,
+                        $OutputLimitCharacters,$ArgumentZero,$CaptureProfile)
+                    $global:Syp497GitEnvironment=[Collections.Generic.Dictionary[string,string]]::new($Environment)
+                    $global:Syp497GitCaptureProfile=$CaptureProfile
+                    [IO.File]::WriteAllBytes($StdoutPath,[Text.UTF8Encoding]::new($false).GetBytes("fixture`n"))
+                    [IO.File]::WriteAllBytes($StderrPath,[byte[]]::new(0))
+                    $lease=[pscustomobject]@{HasExited=$true;CaptureCompletedNaturally=$true;Cleanup=$null;TerminationReason=$null
+                        OutputLimitExceeded=$false;OutputLimitStream=$null;ExitCode=0;StartIdentity='fixture'}
+                    $lease|Add-Member ScriptMethod Dispose {}; $lease
+                }
+                'Stop-PlatformOwnedProcess'={param($Lease,$GracePeriod,$Deadline,$ExpectedStartIdentity)[pscustomobject]@{CleanedUp=$true;Uncertainty=$null}}
+            }}
+        try{
+            $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeModule',$fakeRuntime)
+            $gateModule.SessionState.PSVariable.Set('GateGitCaptureRoot',$captureRoot)
+            $gateModule.SessionState.PSVariable.Set('GateGitRemainingMilliseconds',[long]60000)
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,'git-token-sentinel','Process')}
+            $capture=Invoke-GateOwnedGitCapture $script:RepositoryRoot @('--version') -ByteExact
+            $capture.ExitCode|Should Be 0
+            $global:Syp497GitCaptureProfile|Should Be 'raw-stdout'
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){$global:Syp497GitEnvironment.ContainsKey($name)|Should Be $false}
+        }finally{
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
+            $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeModule',$previousRuntime)
+            $gateModule.SessionState.PSVariable.Set('GateGitCaptureRoot',$previousCaptureRoot)
+            $gateModule.SessionState.PSVariable.Set('GateGitRemainingMilliseconds',$previousRemaining)
+            $global:Syp497GitEnvironment=$null;$global:Syp497GitCaptureProfile=$null
+        }
         $fixture=Join-Path $script:RepositoryRoot 'tests/fixtures/Invoke-ConsumerGateCredentialFixture.ps1'
         $formalLease=New-SourceFixtureLease 'git-formal-prepare'
         try{
@@ -1788,25 +2012,45 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         $formalResult=($formalRecords-join[Environment]::NewLine)|ConvertFrom-Json -Depth 30
         $formalResult.exitCode|Should Be 0
         if($IsWindows){
-            $observedLease=New-SourceFixtureLease 'git-observed-prepare'
+            $productionObservation=Join-Path $TestDrive 'git-production-observation.txt'
+            $productionShim=New-GitCredentialPresenceShim (Join-Path $TestDrive 'git-production-shim') $productionObservation
+            $productionOldPath=$env:PATH
+            $closureModule=$null
             try{
-            $observedRecords=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $fixture `
-                -RepositoryRoot $script:RepositoryRoot -FixtureRoot $observedLease.Root -Outcome success `
-                -Sentinel 'git-formal-token-sentinel' -ObserveGitCredentialEnvironment 2>&1)
-            $LASTEXITCODE|Should Be 0
-            $observedResult=($observedRecords-join[Environment]::NewLine)|ConvertFrom-Json -Depth 30
-            $observations=@($observedResult.gitObservations)
-            }finally{Remove-SourceFixtureLease $observedLease}
+                $env:PATH=$productionShim+[IO.Path]::PathSeparator+$productionOldPath
+                foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){
+                    [Environment]::SetEnvironmentVariable($name,'git-production-token','Process')
+                }
+                [void](Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD'))
+                foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){
+                    [Environment]::SetEnvironmentVariable($name,'git-production-token','Process')
+                }
+                $closureModule=Import-Module (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1') -Force -PassThru
+                & $closureModule {
+                    param($AuthorityRoot,$RepositoryRoot)
+                    Initialize-ClosureGitCapture -AuthorityRoot $AuthorityRoot -GitCommandTimeoutSeconds 10 -GitReserveSeconds 20
+                    try{[void](Invoke-ClosureOwnedGitBytes -RepositoryRoot $RepositoryRoot -Arguments @('rev-parse','HEAD'))}
+                    finally{Complete-ClosureGitCapture}
+                } $script:RepositoryRoot $script:RepositoryRoot
+                $observations=@(Get-Content -LiteralPath $productionObservation)
+            }finally{
+                $env:PATH=$productionOldPath
+                foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){
+                    [Environment]::SetEnvironmentVariable($name,$null,'Process')
+                }
+            }
         }else{$observations=@($formalResult.gitObservations)}
         }finally{Remove-SourceFixtureLease $formalLease}
         @($observations).Count|Should BeGreaterThan 0
         @($observations|Where-Object{$_-cne'0,0,0'}).Count|Should Be 0
 
-        $mutantPath=Join-Path $TestDrive 'ConsumerGate-git-inheritance-mutant.psm1'
+        $mutantPath=Join-Path $TestDrive 'ConsumerGate-git-outer-cleanup-mutant.psm1'
         $moduleText=Get-Content -Raw -Encoding UTF8 $script:GateModule;$tokens=$null;$errors=$null
         $moduleAst=[Management.Automation.Language.Parser]::ParseInput($moduleText,[ref]$tokens,[ref]$errors)
         @($errors).Count|Should Be 0
-        $gitFunction=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Invoke-GateGit'},$true))[0]
+        $gitFunctions=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Invoke-GateGit'},$true))
+        @($gitFunctions).Count|Should Be 1
+        $gitFunction=$gitFunctions[0]
         $credentialRemoval=@($gitFunction.Body.FindAll({param($node)$node-is[Management.Automation.Language.ForEachStatementAst]-and
                     $node.Extent.Text.Contains('STANDARD_VALIDATION_GITHUB_API_TOKEN',[StringComparison]::Ordinal)-and
                     $node.Extent.Text.Contains('SetEnvironmentVariable',[StringComparison]::Ordinal)},$true))
@@ -1820,7 +2064,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             $env:PATH=$shim+[IO.Path]::PathSeparator+$oldPath
             foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,'git-mutant-token','Process')}
             Import-Module $mutantPath -Force
-            $hooks=Join-Path $TestDrive 'git-mutant-hooks';[void][IO.Directory]::CreateDirectory($hooks);Initialize-GateGitHooks $hooks
+            $hooks=Join-Path $TestDrive 'git-mutant-hooks';[void][IO.Directory]::CreateDirectory($hooks);Initialize-GateGitHooks $hooks $script:RepositoryRoot
             [void](Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD'))
         }finally{
             $env:PATH=$oldPath
@@ -1828,8 +2072,53 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             Restore-GateFixtureModule
         }
         $mutantObservations=@(Get-Content -LiteralPath $observation)
-        @($mutantObservations)|Should Be @('1,1,1')
-        {if(@($mutantObservations|Where-Object{$_-cne'0,0,0'}).Count-ne0){throw 'GIT_CREDENTIAL_ORACLE_FAILED'}}|Should Throw 'GIT_CREDENTIAL_ORACLE_FAILED'
+        @($mutantObservations)|Should Be @('0,0,0')
+
+        $ownedCaptures=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                    $node.Name-ceq'Invoke-GateOwnedGitCapture'},$true))
+        @($ownedCaptures).Count|Should Be 1
+        $ownedCapture=$ownedCaptures[0]
+        $childEnvironment=@($ownedCapture.Body.FindAll({param($node)$node-is[Management.Automation.Language.CommandAst]-and
+                    $node.GetCommandName()-ceq'New-GateChildEnvironment'-and
+                    $node.Extent.Text-ceq"New-GateChildEnvironment `$null @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')"},$true))
+        @($childEnvironment).Count|Should Be 1
+        $credentialGuard=@($ownedCapture.Body.FindAll({param($node)$node-is[Management.Automation.Language.ForEachStatementAst]-and
+                    $node.Extent.Text.Contains('STANDARD_VALIDATION_GITHUB_API_TOKEN',[StringComparison]::Ordinal)-and
+                    $node.Extent.Text.Contains('ContainsKey',[StringComparison]::Ordinal)-and
+                    $node.Extent.Text.Contains('credential alias',[StringComparison]::Ordinal)},$true))
+        @($credentialGuard).Count|Should Be 1
+        $fullMutantText=$moduleText
+        $fullMutations=@(
+            [pscustomobject]@{Start=$credentialRemoval[0].Extent.StartOffset;Length=$credentialRemoval[0].Extent.EndOffset-$credentialRemoval[0].Extent.StartOffset;Text=''},
+            [pscustomobject]@{Start=$childEnvironment[0].Extent.StartOffset;Length=$childEnvironment[0].Extent.EndOffset-$childEnvironment[0].Extent.StartOffset;Text='New-GateChildEnvironment $null'}
+        )
+        if($IsWindows){$fullMutations+=@(
+            [pscustomobject]@{Start=$credentialGuard[0].Extent.StartOffset;Length=$credentialGuard[0].Extent.EndOffset-$credentialGuard[0].Extent.StartOffset;Text=''}
+        )}
+        foreach($mutation in $fullMutations|Sort-Object Start -Descending){
+            $fullMutantText=$fullMutantText.Remove($mutation.Start,$mutation.Length).Insert($mutation.Start,$mutation.Text)
+        }
+        $fullMutantPath=Join-Path $TestDrive 'ConsumerGate-git-full-inheritance-mutant.psm1'
+        [IO.File]::WriteAllText($fullMutantPath,$fullMutantText,[Text.UTF8Encoding]::new($false))
+        $fullObservation=Join-Path $TestDrive 'git-full-mutant-observation.txt'
+        $fullShim=New-GitCredentialPresenceShim (Join-Path $TestDrive 'git-full-mutant-shim') $fullObservation
+        try{
+            $env:PATH=$fullShim+[IO.Path]::PathSeparator+$oldPath
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,'git-mutant-token','Process')}
+            Import-Module $fullMutantPath -Force
+            $hooks=Join-Path $TestDrive 'git-full-mutant-hooks';[void][IO.Directory]::CreateDirectory($hooks);Initialize-GateGitHooks $hooks $script:RepositoryRoot
+            if($IsWindows){[void](Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD'))}
+            else{{Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD')}|Should Throw 'credential alias'}
+        }finally{
+            $env:PATH=$oldPath
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
+            Restore-GateFixtureModule
+        }
+        if($IsWindows){
+            $fullMutantObservations=@(Get-Content -LiteralPath $fullObservation)
+            @($fullMutantObservations)|Should Be @('1,1,1')
+            {if(@($fullMutantObservations|Where-Object{$_-cne'0,0,0'}).Count-ne0){throw 'GIT_CREDENTIAL_ORACLE_FAILED'}}|Should Throw 'GIT_CREDENTIAL_ORACLE_FAILED'
+        }else{Test-Path -LiteralPath $fullObservation -PathType Leaf|Should Be $false}
     }
 
 
@@ -1864,7 +2153,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
 
     # Scenario: Each ready legacy repository declares a minimal tracked Skill and every exact required repository check.
     # Purpose: Conversion fixtures prove the manifest can drive valid configs while missing or duplicate required checks fail closed.
-    It 'UnitT37_accepts_all_four_ready_manifest_configs_and_rejects_required_check_drift' {
+    It 'UnitT37_accepts_all_five_ready_manifest_configs_and_rejects_required_check_drift' {
         $manifest=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/legacy-migration.json')|ConvertFrom-Json
         foreach($entry in @($manifest.repositories|Where-Object status -eq ready)){
             $root=Join-Path $TestDrive ("ready-"+[string]$entry.id)
@@ -1885,12 +2174,14 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             Join-Path $script:RepositoryRoot 'consumer/legacy-migration.json'
         ) | ConvertFrom-Json -Depth 100
         $expectedDispositionOracle = @{
-            'skill-general' = @{ Count=45; Sha256='5af3bb77584eb77ded51442e1f5bb9c01fa5f7b4819041e82d8a78ea7715d43c' }
-            'skill-atlassian-ecosystem' = @{ Count=99; Sha256='e719c37bb75a8a7570d9e21a4b1d579f9294d3f238a2d57b8b342fe41ad5742a' }
+            'skill-general' = @{ Count=46; Sha256='49d7b8e6a19bf728ec04ea75cf31758c5c90182c803183d29bf6f0091f2c64fe' }
+            'skill-atlassian-ecosystem' = @{ Count=100; Sha256='1ff826f6bb8ffb1d7a93b2d75d54dafccc646c123b45856c2f9176878f21845b' }
             'skill-code-collaboration' = @{ Count=23; Sha256='dbf9332f204eda3d15c8777c4e73ad0b846a0e653367ea188c03d47c2766ce2a' }
             'skill-knowledge-content' = @{ Count=17; Sha256='78704317aea1f2678901f671ecc6fb297640e8e1282eaf3f40dcb3f980a8c2a3' }
+            'skill-darktide-translate' = @{ Count=49; Sha256='9fcad1291facceb4e2d20be43ccf7cf772ffe21f1ef94cad6083da2958669626' }
         }
         foreach ($entry in @($manifest.repositories | Where-Object status -eq ready)) {
+            Restore-GateFixtureModule
             $oracleLines = @($entry.files | ForEach-Object {
                     "$($_.path)|$($_.disposition)|$($_.expectedOutcome)|$($_.target)"
                 } | Sort-Object)
@@ -1898,6 +2189,15 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             $oracleSha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($oracleBytes)).ToLowerInvariant()
             $oracleLines.Count | Should Be $expectedDispositionOracle[[string]$entry.id].Count
             $oracleSha | Should Be $expectedDispositionOracle[[string]$entry.id].Sha256
+
+            if ([string]$entry.id -eq 'skill-darktide-translate') {
+                $darktideSplit = @($entry.files | Where-Object disposition -eq 'split')[0]
+                $darktideSplitTarget = @($entry.files | Where-Object {
+                        [string]$_.path -eq [string]$darktideSplit.target
+                    })
+                $darktideSplitTarget.Count | Should Be 1
+                [string]$darktideSplitTarget[0].disposition | Should Be 'retain'
+            }
 
             $root = Join-Path $TestDrive ("dispositions-" + [string]$entry.id)
             [void][IO.Directory]::CreateDirectory($root)
@@ -1923,9 +2223,14 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
                     [IO.File]::AppendAllText($path, "rewritten`n", [Text.UTF8Encoding]::new($false))
                 }
                 if ($record.disposition -eq 'split') {
-                    $target = Join-Path $root ([string]$record.target)
-                    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $target))
-                    [IO.File]::WriteAllText($target, "split target`n", [Text.UTF8Encoding]::new($false))
+                    $splitTargetRecord = @($entry.files | Where-Object {
+                            [string]$_.path -eq [string]$record.target
+                        })[0]
+                    if ($null -eq $splitTargetRecord) {
+                        $target = Join-Path $root ([string]$record.target)
+                        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $target))
+                        [IO.File]::WriteAllText($target, "split target`n", [Text.UTF8Encoding]::new($false))
+                    }
                 }
             }
             Copy-Item -Force (
@@ -1957,12 +2262,24 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             foreach ($split in @($entry.files | Where-Object disposition -eq split)) {
                 $splitTarget = Join-Path $root ([string]$split.target)
                 $splitContent = Get-Content -Raw -LiteralPath $splitTarget
+                $splitTargetRecord = @($entry.files | Where-Object {
+                        [string]$_.path -eq [string]$split.target
+                    })[0]
                 Remove-Item -LiteralPath $splitTarget -Force
                 [void](Invoke-SourceFixtureGit $root @('add','-A'))
                 [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','wrong split target'))
                 $wrongRevision = Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
-                { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $entry `
-                        $baseRevision $wrongRevision $true } | Should Throw 'Split target'
+                $splitExpectation = $entry
+                if ($null -ne $splitTargetRecord -and $splitTargetRecord.disposition -eq 'retain') {
+                    { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $entry $baseRevision $wrongRevision $true } |
+                        Should Throw 'Retained path must remain unchanged'
+                    $splitExpectation = Copy-FixtureValue $entry
+                    $splitExpectation.files = @($splitExpectation.files | Where-Object {
+                            -not ([string]$_.path -eq [string]$split.target -and $_.disposition -eq 'retain')
+                        })
+                }
+                { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $splitExpectation $baseRevision $wrongRevision $true } |
+                    Should Throw 'Split target'
                 [void][IO.Directory]::CreateDirectory((Split-Path -Parent $splitTarget))
                 [IO.File]::WriteAllText($splitTarget, $splitContent, [Text.UTF8Encoding]::new($false))
                 [void](Invoke-SourceFixtureGit $root @('add','-A'))
@@ -1987,12 +2304,36 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
 
             $deleteExpectation = Copy-FixtureValue $entry
             $deleteExpectation.files = @($deleteExpectation.files)
-            $deleteRecord = @($deleteExpectation.files | Where-Object disposition -eq 'update-tests')[0]
+            $deleteRecord = @($deleteExpectation.files | Where-Object {
+                    $_.disposition -eq 'update-tests' -and $_.expectedOutcome -eq 'rewrite'
+                })[0]
             $deleteRecord.expectedOutcome = 'delete'
             { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $deleteExpectation `
                     $baseRevision $candidateRevision $true } | Should Throw 'must be deleted'
 
-            $retained = @($entry.files | Where-Object disposition -eq retain)[0]
+            $exceptionRetained = @($entry.files | Where-Object {
+                    $_.disposition -eq 'retain' -and (Test-GateExceptionPathInScope ([string]$_.path))
+                })[0]
+            if ($null -ne $exceptionRetained) {
+                $exceptionRetainedPath = Join-Path $root ([string]$exceptionRetained.path)
+                $exceptionRenamedPath = "$exceptionRetainedPath.renamed"
+                Move-Item -LiteralPath $exceptionRetainedPath -Destination $exceptionRenamedPath
+                [void](Invoke-SourceFixtureGit $root @('add','-A'))
+                [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','rename exception-scope retained path'))
+                $exceptionRenameRevision = Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+                (Get-SourceFixtureFailure {
+                        Assert-GateProtectedFilesWithExceptionShrinkOnly $script:RepositoryRoot $root $root $entry `
+                            $baseRevision $exceptionRenameRevision $true
+                    }) | Should BeExactly 'BLOCKED|SkillSpector exception registry was deleted while baseline files remain.'
+                Move-Item -LiteralPath $exceptionRenamedPath -Destination $exceptionRetainedPath
+                [void](Invoke-SourceFixtureGit $root @('add','-A'))
+                [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','restore exception-scope retained path'))
+                $candidateRevision = Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+            }
+
+            $retained = @($entry.files | Where-Object {
+                    $_.disposition -eq 'retain' -and -not (Test-GateExceptionPathInScope ([string]$_.path))
+                })[0]
             if ($null -ne $retained) {
                 $retainedPath = Join-Path $root ([string]$retained.path)
                 $renamedPath = "$retainedPath.renamed"
@@ -2131,24 +2472,497 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         {Assert-GateTransitionInventory $root $entry $commit $true}|Should Throw 'inventory tree scope'
     }
 
-    # Scenario: A candidate changes the exception aggregate or one per-Skill exception baseline.
-    # Purpose: PR-1 blocks every exception-set mutation until the signed PR-2 path exists.
-    It 'UnitT39_blocks_exception_set_changes_before_prepare' {
-        $root=Join-Path $TestDrive 'exception-diff'
-        [void][IO.Directory]::CreateDirectory((Join-Path $root 'config/skillspector-exceptions'))
+    # Scenario: An exception set de-identified from Atlassian 2aca2db is unchanged, reduced, removed, expanded, mutated, malformed, duplicated, or stored under adversarial tree paths.
+    # Purpose: Permit only set-semantic removal, ignore non-UTF-8 paths outside scope, and fail closed on scoped Unicode variants or unsafe data.
+    It 'UnitT39_enforces_SkillSpector_exception_sets_as_shrink_only' {
+        $expectedBlobs=[ordered]@{
+            'skillspector-exceptions.json'='e1c3304ab695faae74fa89c8ed2ea7d1d0523dee'
+            'skillspector-exceptions/configure-bitbucket-api-access.baseline.json'='ccc9dd0c6e4a4da3e3fe6fefbe6019c865a4b748'
+            'skillspector-exceptions/configure-confluence-api-access.baseline.json'='b71b96cc04df8b9e05c96c46552cae2042cbd0ff'
+            'skillspector-exceptions/configure-jira-api-access.baseline.json'='dcf69c14da968b32412dabc5fb0b609936fbbe92'
+            'skillspector-exceptions/manage-confluence-docs-as-code.baseline.json'='32d3009dd6db841f4fc7c459b9b6ff10cd561fab'
+            'skillspector-exceptions/publish-requirements-to-confluence.baseline.json'='7422405fc6fa29420f9e61786ca942f911661acf'
+            'skillspector-exceptions/review-bitbucket-pull-request.baseline.json'='7757758f064dabc9d3fa2731e636a5ca06a181c5'
+        }
+        foreach($entry in $expectedBlobs.GetEnumerator()){
+            $actual=Get-SourceFixtureGitScalar $script:RepositoryRoot @('hash-object','--no-filters','--',(Join-Path $script:ExceptionFixtureConfigRoot $entry.Key))
+            $actual|Should Be $entry.Value
+        }
+
+        $fixture=New-ExceptionFixtureRepository 'exception-unchanged'
+        Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Base
+
+        foreach($rawPath in @(
+            @{Name='outside-root';Prefix='outside-';Suffix='.txt'},
+            @{Name='unrelated-config';Prefix='config/';Suffix='.txt'},
+            @{Name='noncanonical-registry';Prefix='config/skillspector-exceptions';Suffix='.json'}
+        )){
+            $fixture=New-ExceptionFixtureRepository "exception-non-utf8-$($rawPath.Name)"
+            $path=[Collections.Generic.List[byte]]::new()
+            $path.AddRange([Text.Encoding]::ASCII.GetBytes($rawPath.Prefix));$path.Add(0x80)
+            $path.AddRange([Text.Encoding]::ASCII.GetBytes($rawPath.Suffix))
+            $candidate=New-ExceptionFixtureRawPathCandidate $fixture.Root $fixture.Base $path.ToArray() "non-UTF-8 $($rawPath.Name)"
+            Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate
+        }
+
+        $fixture=New-ExceptionFixtureRepository 'exception-non-utf8-baseline-scope'
+        $path=[Collections.Generic.List[byte]]::new()
+        $path.AddRange([Text.Encoding]::ASCII.GetBytes('config/skillspector-exceptions/'));$path.Add(0x80)
+        $path.AddRange([Text.Encoding]::ASCII.GetBytes('.baseline.json'))
+        $candidate=New-ExceptionFixtureRawPathCandidate $fixture.Root $fixture.Base $path.ToArray() 'non-UTF-8 baseline scope'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+            '^INVALID\|.*non-UTF-8 path within.*scope'
+
+        $fixture=New-ExceptionFixtureRepository 'exception-delete-all'
+        Remove-Item -LiteralPath (Join-Path $fixture.Root 'config') -Recurse -Force
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'delete all exceptions'
+        Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate
+
+        $fixture=New-ExceptionFixtureRepository 'exception-real-shrink'
+        $registry=Get-ExceptionFixtureRegistry $fixture.Root
+        $registry.exceptions=@($registry.exceptions|Where-Object skillId -ceq 'review-bitbucket-pull-request')
+        $registry.baselines=@($registry.baselines|Where-Object skillId -ceq 'review-bitbucket-pull-request')
+        Set-ExceptionFixtureRegistry $fixture.Root $registry
+        Get-ChildItem -LiteralPath (Join-Path $fixture.Root 'config/skillspector-exceptions') -File|Where-Object Name -cne `
+            'review-bitbucket-pull-request.baseline.json'|Remove-Item -Force
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'retain real review baseline only'
+        Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate
+
+        $fixture=New-ExceptionFixtureRepository 'exception-delete-one'
+        $baseline=Get-ExceptionFixtureBaseline $fixture.Root
+        $removedHash=[string]$baseline.fingerprints[0].hash
+        $baseline.fingerprints=@($baseline.fingerprints|Where-Object hash -cne $removedHash)
+        Set-ExceptionFixtureBaseline $fixture.Root $baseline
+        $registry=Get-ExceptionFixtureRegistry $fixture.Root
+        $registry.exceptions=@($registry.exceptions|Where-Object fingerprint -cne $removedHash)
+        Set-ExceptionFixtureRegistry $fixture.Root $registry
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'delete one exact exception'
+        Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate
+
+        foreach($number in @('1e-400','0.0')){
+            $fixture=New-ExceptionFixtureRepository "exception-number-$($number.Replace('.','-'))"
+            Replace-ExceptionFixtureRegistryText $fixture.Root '"startColumn": 0,' "`"startColumn`": $number,"
+            $candidate=Save-ExceptionFixtureCandidate $fixture.Root "change zero token to $number"
+            (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+                '^BLOCKED\|.*exception atl-e1-jira-configure-reference-61.*modified'
+        }
+
+        $fixture=New-ExceptionFixtureRepository 'exception-equivalent-string-escape'
+        Replace-ExceptionFixtureRegistryText $fixture.Root '"ruleId": "E1"' '"ruleId": "\u0045\u0031"'
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'change string escape spelling only'
+        Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate
+
+        $fixture=New-ExceptionFixtureRepository 'exception-iso-date-spelling'
+        Replace-ExceptionFixtureRegistryText $fixture.Root '"expiresOn": "2027-05-09"' '"expiresOn": "2027-05-09T00:00:00Z"'
+        $dateBase=Save-ExceptionFixtureCandidate $fixture.Root 'establish ISO date-time base spelling'
+        Replace-ExceptionFixtureRegistryText $fixture.Root '"expiresOn": "2027-05-09T00:00:00Z"' `
+            '"expiresOn": "2027-05-09T00:00:00.000Z"'
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'change ISO date-time spelling'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $dateBase $candidate})|Should Match `
+            '^BLOCKED\|.*skillspector-exceptions\.json.*review.*modified'
+
+        foreach($mutation in @('fingerprint-add','fingerprint-hash','fingerprint-reason')){
+            $fixture=New-ExceptionFixtureRepository "exception-$mutation"
+            $baseline=Get-ExceptionFixtureBaseline $fixture.Root
+            if($mutation-ceq'fingerprint-add'){$baseline.fingerprints=@($baseline.fingerprints)+@((Copy-FixtureValue $baseline.fingerprints[0]));$baseline.fingerprints[-1].file='new.ps1'}
+            elseif($mutation-ceq'fingerprint-hash'){$baseline.fingerprints[0].hash='sha256:'+('f'*64)}
+            else{$baseline.fingerprints[0].reason='changed reason'}
+            Set-ExceptionFixtureBaseline $fixture.Root $baseline
+            $candidate=Save-ExceptionFixtureCandidate $fixture.Root $mutation
+            $failure=Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate}
+            $failure|Should Match '^BLOCKED\|.*review-bitbucket-pull-request\.baseline\.json.*(added|modified)'
+        }
+
+        $fixture=New-ExceptionFixtureRepository 'exception-new-baseline'
+        Copy-Item -LiteralPath (Join-Path $fixture.Root 'config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json') `
+            -Destination (Join-Path $fixture.Root 'config/skillspector-exceptions/new-skill.baseline.json')
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'new baseline'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+            '^BLOCKED\|.*new-skill\.baseline\.json.*added'
+
+        foreach($rename in @(
+            @{Name='registry';Source='config/skillspector-exceptions.json';Destination='config/SkillSpector-exceptions.json'},
+            @{Name='baseline-directory';Source='config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json';Destination='config/SkillSpector-exceptions/review-bitbucket-pull-request.baseline.json'},
+            @{Name='baseline-file';Source='config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json';Destination='config/skillspector-exceptions/Review-bitbucket-pull-request.baseline.json'}
+        )){
+            $fixture=New-ExceptionFixtureRepository "exception-case-$($rename.Name)"
+            $candidate=Move-ExceptionFixtureIndexPath $fixture.Root $rename.Source $rename.Destination
+            (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+                "^BLOCKED\|.*$([regex]::Escape($rename.Destination)).*casing"
+        }
+
+        foreach($variant in @(
+            @{Name='kelvin';Source='config/skillspector-exceptions.json';Destination="config/s$([char]0x212A)illspector-exceptions.json"},
+            @{Name='long-s';Source='config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json';Destination="config/$([char]0x017F)killspector-exceptions/review-bitbucket-pull-request.baseline.json"}
+        )){
+            $fixture=New-ExceptionFixtureRepository "exception-unicode-$($variant.Name)"
+            $candidate=Move-ExceptionFixtureIndexPath $fixture.Root $variant.Source $variant.Destination
+            (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+                "^BLOCKED\|.*$([regex]::Escape($variant.Destination)).*(casing|Unicode variant)"
+        }
+
+        $fixture=New-ExceptionFixtureRepository 'exception-new-registry' -WithoutExceptionSet
+        [void][IO.Directory]::CreateDirectory((Join-Path $fixture.Root 'config'))
+        Copy-Item -LiteralPath (Join-Path $script:ExceptionFixtureConfigRoot 'skillspector-exceptions.json') `
+            -Destination (Join-Path $fixture.Root 'config/skillspector-exceptions.json')
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'new registry'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+            '^BLOCKED\|.*skillspector-exceptions\.json.*added'
+
+        foreach($mutation in @('expiry','approval')){
+            $fixture=New-ExceptionFixtureRepository "exception-registry-$mutation"
+            $registry=Get-ExceptionFixtureRegistry $fixture.Root
+            if($mutation-ceq'expiry'){$registry.review.expiresOn='2027-06-09'}else{$registry.approval.decision='changed'}
+            Set-ExceptionFixtureRegistry $fixture.Root $registry
+            $candidate=Save-ExceptionFixtureCandidate $fixture.Root $mutation
+            (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+                '^BLOCKED\|.*skillspector-exceptions\.json.*(review|approval).*modified'
+        }
+
+        $fixture=New-ExceptionFixtureRepository 'exception-registry-add'
+        $registry=Get-ExceptionFixtureRegistry $fixture.Root
+        $registry.exceptions=@($registry.exceptions)+@((Copy-FixtureValue $registry.exceptions[0]))
+        $registry.exceptions[-1].exceptionId='new-exception'
+        Set-ExceptionFixtureRegistry $fixture.Root $registry
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'add registry exception'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+            '^BLOCKED\|.*exception new-exception.*added'
+
+        $fixture=New-ExceptionFixtureRepository 'exception-registry-delete-only'
+        Remove-Item -LiteralPath (Join-Path $fixture.Root 'config/skillspector-exceptions.json') -Force
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'delete registry only'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+            '^BLOCKED\|.*registry.*baseline.*remain'
+
+        foreach($mutation in @('exception-duplicate','baseline-duplicate')){
+            $fixture=New-ExceptionFixtureRepository "exception-$mutation"
+            if($mutation-ceq'exception-duplicate'){
+                $registry=Get-ExceptionFixtureRegistry $fixture.Root
+                $registry.exceptions=@($registry.exceptions)+@((Copy-FixtureValue $registry.exceptions[0]))
+                Set-ExceptionFixtureRegistry $fixture.Root $registry
+            }else{
+                $baseline=Get-ExceptionFixtureBaseline $fixture.Root
+                $baseline.fingerprints=@($baseline.fingerprints)+@((Copy-FixtureValue $baseline.fingerprints[0]))
+                Set-ExceptionFixtureBaseline $fixture.Root $baseline
+            }
+            $candidate=Save-ExceptionFixtureCandidate $fixture.Root $mutation
+            (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match '^BLOCKED\|.*duplicate'
+        }
+
+        foreach($mode in @('executable','symlink')){
+            $fixture=New-ExceptionFixtureRepository "exception-mode-$mode"
+            $path='config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json'
+            if($mode-ceq'executable'){
+                [void](Invoke-SourceFixtureGit $fixture.Root @('update-index','--chmod=+x','--',$path))
+            }else{
+                $oid=Get-SourceFixtureGitScalar $fixture.Root @('hash-object','--no-filters','--',$path)
+                [void](Invoke-SourceFixtureGit $fixture.Root @('update-index','--add','--cacheinfo',"120000,$oid,$path"))
+            }
+            [void](Invoke-SourceFixtureGit $fixture.Root @('commit','-q','-m',"$mode mode"))
+            $candidate=Get-SourceFixtureGitScalar $fixture.Root @('rev-parse','HEAD')
+            (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+                '^BLOCKED\|.*review-bitbucket-pull-request\.baseline\.json.*mode'
+        }
+
+        foreach($mutation in @('duplicate-key','invalid-json')){
+            $fixture=New-ExceptionFixtureRepository "exception-json-$mutation"
+            $text=if($mutation-ceq'duplicate-key'){'{"schemaVersion":1,"schemaVersion":1}'}else{'{"schemaVersion":'}
+            [IO.File]::WriteAllText((Join-Path $fixture.Root 'config/skillspector-exceptions.json'),$text,[Text.UTF8Encoding]::new($false))
+            $candidate=Save-ExceptionFixtureCandidate $fixture.Root $mutation
+            (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match '^INVALID\|.*JSON'
+        }
+
+        $fixture=New-ExceptionFixtureRepository 'exception-json-lone-high-surrogate-value'
+        Replace-ExceptionFixtureRegistryText $fixture.Root '"decision": "accepted-limited-risk"' '"decision": "\uD800"'
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'lone high surrogate value'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+            '^INVALID\|.*JSON.*config/skillspector-exceptions\.json.*cannot be decoded'
+
+        $fixture=New-ExceptionFixtureRepository 'exception-json-lone-low-surrogate-key'
+        $path=Join-Path $fixture.Root 'config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json'
+        $text=[IO.File]::ReadAllText($path,[Text.Encoding]::UTF8)
+        $updated=[regex]::new('"version":').Replace($text,'"\uDC00":',1)
+        if($updated-ceq$text){throw 'Fixture baseline version key was not found.'}
+        [IO.File]::WriteAllText($path,$updated,[Text.UTF8Encoding]::new($false))
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'lone low surrogate key'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+            '^INVALID\|.*JSON.*review-bitbucket-pull-request\.baseline\.json.*cannot be decoded'
+
+        $prepareFixture=Join-Path $script:RepositoryRoot 'tests/fixtures/Invoke-ConsumerGateCredentialFixture.ps1'
+        foreach($scenario in @(
+            @{Name='exception-shrink';ExitCode=0;Message=''},
+            @{Name='exception-modify';ExitCode=10;Message='fingerprint .* modified'},
+            @{Name='retain-outside-change';ExitCode=20;Message='Retained path must remain unchanged: scripts/Retained.ps1'}
+        )){
+            $lease=New-SourceFixtureLease "prepare-$($scenario.Name)"
+            try{
+                $records=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $prepareFixture `
+                    -RepositoryRoot $script:RepositoryRoot -FixtureRoot $lease.Root -Outcome success `
+                    -Sentinel 'syp500-prepare-sentinel' -TransitionFromLegacy -PrepareScenario $scenario.Name 2>&1)
+                if($LASTEXITCODE-ne0){throw "Prepare fixture '$($scenario.Name)' failed: $($records-join' | ')"}
+                $result=($records-join[Environment]::NewLine)|ConvertFrom-Json -Depth 30
+                if($result.exitCode-ne$scenario.ExitCode){throw "Prepare scenario '$($scenario.Name)' expected exit $($scenario.ExitCode) but got $($result.exitCode): $($result.stderr)"}
+                $result.exitCode|Should Be $scenario.ExitCode
+                if(-not[string]::IsNullOrEmpty($scenario.Message)){$result.stderr|Should Match $scenario.Message}
+                if($scenario.Name-ceq'exception-shrink'){@($result.events)|Should Be @('runtime-installed','source-tools-prepared')}
+                else{@($result.events).Count|Should Be 0}
+            }finally{Remove-SourceFixtureLease $lease}
+        }
+    }
+
+    # Scenario: A transition conversion runs the complete manifest closure through an injected invoker that returns one non-enumerated byte array.
+    # Purpose: Preserve the gate-to-closure byte contract instead of wrapping the byte array in an object array before conversion.
+    It 'UnitT39a_runs_transition_manifest_closure_through_the_byte_invoker' {
+        $root=Join-Path $TestDrive 'closure-byte-invoker-transition'
+        [void][IO.Directory]::CreateDirectory((Join-Path $root 'scripts'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $root 'docs'))
         [void](Invoke-SourceFixtureGit $root @('init','-q','-b','main'))
         [void](Invoke-SourceFixtureGit $root @('config','user.name','Fixture'))
         [void](Invoke-SourceFixtureGit $root @('config','user.email','fixture@example.test'))
-        [IO.File]::WriteAllText((Join-Path $root 'config/skillspector-exceptions.json'),'{}')
+        [IO.File]::WriteAllText((Join-Path $root 'scripts/Legacy.ps1'),'param()',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $root 'README.md'),'fixture',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllBytes((Join-Path $root 'docs/empty.md'),[byte[]]::new(0))
         [void](Invoke-SourceFixtureGit $root @('add','.'))
-        [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','base'))
-        $base=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
-        Assert-GateExceptionSetUnchanged $root $base $base
-        [IO.File]::WriteAllText((Join-Path $root 'config/skillspector-exceptions/fixture.baseline.json'),'{}')
-        [void](Invoke-SourceFixtureGit $root @('add','.'))
-        [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','candidate'))
-        $candidate=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
-        {Assert-GateExceptionSetUnchanged $root $base $candidate}|Should Throw
+        [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','inventory'))
+        $inventoryCommit=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+        $inventoryTree=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD^{tree}')
+        Remove-Item -LiteralPath (Join-Path $root 'scripts/Legacy.ps1')
+        [void](Invoke-SourceFixtureGit $root @('add','-A'))
+        [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','conversion'))
+        $conversionCommit=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+        $manifestPath=Join-Path $TestDrive 'closure-byte-invoker-transition.json'
+        Write-FixtureJson $manifestPath ([ordered]@{schemaVersion=1;repositories=@([ordered]@{
+                        id='fixture';repository='https://example.test/fixture.git';status='ready'
+                        inventoryCommit=$inventoryCommit;inventoryTree=$inventoryTree;requiredRepositoryChecks=@()
+                        files=@([ordered]@{path='scripts/Legacy.ps1';disposition='delete';reason='fixture migration'})
+                    })})
+        $invocations=[Collections.Generic.List[string]]::new()
+        $gitBytesCommand=Get-Command Invoke-SourceFixtureGitBytes
+        $invoker={param([string]$RepositoryRoot,[string[]]$Arguments,[int[]]$AllowedExitCodes)
+            $invocations.Add(($Arguments-join' '))|Out-Null
+            & $gitBytesCommand $RepositoryRoot $Arguments
+        }.GetNewClosure()
+        $result=Get-ConsumerManifestClosure -RepositoryRoot $root -Commit $conversionCommit -Stage conversion `
+            -InventoryCommit $inventoryCommit -Manifest $manifestPath -RepositoryId fixture `
+            -AuthorityRoot $script:RepositoryRoot -GitByteInvoker $invoker
+        $result.result|Should Be 'PASS'
+        $invocations.Count|Should BeGreaterThan 0
+    }
+
+    # Scenario: A retained 2.13.4 exception set is reduced to three records while every scanner-bound field is re-pinned to active 2.13.6.
+    # Purpose: Allow the exact human-approved scanner transition without weakening shrink-only semantics.
+    It 'UnitT65_accepts_the_approved_SkillSpector_scanner_transition' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-valid'
+        Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot
+    }
+
+    # Scenario: A scanner-transition candidate adds a fourth exception.
+    # Purpose: Keep transition approval shrink-only and reject additions even when scanner identities are valid.
+    It 'UnitT66_blocks_an_added_exception_during_scanner_transition' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-add' -Mutation {
+            param($registry,$baseline,$root)
+            $added=Copy-FixtureValue $registry.exceptions[0];$added.exceptionId='added-exception';$added.file='added.ps1'
+            $registry.exceptions=@($registry.exceptions)+@($added)
+        }
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|'
+    }
+
+    # Scenario: A retained exception moves to another source line during scanner transition.
+    # Purpose: Permit only fingerprint replacement and preserve the exact reviewed location.
+    It 'UnitT67_blocks_exception_location_drift_during_scanner_transition' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-line' -Mutation {param($registry,$baseline,$root) $registry.exceptions[0].startLine++}
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|.*fingerprint'
+    }
+
+    # Scenario: A retained baseline changes its human-approved reason during scanner transition.
+    # Purpose: Keep all non-hash fingerprint fields immutable.
+    It 'UnitT68_blocks_baseline_reason_drift_during_scanner_transition' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-reason' -Mutation {param($registry,$baseline,$root) $baseline.fingerprints[0].reason='changed reason'}
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|.*hash'
+    }
+
+    # Scenario: The registry scanner source changes together with an otherwise valid version transition.
+    # Purpose: Restrict scanner object changes to version and wheelSha256.
+    It 'UnitT69_blocks_scanner_source_drift_during_scanner_transition' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-source' -Mutation {param($registry,$baseline,$root) $registry.scanner.source='changed-source'}
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|.*source'
+    }
+
+    # Scenario: A candidate targets reviewed but non-active 2.13.0.
+    # Purpose: Allow transitions only to the executing authority's active scanner entry.
+    It 'UnitT70_blocks_a_scanner_transition_to_a_non_active_version' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-non-active' -NewVersion '2.13.0' `
+            -NewWheel '41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|'
+    }
+
+    # Scenario: The candidate version is active but its wheel digest is not the active approved digest.
+    # Purpose: Bind transition permission to the exact reviewed scanner artifact.
+    It 'UnitT71_blocks_an_active_scanner_transition_with_the_wrong_wheel' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-new-wheel' -NewWheel ('f'*64)
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|'
+    }
+
+    # Scenario: The base registry names a scanner version absent from approved-sources.
+    # Purpose: Require the old side of a transition to be a retained reviewed entry.
+    It 'UnitT72_blocks_a_scanner_transition_from_an_unknown_old_version' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-old-unknown' -OldVersion '9.9.9' -OldWheel ('e'*64)
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|'
+    }
+
+    # Scenario: Fingerprints change while scanner.version remains 2.13.4.
+    # Purpose: Preserve the original shrink-only rule outside a real scanner transition.
+    It 'UnitT73_blocks_fingerprint_changes_without_a_scanner_version_transition' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-same-version' -NewVersion '2.13.4' `
+            -NewWheel 'c5e7f290897c65018013a6e37022fabdd2ba1aeeb4994b65df2de8b0d536bea0'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|.*modified'
+    }
+
+    # Scenario: A candidate baseline declares a scanner_version different from the registry transition target.
+    # Purpose: Keep every retained baseline bound to the exact active scanner version.
+    It 'UnitT74_blocks_baseline_scanner_version_drift_during_transition' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-baseline-version' -Mutation {param($registry,$baseline,$root) $baseline.scanner_version='2.13.5'}
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|.*scanner_version'
+    }
+
+    # Scenario: A candidate exception fingerprint differs from its otherwise retained baseline hash.
+    # Purpose: Preserve the registry-to-baseline one-to-one pairing after re-pinning.
+    It 'UnitT75_blocks_exception_and_baseline_fingerprint_mismatch' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-pairing' -Mutation {param($registry,$baseline,$root) $registry.exceptions[0].fingerprint='sha256:'+('f'*64)}
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|Should Match '^BLOCKED\|.*exactly one'
+    }
+
+    # Scenario: Legacy callers invoke the three-argument shrink-only function for a version-changing candidate.
+    # Purpose: Keep old call behavior fail-closed when no authority can approve the transition.
+    It 'UnitT76_keeps_the_legacy_three_argument_gate_fail_closed' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-no-authority'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate})|Should Match '^BLOCKED\|'
+    }
+
+    # Scenario: All three candidate fingerprints are reported once with their exact approved severity, reason and source line.
+    # Purpose: Re-derive transition expectations from Git trees and accept complete run-bound evidence with matching severity.
+    It 'UnitT77_accepts_three_of_three_run_bound_transition_suppressions_with_matching_severity' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-evidence-valid'
+        $suppressed=Get-ScannerTransitionSuppressedFindings $fixture
+        $suppressed.Count|Should Be 3
+        Assert-ScannerTransitionEvidenceFixture $fixture $suppressed
+    }
+
+    # Scenario: The authority report outputSha256 differs from the hash recomputed from raw stdout and stderr.
+    # Purpose: Bind transition evidence to the central output-hash contract rather than the raw event file digest.
+    It 'UnitT78_blocks_a_transition_output_hash_mismatch' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-evidence-output-hash'
+        $evidence=New-ScannerTransitionEvidenceFixture $fixture (Get-ScannerTransitionSuppressedFindings $fixture)
+        $evidence.Report.sourceValidation.events[0].outputSha256='f'*64
+        (Get-SourceFixtureFailure {Assert-GateExceptionScannerTransitionEvidence $script:RepositoryRoot $fixture.Root $fixture.Base `
+            $fixture.Candidate $evidence.Report $evidence.Artifacts})|Should Match '^BLOCKED\|.*output hash'
+    }
+
+    # Scenario: A policy-validated non-Windows leg reports platform-unavailable and therefore has no suppressedFindings.
+    # Purpose: Preserve the approved platform-unavailable path while Windows still supplies scanner suppression evidence.
+    It 'UnitT79_accepts_platform_unavailable_transition_evidence_without_suppressions' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-evidence-platform-unavailable'
+        Assert-ScannerTransitionEvidenceFixture $fixture @() 'platform-unavailable'
+    }
+
+    # Scenario: The run-bound scanner envelope omits one of three candidate fingerprints.
+    # Purpose: Reject any transitioned fingerprint that was not actually produced and used in this run.
+    It 'UnitT80_blocks_an_unused_transition_fingerprint' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-evidence-unused'
+        $suppressed=@(Get-ScannerTransitionSuppressedFindings $fixture|Select-Object -First 2)
+        (Get-SourceFixtureFailure {Assert-ScannerTransitionEvidenceFixture $fixture $suppressed})|Should Match '^BLOCKED\|.*every candidate baseline fingerprint'
+    }
+
+    # Scenario: A run-bound suppressed finding reports a line different from the paired exception startLine.
+    # Purpose: Bind new fingerprints to the exact reviewed source location rather than only rule, file, and reason.
+    It 'UnitT81_blocks_transition_suppression_line_mismatch' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-evidence-line'
+        $suppressed=Get-ScannerTransitionSuppressedFindings $fixture;$suppressed[0].line++
+        (Get-SourceFixtureFailure {Assert-ScannerTransitionEvidenceFixture $fixture $suppressed})|Should Match '^BLOCKED\|.*line'
+    }
+
+    # Scenario: The raw event file is modified after its initial digest is captured but before the final comparison.
+    # Purpose: Detect a TOCTOU mutation independently from the stdout/stderr output hash.
+    It 'UnitT82_blocks_a_raw_event_changed_during_final_comparison' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-evidence-toctou'
+        $evidence=New-ScannerTransitionEvidenceFixture $fixture (Get-ScannerTransitionSuppressedFindings $fixture)
+        $global:ScannerTransitionHashCalls=0
+        Mock Get-GateSha256 {
+            $hashCallCounter=Get-Variable ScannerTransitionHashCalls -Scope Global -ErrorAction SilentlyContinue
+            if($null-ne$hashCallCounter){
+                $hashCallCounter.Value=[int]$hashCallCounter.Value+1
+                if($hashCallCounter.Value-eq2){[IO.File]::AppendAllText($Path," ",[Text.UTF8Encoding]::new($false))}
+            }
+            (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+        } -ModuleName ConsumerGate
+        try{
+            (Get-SourceFixtureFailure {Assert-GateExceptionScannerTransitionEvidence $script:RepositoryRoot $fixture.Root $fixture.Base `
+                $fixture.Candidate $evidence.Report $evidence.Artifacts})|Should Match '^BLOCKED\|.*changed during final comparison'
+        }finally{Remove-Variable ScannerTransitionHashCalls -Scope Global -ErrorAction SilentlyContinue}
+    }
+
+    # Scenario: Scanner version, wheel, exception fingerprints, and baseline hashes change while every referenced Skill file stays unchanged.
+    # Purpose: Accept the approved scanner transition only when immutable base and candidate trees bind every exception to the same blob.
+    It 'UnitT83_accepts_a_transition_with_unchanged_referenced_files' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-references-unchanged'
+        Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot
+    }
+
+    # Scenario: A scanner transition also changes one byte in a file referenced by a retained exception.
+    # Purpose: Prevent a regenerated fingerprint from hiding changed Skill content in the scanner-version transition.
+    It 'UnitT84_blocks_a_transition_that_changes_a_referenced_file' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-reference-changed' -Mutation {
+            param($registry,$baseline,$root)
+            [IO.File]::AppendAllText((Join-Path $root 'skills/review-bitbucket-pull-request/scripts/Invoke-BitbucketReviewActions.ps1'),'x',`
+                [Text.UTF8Encoding]::new($false))
+        }
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|`
+            Should Match '^BLOCKED\|.*skills/review-bitbucket-pull-request/scripts/Invoke-BitbucketReviewActions\.ps1'
+    }
+
+    # Scenario: A scanner transition deletes a file referenced by a retained exception from the candidate tree.
+    # Purpose: Require every transition exception target to remain a regular blob in both immutable revisions.
+    It 'UnitT85_blocks_a_transition_that_deletes_a_referenced_file' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-reference-deleted' -Mutation {
+            param($registry,$baseline,$root)
+            Remove-Item -LiteralPath (Join-Path $root 'skills/review-bitbucket-pull-request/references/bitbucket-cloud-api.md') -Force
+        }
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|`
+            Should Match '^BLOCKED\|.*skills/review-bitbucket-pull-request/references/bitbucket-cloud-api\.md'
+    }
+
+    # Scenario: A retained exception uses a parent-directory segment in both the base and transitioned candidate registries.
+    # Purpose: Reject an exception target that could escape skills/<skillId>/ even when all other transition fields are valid.
+    It 'UnitT86_blocks_a_transition_with_an_unsafe_exception_file' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-reference-unsafe' -BaseMutation {
+            param($registry,$baseline,$root)
+            $exception=@($registry.exceptions|Where-Object skillId -ceq 'review-bitbucket-pull-request')[0]
+            $oldFile=[string]$exception.file;$exception.file='../escape.ps1'
+            @($baseline.fingerprints|Where-Object file -ceq $oldFile)[0].file='../escape.ps1'
+        }
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Candidate $script:RepositoryRoot})|`
+            Should Match '^BLOCKED\|.*unsafe referenced file'
+    }
+
+    # Scenario: A referenced Skill file changes while scanner.version and all exception metadata remain unchanged.
+    # Purpose: Keep non-transition shrink-only behavior unchanged by the transition-only blob identity rule.
+    It 'UnitT87_preserves_non_transition_behavior_for_referenced_file_changes' {
+        $fixture=New-ExceptionFixtureRepository 'scanner-non-transition-reference-changed'
+        [IO.File]::AppendAllText((Join-Path $fixture.Root 'skills/review-bitbucket-pull-request/SKILL.md'),'x',`
+            [Text.UTF8Encoding]::new($false))
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'change referenced file without scanner transition'
+        Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate $script:RepositoryRoot
+    }
+
+    # Scenario: A transitioned finding has the same identity and location as its approved exception but reports a higher severity.
+    # Purpose: Prevent a LOW approval from suppressing a MEDIUM finding after only its fingerprint and hash are re-pinned.
+    It 'UnitT88_blocks_transition_suppression_severity_mismatch' {
+        $fixture=New-ScannerTransitionFixture 'scanner-transition-evidence-severity' -BaseMutation {
+            param($registry,$baseline,$root)
+            @($registry.exceptions|Where-Object skillId -ceq 'review-bitbucket-pull-request')[0].severity='LOW'
+        }
+        $suppressed=Get-ScannerTransitionSuppressedFindings $fixture
+        (Get-SourceFixtureFailure {Assert-ScannerTransitionEvidenceFixture $fixture $suppressed})|Should Match '^BLOCKED\|.*severity'
     }
 
     # Scenario: Three valid legs were fetched at different official-main tips and one stable binding is then changed.
@@ -2324,9 +3138,59 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         $failure.Error | Should Match 'failed with exit code 7'
     }
 
-    # Scenario: The trusted repository check receives the same explicit token arrays through the current runner wrapper and pwsh -File.
-    # Purpose: Preserve exact, case-insensitive names without abbreviation or colon syntax and fail closed on every malformed token shape.
-    It 'UnitT45_parses_repository_check_tokens_identically_for_runner_and_file_invocation' {
+    # Scenario: A Linux repository check creates and commits a fixture repository through the production owned-process boundary.
+    # Purpose: Git automatic maintenance must not detach an unattributed adopted child after the check exits.
+    # Register only on the native host; keep this file's Core CI skip count at zero.
+    if($IsLinux){
+        It 'InterT45_disables_detached_git_maintenance_in_the_owned_repository_check' {
+            $candidate=Join-Path $TestDrive 'git-maintenance-check'
+            foreach($directory in @((Join-Path $candidate 'config'),(Join-Path $candidate 'scripts'))){
+                [void][IO.Directory]::CreateDirectory($directory)
+            }
+            $check=@'
+param([string]$RepositoryRoot)
+$ErrorActionPreference='Stop'
+$fixture=Join-Path $RepositoryRoot 'fixture-repo'
+& git init -q -b main $fixture
+& git -C $fixture config user.name Fixture
+& git -C $fixture config user.email fixture@example.test
+& git -C $fixture config maintenance.auto true
+& git -C $fixture config maintenance.autoDetach true
+& git -C $fixture config gc.autoDetach true
+$effectiveMaintenanceAuto=& git -C $fixture config --get maintenance.auto
+if($LASTEXITCODE-ne0-or$effectiveMaintenanceAuto-cne'false'){throw 'Effective maintenance.auto must be false.'}
+$effectiveGcAutoDetach=& git -C $fixture config --get gc.autoDetach
+if($LASTEXITCODE-ne0-or$effectiveGcAutoDetach-cne'false'){throw 'Effective gc.autoDetach must be false.'}
+[IO.File]::WriteAllText((Join-Path $fixture 'README.md'),'fixture',[Text.UTF8Encoding]::new($false))
+& git -C $fixture add README.md
+& git -C $fixture commit -q -m fixture
+if($LASTEXITCODE-ne0){throw 'Fixture git commit failed.'}
+'@
+            [IO.File]::WriteAllText((Join-Path $candidate 'scripts/check.ps1'),$check,[Text.UTF8Encoding]::new($false))
+            Write-FixtureJson (Join-Path $candidate 'config/consumer-gate.json') ([ordered]@{
+                    schemaVersion=1;repositoryId='fixture';sourceRepository='https://example.test/fixture.git'
+                    activeSkills=@('fixture');repositoryChecks=@([ordered]@{id='general';kind='general';path='scripts/check.ps1'})
+                })
+            $runner=Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidation.ps1'
+            . $runner -CandidateRoot $candidate -AdapterPath (Join-Path $candidate 'unused-adapter.json') `
+                -ArtifactsRoot (Join-Path $candidate 'unused-artifacts') -SourceRepository 'https://example.test/fixture.git' `
+                -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
+            $result=Invoke-StandardValidationProcess `
+                -Command (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1') `
+                -Arguments @('-Mode','general') -WorkingDirectory $candidate -TimeoutSeconds 30 -Environment @{
+                    STANDARD_VALIDATION_CORE_RUN_ID='fixture-run'
+                    STANDARD_VALIDATION_CORE_CHECK_ID='repository-general'
+                    STANDARD_VALIDATION_CORE_SKILLS='fixture'
+                }
+            $result.exitCode | Should Be 0
+            $result.cleanedUp | Should Be $true
+            (@($result.processOwnership.cleanup.Uncertainty)-join"`n") | Should Not Match 'unattributed-adopted-child'
+        }
+    }
+
+    # Scenario: The trusted repository check is invoked by pwsh -File with valid and malformed native parameter tokens.
+    # Purpose: Use the normal non-positional parameter binder and fail closed on unknown, duplicate, positional, or invalid values.
+    It 'UnitT45_binds_repository_check_parameters_with_the_native_file_contract' {
         $candidate=Join-Path $TestDrive 'repository-check-arguments'
         [void][IO.Directory]::CreateDirectory((Join-Path $candidate 'config'))
         [void][IO.Directory]::CreateDirectory((Join-Path $candidate 'scripts'))
@@ -2336,21 +3200,14 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
                 activeSkills=@('fixture');repositoryChecks=@([ordered]@{id='general';kind='general';path='scripts/check.ps1'})
             })
         $trusted=Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1'
-        function Invoke-ArgumentFixture([string]$Style,[string[]]$Tokens) {
+        function Invoke-ArgumentFixture([string[]]$Tokens) {
             $start=[Diagnostics.ProcessStartInfo]::new()
             $start.FileName=(Get-Process -Id $PID).Path
             $start.WorkingDirectory=$candidate
             $start.UseShellExecute=$false
             $start.RedirectStandardOutput=$true
             $start.RedirectStandardError=$true
-            if($Style-ceq'runner'){
-                $start.Environment['FIXTURE_CHECK_PATH']=$trusted
-                $start.Environment['FIXTURE_CHECK_ARGUMENTS']=ConvertTo-Json -InputObject ([string[]]$Tokens) -Compress
-                $dispatch='$items=@(ConvertFrom-Json -InputObject $env:FIXTURE_CHECK_ARGUMENTS); & $env:FIXTURE_CHECK_PATH @items; exit ([int]$LASTEXITCODE)'
-                foreach($argument in @('-NoProfile','-NonInteractive','-Command',$dispatch)){[void]$start.ArgumentList.Add($argument)}
-            }else{
-                foreach($argument in @('-NoProfile','-NonInteractive','-File',$trusted)+$Tokens){[void]$start.ArgumentList.Add($argument)}
-            }
+            foreach($argument in @('-NoProfile','-NonInteractive','-File',$trusted)+$Tokens){[void]$start.ArgumentList.Add($argument)}
             $start.Environment['STANDARD_VALIDATION_CORE_RUN_ID']='fixture-run'
             $start.Environment['STANDARD_VALIDATION_CORE_CHECK_ID']='repository-general'
             $start.Environment['STANDARD_VALIDATION_CORE_SKILLS']='fixture'
@@ -2361,62 +3218,76 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         }
         $validHash='a'*64
         $cases=@(
-            [pscustomobject]@{Name='general';Tokens=@('-Mode','general');Exit=0;Message=''},
-            [pscustomobject]@{Name='case-insensitive';Tokens=@('-mOdE','GENERAL');Exit=0;Message=''},
+            [pscustomobject]@{Name='general';Tokens=@('-Mode','general');Exit=0},
+            [pscustomobject]@{Name='case-insensitive';Tokens=@('-mOdE','GENERAL');Exit=0},
             [pscustomobject]@{Name='general-with-pester-values';Tokens=@('-Mode','general','-PesterReceiptSha256',$validHash,
-                    '-PesterManifestSha256',$validHash,'-PesterVersion','6.2.0');Exit=0;Message=''},
-            [pscustomobject]@{Name='unknown';Tokens=@('-Unknown','value','-Mode','general');Exit=1;Message='Unknown repository check parameter'},
-            [pscustomobject]@{Name='abbreviation';Tokens=@('-M','general');Exit=1;Message='Unknown repository check parameter'},
-            [pscustomobject]@{Name='colon';Tokens=@('-Mode:general');Exit=1;Message='Unknown repository check parameter'},
-            [pscustomobject]@{Name='duplicate';Tokens=@('-Mode','general','-mode','general');Exit=1;Message='Duplicate repository check parameter'},
-            [pscustomobject]@{Name='missing-value';Tokens=@('-Mode');Exit=1;Message='missing a value'},
-            [pscustomobject]@{Name='position';Tokens=@('general');Exit=1;Message='Unexpected positional repository check token'},
-            [pscustomobject]@{Name='missing-mode';Tokens=@('-PesterVersion','6.2.0');Exit=1;Message='Mode is required'},
-            [pscustomobject]@{Name='dash-value';Tokens=@('-Mode','-general');Exit=1;Message='must not begin with'},
-            [pscustomobject]@{Name='invalid-mode';Tokens=@('-Mode','other');Exit=1;Message='Mode must be general or pester'},
-            [pscustomobject]@{Name='invalid-receipt-hash';Tokens=@('-Mode','general','-PesterReceiptSha256',('A'*64));Exit=1;Message='lowercase SHA-256'},
-            [pscustomobject]@{Name='invalid-manifest-hash';Tokens=@('-Mode','general','-PesterManifestSha256','abc');Exit=1;Message='lowercase SHA-256'},
-            [pscustomobject]@{Name='invalid-version';Tokens=@('-Mode','general','-PesterVersion','6.2');Exit=1;Message='PesterVersion must be 6.2.0'},
-            [pscustomobject]@{Name='pester-missing-receipt';Tokens=@('-Mode','pester','-PesterManifestSha256',$validHash,'-PesterVersion','6.2.0');Exit=1;Message='PesterReceiptSha256 is required'},
-            [pscustomobject]@{Name='pester-missing-manifest';Tokens=@('-Mode','pester','-PesterReceiptSha256',$validHash,'-PesterVersion','6.2.0');Exit=1;Message='PesterManifestSha256 is required'},
-            [pscustomobject]@{Name='pester-missing-version';Tokens=@('-Mode','pester','-PesterReceiptSha256',$validHash,'-PesterManifestSha256',$validHash);Exit=1;Message='PesterVersion is required'}
+                    '-PesterManifestSha256',$validHash,'-PesterVersion','6.2.0');Exit=0},
+            [pscustomobject]@{Name='unknown';Tokens=@('-Unknown','value','-Mode','general');Exit=1},
+            [pscustomobject]@{Name='duplicate';Tokens=@('-Mode','general','-Mode','general');Exit=1},
+            [pscustomobject]@{Name='missing-value';Tokens=@('-Mode');Exit=1},
+            [pscustomobject]@{Name='position';Tokens=@('general');Exit=1},
+            [pscustomobject]@{Name='missing-mode';Tokens=@('-PesterVersion','6.2.0');Exit=1},
+            [pscustomobject]@{Name='invalid-mode';Tokens=@('-Mode','other');Exit=1},
+            [pscustomobject]@{Name='invalid-receipt-hash';Tokens=@('-Mode','general','-PesterReceiptSha256',('A'*64));Exit=1},
+            [pscustomobject]@{Name='invalid-manifest-hash';Tokens=@('-Mode','general','-PesterManifestSha256','abc');Exit=1},
+            [pscustomobject]@{Name='invalid-version';Tokens=@('-Mode','general','-PesterVersion','6.2');Exit=1},
+            [pscustomobject]@{Name='pester-missing-receipt';Tokens=@('-Mode','pester','-PesterManifestSha256',$validHash,'-PesterVersion','6.2.0');Exit=1},
+            [pscustomobject]@{Name='pester-missing-manifest';Tokens=@('-Mode','pester','-PesterReceiptSha256',$validHash,'-PesterVersion','6.2.0');Exit=1},
+            [pscustomobject]@{Name='pester-missing-version';Tokens=@('-Mode','pester','-PesterReceiptSha256',$validHash,'-PesterManifestSha256',$validHash);Exit=1}
         )
         foreach($case in $cases){
-            $results=@(@('runner','file')|ForEach-Object{Invoke-ArgumentFixture $_ $case.Tokens})
-            foreach($result in $results){
-                if($result.ExitCode-ne$case.Exit){throw "$($case.Name) expected $($case.Exit), got $($result.ExitCode): $($result.Error)"}
-                $result.ExitCode|Should Be $case.Exit
-                if(-not[string]::IsNullOrEmpty($case.Message)){$result.Error|Should Match ([regex]::Escape($case.Message))}
-            }
-            $results[0].ExitCode|Should Be $results[1].ExitCode
+            $result=Invoke-ArgumentFixture $case.Tokens
+            if($result.ExitCode-ne$case.Exit){throw "$($case.Name) expected $($case.Exit), got $($result.ExitCode): $($result.Error)"}
+            $result.ExitCode|Should Be $case.Exit
         }
         $source=Get-Content -Raw -Encoding UTF8 $trusted;$tokens=$null;$errors=$null
         $ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
         @($errors).Count|Should Be 0
-        $ast.ParamBlock|Should BeNullOrEmpty
+        $ast.ParamBlock|Should Not BeNullOrEmpty
+        $ast.ParamBlock.Attributes.Extent.Text|Should Match 'CmdletBinding\(PositionalBinding=\$false\)'
+        @($ast.ParamBlock.Parameters|ForEach-Object{$_.Name.VariablePath.UserPath})|Should Be @('Mode','PesterReceiptSha256','PesterManifestSha256','PesterVersion')
         @($ast.ScriptRequirements.RequiredModules).Count|Should Be 0
     }
 
-    # Scenario: Adapter validation sees the trusted repository check, another script, and a mismatched executable hash.
-    # Purpose: Only the setup-bound trusted check may be used as a PowerShell core-check executable.
-    It 'UnitT46_allows_only_the_setup_bound_trusted_ps1_core_check' {
+    # Scenario: Adapter validation sees the frozen pwsh runtime, trusted -File script, another script, and mismatched hashes.
+    # Purpose: Close the consumer adapter to one exact pwsh -File repository-check command and its two frozen identities.
+    It 'UnitT46_allows_only_the_setup_bound_trusted_pwsh_file_check' {
         $root=Join-Path $TestDrive 'adapter-ps1-closure'
         $trustedRoot=Join-Path $root 'runtime'
         $trustedDirectory=Join-Path $trustedRoot 'trusted'
         [void][IO.Directory]::CreateDirectory($trustedDirectory)
         $trusted=Join-Path $trustedDirectory 'Invoke-ConsumerRepositoryCheck.ps1'
         $other=Join-Path $trustedDirectory 'Other.ps1'
+        $powerShell=Join-Path $trustedRoot $(if($IsWindows){'pwsh.exe'}else{'pwsh'})
         [IO.File]::WriteAllText($trusted,'exit 0',[Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllText($other,'exit 0',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($powerShell,'fixture pwsh',[Text.UTF8Encoding]::new($false))
         $hash=(Get-FileHash $trusted -Algorithm SHA256).Hash.ToLowerInvariant()
-        $setup=[pscustomobject]@{trustedRoot=$trustedRoot;repositoryCheck=$trusted;sourceValidation=[pscustomobject]@{
-                frozenFiles=@([pscustomobject]@{path=$trusted;sha256=$hash})}}
-        $valid=[pscustomobject]@{id='repository-general';executable=$trusted;executableSha256=$hash}
-        {Assert-GateAdapterExecutableBindings @($valid) $setup}|Should Not Throw
-        $wrongPath=Copy-FixtureValue $valid;$wrongPath.executable=$other
-        {Assert-GateAdapterExecutableBindings @($wrongPath) $setup}|Should Throw 'trusted repository check'
-        $wrongHash=Copy-FixtureValue $valid;$wrongHash.executableSha256=('0'*64)
-        {Assert-GateAdapterExecutableBindings @($wrongHash) $setup}|Should Throw 'trusted repository check'
+        $powerShellHash=(Get-FileHash $powerShell -Algorithm SHA256).Hash.ToLowerInvariant()
+        $setupPath=Join-Path $root 'source-tools.json'
+        Write-FixtureJson $setupPath ([ordered]@{trustedRoot=$trustedRoot;repositoryCheck=$trusted;pesterReceiptSha256=('a'*64)
+                pesterManifestSha256=('b'*64);pesterVersion='6.2.0';sourceValidation=[ordered]@{
+                    frozenFiles=@([ordered]@{path=$trusted;sha256=$hash},[ordered]@{path=$powerShell;sha256=$powerShellHash})}})
+        $gateSetup=Read-GateJson $setupPath 'adapter setup fixture'
+        $valid=@(
+            [pscustomobject]@{id='repository-general';kind='general';executable=$powerShell;executableSha256=$powerShellHash
+                arguments=@('-NoProfile','-NonInteractive','-File',$trusted,'-Mode','general')},
+            [pscustomobject]@{id='repository-pester';kind='pester';executable=$powerShell;executableSha256=$powerShellHash
+                arguments=@('-NoProfile','-NonInteractive','-File',$trusted,'-Mode','pester','-PesterReceiptSha256',('a'*64),
+                    '-PesterManifestSha256',('b'*64),'-PesterVersion','6.2.0')}
+        )
+        {Assert-GateAdapterExecutableBindings -Checks @($valid) -Setup $gateSetup -PowerShell $powerShell}|Should Not Throw
+        $wrongPath=Copy-FixtureValue $valid;$wrongPath[0].arguments[3]=$other
+        {Assert-GateAdapterExecutableBindings -Checks @($wrongPath) -Setup $gateSetup -PowerShell $powerShell}|Should Throw 'trusted pwsh -File'
+        $wrongHash=Copy-FixtureValue $valid;$wrongHash[0].executableSha256=('0'*64)
+        {Assert-GateAdapterExecutableBindings -Checks @($wrongHash) -Setup $gateSetup -PowerShell $powerShell}|Should Throw 'trusted pwsh -File'
+        $missingFrozenFiles=Copy-FixtureValue $gateSetup
+        $missingFrozenFiles.sourceValidation.PSObject.Properties.Remove('frozenFiles')
+        {Assert-GateAdapterExecutableBindings -Checks @($valid) -Setup $missingFrozenFiles -PowerShell $powerShell}|Should Throw 'frozenFiles array'
+        $duplicateSetup=Copy-FixtureValue $gateSetup
+        $duplicateSetup.sourceValidation.frozenFiles=@($duplicateSetup.sourceValidation.frozenFiles)+@(
+            [pscustomobject]@{path=$trusted;sha256=('0'*64)})
+        {Assert-GateAdapterExecutableBindings -Checks @($valid) -Setup $duplicateSetup -PowerShell $powerShell}|Should Throw 'exactly once'
     }
 
     if($IsWindows){
@@ -2426,17 +3297,20 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             $root=Join-Path $TestDrive 'resolver-windows-environment'
             $authority=Join-Path $root 'authority';$install=Join-Path $root 'install';$source=Join-Path $root 'source-tools'
             foreach($directory in @($authority,$install,$source,(Join-Path $authority 'docs/standards'))){[void][IO.Directory]::CreateDirectory($directory)}
+            Copy-GatePlatformRuntimeFixture $authority
             [IO.File]::WriteAllText((Join-Path $authority 'docs/standards/validation-toolchain.json'),'{}',[Text.UTF8Encoding]::new($false))
             $resolver=Join-Path $root 'resolver.ps1'
             [IO.File]::WriteAllText($resolver,@'
-param([string]$PolicyPath,[string]$ToolName,[switch]$Install,[string]$InstallRoot,[string]$ExpectedGoRuntimeVersion,[string]$RunId,[string]$OutputPath)
+param([string]$PolicyPath,[string]$ToolName,[switch]$Install,[string]$InstallRoot,[string]$ExpectedGoRuntimeVersion,[string]$RunId,[string]$OutputPath,
+    [int]$AcquisitionTimeoutSeconds)
 $names=@('ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','LOCALAPPDATA','APPDATA')
 $values=[ordered]@{};foreach($name in $names){$values[$name]=[Environment]::GetEnvironmentVariable($name,'Process')}
 [IO.File]::WriteAllText($OutputPath,($values|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
 '@,[Text.UTF8Encoding]::new($false))
             $old=$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH;$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
+            Import-Module $script:GateModule -Force
             try{$result=Invoke-GateResolver (Get-Process -Id $PID).Path $authority $install pester ('a'*32) (Join-Path $source 'receipt-pester.json') latest ''}
-            finally{$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$old}
+            finally{$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$old;Restore-GateFixtureModule}
             foreach($name in @('ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','LOCALAPPDATA','APPDATA')){
                 $parent=[Environment]::GetEnvironmentVariable($name,'Process')
                 if($null-ne$parent){[string]$result.$name|Should Be $parent}
@@ -2450,6 +3324,8 @@ $values=[ordered]@{};foreach($name in $names){$values[$name]=[Environment]::GetE
         $root=Join-Path $TestDrive 'process-diagnostics'
         $authority=Join-Path $root 'authority';$install=Join-Path $root 'install';$source=Join-Path $root 'source-tools'
         foreach($directory in @($authority,$install,$source,(Join-Path $authority 'docs/standards'),(Join-Path $authority 'scripts'))){[void][IO.Directory]::CreateDirectory($directory)}
+        Copy-GatePlatformRuntimeFixture $authority
+        Import-Module $script:GateModule -Force
         [IO.File]::WriteAllText((Join-Path $authority 'docs/standards/validation-toolchain.json'),'{}',[Text.UTF8Encoding]::new($false))
         $resolver=Join-Path $root 'resolver-failure.ps1'
         [IO.File]::WriteAllText($resolver,"[Console]::Out.Write('resolver out'); [Console]::Error.Write('resolver diagnostic'); exit 7",[Text.UTF8Encoding]::new($false))
@@ -2474,15 +3350,276 @@ $values=[ordered]@{};foreach($name in $names){$values[$name]=[Environment]::GetE
         foreach($directory in @($trustedDirectory,$candidate,$work,(Join-Path $work 'validation-artifacts'))){[void][IO.Directory]::CreateDirectory($directory)}
         $check=Join-Path $trustedDirectory 'Invoke-ConsumerRepositoryCheck.ps1';[IO.File]::WriteAllText($check,'exit 0',[Text.UTF8Encoding]::new($false))
         $checkHash=(Get-FileHash $check -Algorithm SHA256).Hash.ToLowerInvariant()
+        $validatorPowerShell=Join-Path $trustedRoot $(if($IsWindows){'pwsh.exe'}else{'pwsh'})
+        [IO.File]::WriteAllText($validatorPowerShell,'fixture pwsh',[Text.UTF8Encoding]::new($false))
+        $validatorPowerShellHash=(Get-FileHash $validatorPowerShell -Algorithm SHA256).Hash.ToLowerInvariant()
         $setup=[ordered]@{trustedRoot=$trustedRoot;repositoryCheck=$check;pesterReceiptSha256=('a'*64);pesterManifestSha256=('b'*64);pesterVersion='6.2.0'
-            sourceValidation=[ordered]@{frozenFiles=@([ordered]@{path=$check;sha256=$checkHash})}}
+            sourceValidation=[ordered]@{frozenFiles=@([ordered]@{path=$check;sha256=$checkHash},
+                    [ordered]@{path=$validatorPowerShell;sha256=$validatorPowerShellHash})}}
         Write-FixtureJson (Join-Path $work 'source-tools.json') $setup
         $runner=Join-Path $authority 'scripts/Invoke-StandardValidation.ps1'
         [IO.File]::WriteAllText($runner,"[Console]::Out.Write('validator out'); [Console]::Error.Write('validator diagnostic'); exit 9",[Text.UTF8Encoding]::new($false))
         $binding=[pscustomobject]@{candidateRevision=('c'*40);baseRevision=('d'*40);canonicalEvent='pull_request';runId=('e'*32);commit=('f'*40)}
         $config=[pscustomobject]@{sourceRepository='https://example.test/fixture.git';activeSkills=@('fixture')}
-        {Invoke-GateValidation $authority $candidate $work $binding $config (Get-Process -Id $PID).Path}|Should Throw 'Validator failed'
-        (Get-Content -Raw (Join-Path $work 'validation-artifacts/validator.stderr.txt'))|Should Match 'validator diagnostic'
+        try{
+            Mock Import-GatePlatformRuntime {[pscustomobject]@{ExportedCommands=@{
+                        'Invoke-PlatformPreparationCommand'={
+                            [pscustomobject]@{stdout='validator out';stderr='validator diagnostic';exitCode=9}
+                        }
+                    }}} -ModuleName ConsumerGate
+            {Invoke-GateValidation $authority $candidate $work $binding $config $validatorPowerShell}|Should Throw 'Validator failed'
+            (Get-Content -Raw (Join-Path $work 'validation-artifacts/validator.stderr.txt'))|Should Match 'validator diagnostic'
+        }finally{Restore-GateFixtureModule}
+    }
+
+    # Scenario: The resolver fixture starts a long-lived descendant and exceeds a test-shortened owned-process deadline.
+    # Purpose: Resolver timeout arguments, diagnostics, fail-closed state, and complete descendant cleanup remain authority-owned.
+    It 'UnitT49_bounds_resolver_and_validator_deadlines_and_cleans_the_resolver_tree' {
+        $moduleText=Get-Content -Raw -Encoding UTF8 $script:GateModule
+        $tokens=$null;$parseErrors=$null
+        $moduleAst=[Management.Automation.Language.Parser]::ParseInput($moduleText,[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count|Should Be 0
+        $resolverAst=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                    $node.Name-ceq'Invoke-GateResolver'},$true))[0]
+        $validatorAst=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                    $node.Name-ceq'Invoke-GateValidation'},$true))[0]
+        $gitCaptureAst=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                    $node.Name-ceq'Invoke-GateOwnedGitCapture'},$true))[0]
+        $gitBytesAst=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                    $node.Name-ceq'Invoke-GateGitBytes'},$true))[0]
+        $resolverAst.Extent.Text|Should Match ([regex]::Escape("'-AcquisitionTimeoutSeconds',([string]`$budget.resolverAcquisitionSeconds)"))
+        $validatorAst.Extent.Text|Should Match ([regex]::Escape("'-TimeoutSeconds',([string]`$budget.validatorSeconds)"))
+        $resolverAst.Extent.Text|Should Match 'Invoke-PlatformPreparationCommand'
+        $validatorAst.Extent.Text|Should Match 'Invoke-PlatformPreparationCommand'
+        $moduleText|Should Match 'Start-PlatformOwnedProcess'
+        $moduleText|Should Match 'Stop-PlatformOwnedProcess'
+        $moduleText|Should Not Match '\[Diagnostics\.Process(?:StartInfo)?\]'
+        $moduleText|Should Not Match '\.WaitForExit\s*\('
+        $moduleText|Should Match "ExportedCommands\['Start-PlatformOwnedProcess'\]"
+        $moduleText|Should Match "ExportedCommands\['Stop-PlatformOwnedProcess'\]"
+        $moduleText|Should Match "ExportedCommands\['Resolve-PlatformPhysicalPath'\]"
+        $gitBytesAst.Extent.Text|Should Match 'Invoke-GateOwnedGitCapture[\s\S]+-ByteExact'
+        $closureText=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1')
+        $closureText|Should Match "ExportedCommands\['Start-PlatformOwnedProcess'\]"
+        $closureText|Should Match "ExportedCommands\['Stop-PlatformOwnedProcess'\]"
+        $closureText|Should Match "ExportedCommands\['Resolve-PlatformPhysicalPath'\]"
+        $closureText|Should Not Match '\[Diagnostics\.Process(?:StartInfo)?\]'
+        $closureText|Should Not Match '\.WaitForExit\s*\('
+        $moduleText|Should Match 'GitByteInvoker=\{[\s\S]+Invoke-GateGitBytes'
+        $gitCaptureAst.Extent.Text|Should Match '-ExecutablePath\s+\$git'
+        $gitCaptureAst.Extent.Text|Should Match "CaptureProfile\s*=\s*'raw-stdout'"
+        $gitCaptureAst.Extent.Text|Should Not Match 'Invoke-GateGitByteCapture|Get-Process\s+-Id\s+\$PID|\.bytes'
+        $closureTokens=$null;$closureErrors=$null
+        $closureAst=[Management.Automation.Language.Parser]::ParseInput($closureText,[ref]$closureTokens,[ref]$closureErrors)
+        @($closureErrors).Count|Should Be 0
+        $closureCaptureAst=@($closureAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                    $node.Name-ceq'Invoke-ClosureOwnedGitBytes'},$true))[0]
+        $closureCaptureAst.Extent.Text|Should Match '-ExecutablePath\s+\$git'
+        $closureCaptureAst.Extent.Text|Should Match '-CaptureProfile\s+raw-stdout'
+        $closureCaptureAst.Extent.Text|Should Not Match 'Invoke-GateGitByteCapture|Get-Process\s+-Id\s+\$PID|\.bytes'
+
+        $root=Join-Path $TestDrive 'resolver-owned-timeout'
+        $authority=Join-Path $root 'authority';$install=Join-Path $root 'install';$source=Join-Path $root 'source-tools'
+        foreach($directory in @($authority,$install,$source,(Join-Path $authority 'docs/standards'))){[void][IO.Directory]::CreateDirectory($directory)}
+        Copy-GatePlatformRuntimeFixture $authority
+        [IO.File]::WriteAllText((Join-Path $authority 'docs/standards/validation-toolchain.json'),'{}',[Text.UTF8Encoding]::new($false))
+        $childPidPath=Join-Path $root 'descendant.pid'
+        $childScript=Join-Path $root 'resolver-descendant.ps1'
+        [IO.File]::WriteAllText($childScript,@'
+param([string]$PidPath)
+[IO.File]::WriteAllText($PidPath,[string]$PID,[Text.UTF8Encoding]::new($false))
+Start-Sleep -Seconds 30
+'@,[Text.UTF8Encoding]::new($false))
+        $resolver=Join-Path $root 'resolver-timeout.ps1'
+        $escapedChild=$childScript.Replace("'","''");$escapedPid=$childPidPath.Replace("'","''")
+        [IO.File]::WriteAllText($resolver,@"
+param([string]`$PolicyPath,[string]`$ToolName,[switch]`$Install,[string]`$InstallRoot,[string]`$ExpectedGoRuntimeVersion,
+    [string]`$RunId,[string]`$OutputPath,[int]`$AcquisitionTimeoutSeconds)
+`$start=[Diagnostics.ProcessStartInfo]::new()
+`$start.FileName=(Get-Process -Id `$PID).Path
+`$start.UseShellExecute=`$false
+`$start.CreateNoWindow=`$true
+`$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
+foreach(`$argument in @('-NoProfile','-NonInteractive','-File','$escapedChild','$escapedPid')){[void]`$start.ArgumentList.Add(`$argument)}
+`$child=[Diagnostics.Process]::Start(`$start)
+[Console]::Out.Write('resolver fixture started')
+Start-Sleep -Seconds 30
+"@,[Text.UTF8Encoding]::new($false))
+        $oldResolver=$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH
+        $oldTimeout=$env:CONSUMER_GATE_TEST_RESOLVER_TIMEOUT_SECONDS
+        try{
+            $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$null
+            $env:CONSUMER_GATE_TEST_RESOLVER_TIMEOUT_SECONDS='1'
+            {Get-GateDeadlineBudget}|Should Throw 'requires the resolver fixture seam'
+            $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
+            $env:CONSUMER_GATE_TEST_RESOLVER_TIMEOUT_SECONDS='301'
+            {Get-GateDeadlineBudget}|Should Throw 'override is invalid'
+        }finally{
+            $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$oldResolver
+            $env:CONSUMER_GATE_TEST_RESOLVER_TIMEOUT_SECONDS=$oldTimeout
+        }
+        $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
+        $env:CONSUMER_GATE_TEST_RESOLVER_TIMEOUT_SECONDS='2'
+        Import-Module $script:GateModule -Force
+        try{
+            $failure=Get-SourceFixtureFailure {Invoke-GateResolver (Get-Process -Id $PID).Path $authority $install pester `
+                ('a'*32) (Join-Path $source 'receipt-pester.json') latest ''}
+            $failure|Should Match '^FAILED\|Resolver owned process failed.*deadline'
+            Test-Path -LiteralPath (Join-Path $source 'diagnostics/resolver-pester.stdout.txt') -PathType Leaf|Should Be $true
+            Test-Path -LiteralPath (Join-Path $source 'diagnostics/resolver-pester.stderr.txt') -PathType Leaf|Should Be $true
+            (Get-Content -Raw (Join-Path $source 'diagnostics/resolver-pester.stderr.txt'))|Should Match 'deadline'
+            Test-Path -LiteralPath $childPidPath -PathType Leaf|Should Be $true
+            $childPid=[int]([IO.File]::ReadAllText($childPidPath))
+            (Get-Process -Id $childPid -ErrorAction SilentlyContinue)|Should BeNullOrEmpty
+        }finally{
+            $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$oldResolver
+            $env:CONSUMER_GATE_TEST_RESOLVER_TIMEOUT_SECONDS=$oldTimeout
+            Restore-GateFixtureModule
+        }
+    }
+
+    # Scenario: A Git blob contains bytes that are not valid UTF-8 and is read through the production byte capture path.
+    # Purpose: Byte-oriented Git output must never be replacement-decoded or otherwise changed by text capture.
+    It 'UnitT49a_preserves_invalid_UTF8_blob_bytes_exactly' {
+        $root=Join-Path $TestDrive 'git-byte-exact-blob'
+        [void][IO.Directory]::CreateDirectory($root)
+        [void](Invoke-SourceFixtureGit $root @('init','-q','-b','main'))
+        $expected=[byte[]]@(0x00,0x41,0xff,0x80,0xfe,0x0a)
+        $oid=Invoke-SourceFixtureGitWithInputBytes $root @('hash-object','-w','--stdin') $expected
+        [byte[]]$actual=Invoke-GateGitBytes $root @('cat-file','blob',$oid)
+        [Convert]::ToBase64String($actual)|Should BeExactly ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: Standalone manifest closure launches a Git shim that exceeds a shortened command deadline.
+    # Purpose: Non-gate closure callers must fail closed through the same bounded owned-process boundary.
+    It 'UnitT49b_bounds_standalone_closure_Git_deadline' {
+        $root=Join-Path $TestDrive 'closure-owned-timeout'
+        $shimRoot=Join-Path $root 'shim'
+        [void][IO.Directory]::CreateDirectory($shimRoot)
+        $childPidPath=Join-Path $root 'child.pid'
+        $shimPidPath=Join-Path $root 'shim.pid'
+        if($IsWindows){
+            [void](New-WindowsGitOwnedProcessShim $shimRoot hang $null $shimPidPath $childPidPath)
+        }else{
+            $childScript=Join-Path $root 'child.ps1'
+            [IO.File]::WriteAllText($childScript,"param([string]`$PidPath)`n[IO.File]::WriteAllText(`$PidPath,[string]`$PID,[Text.UTF8Encoding]::new(`$false))`nStart-Sleep -Seconds 30`n",[Text.UTF8Encoding]::new($false))
+            $shell=(Get-Process -Id $PID).Path
+            $shim=Join-Path $shimRoot 'git'
+            $text="#!/bin/sh`n`"$shell`" -NoProfile -NonInteractive -File `"$childScript`" `"$childPidPath`"`n"
+            [IO.File]::WriteAllText($shim,$text,[Text.UTF8Encoding]::new($false))
+            [IO.File]::SetUnixFileMode($shim,[IO.UnixFileMode]::UserRead-bor[IO.UnixFileMode]::UserWrite-bor[IO.UnixFileMode]::UserExecute)
+        }
+        $manifest=Join-Path $root 'manifest.json'
+        Write-FixtureJson $manifest ([ordered]@{repositories=@([ordered]@{id='fixture';inventoryTree=('b'*40);files=@()})})
+        $oldPath=$env:PATH
+        try{
+            $env:PATH=$shimRoot+[IO.Path]::PathSeparator+$oldPath
+            $failure=Get-SourceFixtureFailure {Get-ConsumerManifestClosure -RepositoryRoot $root -Commit ('a'*40) `
+                -Stage inventory -Manifest $manifest -RepositoryId fixture -AuthorityRoot $script:RepositoryRoot `
+                -GitCommandTimeoutSeconds 1 -GitReserveSeconds 2}
+            $failure|Should Match 'Manifest closure Git command exceeded its bounded deadline'
+            Test-Path -LiteralPath $childPidPath -PathType Leaf|Should Be $true
+            if($IsWindows){
+                $childPid=[int]([IO.File]::ReadAllText($childPidPath))
+                (Get-Process -Id $childPid -ErrorAction SilentlyContinue)|Should BeNullOrEmpty
+                Test-Path -LiteralPath $shimPidPath -PathType Leaf|Should Be $true
+                $shimPid=[int]([IO.File]::ReadAllText($shimPidPath))
+                (Get-Process -Id $shimPid -ErrorAction SilentlyContinue)|Should BeNullOrEmpty
+            }
+        }finally{
+            $env:PATH=$oldPath
+            foreach($pidPath in @($childPidPath,$shimPidPath)){
+                if(Test-Path -LiteralPath $pidPath -PathType Leaf){
+                    $ownedPid=[int]([IO.File]::ReadAllText($pidPath))
+                    Get-Process -Id $ownedPid -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+
+    # Scenario: Every consumer owned-process seam reports an unknown exit status after the child has otherwise completed.
+    # Purpose: A null or non-integral exit status must never be coerced to zero or accepted as a successful resolver, validator, Git, byte-Git, or standalone closure result.
+    It 'UnitT49c_rejects_unknown_owned_process_exit_statuses' {
+        $previousLastExitCode=$global:LASTEXITCODE
+        $previousConsoleOut=[Console]::Out
+        $previousConsoleError=[Console]::Error
+        $consoleOut=[IO.StringWriter]::new()
+        $consoleError=[IO.StringWriter]::new()
+        $root=Join-Path $TestDrive 'unknown-owned-process-exit'
+        $authority=Join-Path $root 'authority';$install=Join-Path $root 'install';$source=Join-Path $root 'source'
+        foreach($directory in @($authority,$install,$source,(Join-Path $authority 'docs/standards'),(Join-Path $authority 'scripts'))){
+            [void][IO.Directory]::CreateDirectory($directory)
+        }
+        Copy-GatePlatformRuntimeFixture $authority
+        [IO.File]::WriteAllText((Join-Path $authority 'docs/standards/validation-toolchain.json'),'{}',[Text.UTF8Encoding]::new($false))
+        $resolver=Join-Path $root 'resolver.ps1';[IO.File]::WriteAllText($resolver,'exit 0',[Text.UTF8Encoding]::new($false))
+        $oldResolver=$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH
+        Restore-GateFixtureModule
+        $gateModule=(Get-Command Invoke-GateResolver -CommandType Function -ErrorAction Stop).Module
+        if($gateModule.Name-cne'ConsumerGate'){throw 'The active resolver command is not owned by ConsumerGate.'}
+        $previousGatePlatformRuntimeModule=$gateModule.SessionState.PSVariable.GetValue('GatePlatformRuntimeModule')
+        $previousGatePlatformRuntimeAuthorityRoot=$gateModule.SessionState.PSVariable.GetValue('GatePlatformRuntimeAuthorityRoot')
+        $previousGateGitHooksPath=$gateModule.SessionState.PSVariable.GetValue('GateGitHooksPath')
+        $fakeRuntime=New-Module -Name ("ConsumerGateUnknownExitRuntime_{0}" -f [guid]::NewGuid().ToString('N')) -ScriptBlock {
+            function Invoke-PlatformPreparationCommand {
+                param($Command,$Arguments,$Environment,$WorkingDirectory,$TimeoutMilliseconds,$PreparationReceipt)
+                [pscustomobject]@{stdout='';stderr='';exitCode=$null;processOwnership=$null}
+            }
+            Export-ModuleMember -Function Invoke-PlatformPreparationCommand
+        }
+        $closureModule=$null;$previousClosureGitRuntime=$null
+        try{
+            $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
+            $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeModule',$fakeRuntime)
+            $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeAuthorityRoot',[IO.Path]::GetFullPath($authority))
+            [Console]::SetOut($consoleOut)
+            [Console]::SetError($consoleError)
+            {Invoke-GateResolver (Get-Process -Id $PID).Path $authority $install pester ('a'*32) `
+                    (Join-Path $source 'receipt-pester.json') latest ''}|Should Throw 'Resolver exit status is unknown.'
+
+            $candidate=Join-Path $root 'candidate';$work=Join-Path $root 'work';$trustedRoot=Join-Path $root 'trusted-runtime'
+            $trustedDirectory=Join-Path $trustedRoot 'trusted'
+            foreach($directory in @($candidate,$work,$trustedDirectory,(Join-Path $work 'validation-artifacts'))){[void][IO.Directory]::CreateDirectory($directory)}
+            $check=Join-Path $trustedDirectory 'Invoke-ConsumerRepositoryCheck.ps1';[IO.File]::WriteAllText($check,'exit 0',[Text.UTF8Encoding]::new($false))
+            $checkHash=(Get-FileHash $check -Algorithm SHA256).Hash.ToLowerInvariant()
+            $validatorPowerShell=Join-Path $trustedRoot $(if($IsWindows){'pwsh.exe'}else{'pwsh'})
+            [IO.File]::WriteAllText($validatorPowerShell,'fixture pwsh',[Text.UTF8Encoding]::new($false))
+            $validatorPowerShellHash=(Get-FileHash $validatorPowerShell -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-FixtureJson (Join-Path $work 'source-tools.json') ([ordered]@{trustedRoot=$trustedRoot;repositoryCheck=$check
+                    pesterReceiptSha256=('b'*64);pesterManifestSha256=('c'*64);pesterVersion='6.2.0'
+                    sourceValidation=[ordered]@{frozenFiles=@([ordered]@{path=$check;sha256=$checkHash},
+                            [ordered]@{path=$validatorPowerShell;sha256=$validatorPowerShellHash})}})
+            [IO.File]::WriteAllText((Join-Path $authority 'scripts/Invoke-StandardValidation.ps1'),'exit 0',[Text.UTF8Encoding]::new($false))
+            $binding=[pscustomobject]@{candidateRevision=('d'*40);baseRevision=('e'*40);canonicalEvent='pull_request';runId=('f'*32);commit=('1'*40)}
+            $config=[pscustomobject]@{sourceRepository='https://example.test/fixture.git';activeSkills=@('fixture')}
+            {Invoke-GateValidation $authority $candidate $work $binding $config $validatorPowerShell}|Should Throw 'Validator exit status is unknown.'
+
+        Mock Invoke-GateOwnedGitCapture {[pscustomobject]@{ExitCode=$null;StdoutBytes=[byte[]]::new(0);StderrBytes=[byte[]]::new(0)}} -ModuleName ConsumerGate
+        InModuleScope ConsumerGate {$script:GateGitHooksPath='fixture'}
+        {Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD')}|Should Throw 'git exit status is unknown.'
+        {Invoke-GateGitBytes $script:RepositoryRoot @('rev-parse','HEAD')}|Should Throw 'git exit status is unknown.'
+
+        $closureModule=Import-Module (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1') -Force -PassThru
+        $previousClosureGitRuntime=$closureModule.SessionState.PSVariable.GetValue('ClosureGitRuntime')
+        Mock Invoke-ClosureOwnedGitBytes {[pscustomobject]@{ExitCode=$null;Bytes=[byte[]]::new(0);Error=''}} -ModuleName ConsumerManifestClosure
+        InModuleScope ConsumerManifestClosure {
+            $script:ClosureGitRuntime=[pscustomobject]@{}
+            {Invoke-ClosureGitBytes -RepositoryRoot $TestDrive -Arguments @('rev-parse','HEAD')}|Should Throw 'git exit status is unknown.'
+        }
+
+        }finally{
+            [Console]::SetOut($previousConsoleOut)
+            [Console]::SetError($previousConsoleError)
+            $consoleOut.Dispose()
+            $consoleError.Dispose()
+            $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$oldResolver
+            $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeModule',$previousGatePlatformRuntimeModule)
+            $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeAuthorityRoot',$previousGatePlatformRuntimeAuthorityRoot)
+            $gateModule.SessionState.PSVariable.Set('GateGitHooksPath',$previousGateGitHooksPath)
+            if($null-ne$closureModule){$closureModule.SessionState.PSVariable.Set('ClosureGitRuntime',$previousClosureGitRuntime)}
+            if($null-ne$fakeRuntime){Remove-Module -ModuleInfo $fakeRuntime -Force -ErrorAction SilentlyContinue}
+            $global:LASTEXITCODE=$previousLastExitCode
+        }
     }
 
     # Scenario: Runtime and tool boundaries record events in prepare, then the production final report assertion records the final event.
@@ -2513,6 +3650,7 @@ if($DefineFunctionsOnly){return}
         $env:CONSUMER_GATE_EVENT_LOG_PATH=$eventLog
         $env:CONSUMER_GATE_EVENT_REPOSITORY='https://example.test/fixture.git'
         try{
+            Mock Assert-GateExceptionScannerTransitionEvidence {} -ModuleName ConsumerGate
             Assert-GateFinalSourceReport $authority $candidate $work $binding ([pscustomobject]@{}) $evidence
             @(Get-Content -LiteralPath $eventLog) | Should Be @('source-report-asserted')
             Remove-Item -LiteralPath $eventLog
@@ -2564,10 +3702,15 @@ if($DefineFunctionsOnly){return}
     # Scenario: A synthetic verified Pester closure returns complete, partial, duplicate, skipped, and not-run inventories.
     # Purpose: Execute the repository wrapper and prove closure bytes plus complete case identity are enforced behaviorally.
     It 'InterT56_executes_verified_pester_closure_and_complete_discovery' {
-        $runId = '1234567890abcdef1234567890abcdef'
+        $coreRunId = '1234567890abcdef1234567890abcdef'
+        Remove-Variable StandardValidationPlatformBinding -Scope Script -ErrorAction SilentlyContinue
+        . (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidation.ps1') `
+            -CandidateRoot $TestDrive -AdapterPath 'unused' -ArtifactsRoot $TestDrive `
+            -SourceRepository 'https://example.test/consumer-check.git' -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
+        Initialize-StandardValidationPlatformRuntime
         foreach ($scenario in @('success-file','success-runner','tampered','duplicatepath','partial','duplicate','skipped','notrun')) {
             $workRoot = Join-Path $TestDrive "pester-wrapper-$scenario"
-            $candidate = Join-Path $workRoot "$runId/candidate"
+            $candidate = Join-Path $workRoot "$coreRunId/candidate"
             $runtime = Join-Path $workRoot 'runtime/consumer'
             $installRoot = Join-Path $workRoot 'runtime/installed/pester'
             $sourceTools = Join-Path $workRoot 'source-tools'
@@ -2677,7 +3820,7 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
             $oldSkills = $env:STANDARD_VALIDATION_CORE_SKILLS
             try {
                 $env:FAKE_PESTER_SCENARIO = $scenario
-                $env:STANDARD_VALIDATION_CORE_RUN_ID = $runId
+                $env:STANDARD_VALIDATION_CORE_RUN_ID = $coreRunId
                 $env:STANDARD_VALIDATION_CORE_CHECK_ID = 'fixture-pester'
                 $env:STANDARD_VALIDATION_CORE_SKILLS = 'fixture'
                 Push-Location $candidate
@@ -2686,14 +3829,18 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
                     $checkTokens=@('-Mode','pester','-PesterReceiptSha256',$receiptSha,'-PesterManifestSha256',$manifestSha,
                         '-PesterVersion','6.2.0')
                     if($scenario-ceq'success-runner'){
-                        $env:FIXTURE_CHECK_PATH=$trustedCheck
-                        $env:FIXTURE_CHECK_ARGUMENTS=ConvertTo-Json -InputObject ([string[]]$checkTokens) -Compress
-                        $dispatch='$items=@(ConvertFrom-Json -InputObject $env:FIXTURE_CHECK_ARGUMENTS); & $env:FIXTURE_CHECK_PATH @items; exit ([int]$LASTEXITCODE)'
-                        $output=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -Command $dispatch 2>&1)
+                        $processResult=Invoke-StandardValidationProcess -Command $trustedCheck -Arguments $checkTokens `
+                            -WorkingDirectory $candidate -TimeoutSeconds 60 -Environment @{
+                                STANDARD_VALIDATION_CORE_RUN_ID=$coreRunId
+                                STANDARD_VALIDATION_CORE_CHECK_ID='fixture-pester'
+                                STANDARD_VALIDATION_CORE_SKILLS='fixture'
+                            }
+                        $output=@($processResult.stdout,$processResult.stderr)
+                        $exitCode=[int]$processResult.exitCode
                     }else{
                         $output=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $trustedCheck @checkTokens 2>&1)
+                        $exitCode = $LASTEXITCODE
                     }
-                    $exitCode = $LASTEXITCODE
                 }
                 finally { Pop-Location }
             }
@@ -2702,12 +3849,12 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
                 $env:STANDARD_VALIDATION_CORE_RUN_ID = $oldRunId
                 $env:STANDARD_VALIDATION_CORE_CHECK_ID = $oldCheckId
                 $env:STANDARD_VALIDATION_CORE_SKILLS = $oldSkills
-                Remove-Item Env:FIXTURE_CHECK_PATH,Env:FIXTURE_CHECK_ARGUMENTS -ErrorAction SilentlyContinue
             }
             if ($scenario -like 'success-*') {
+                if($exitCode-ne0){throw "Scenario $scenario expected exit code 0, got $exitCode. output=$($output-join[Environment]::NewLine)"}
                 $exitCode | Should Be 0
                 ($output -join "`n") | Should Match '"passed":1'
-                (Get-Content -Raw (Join-Path $workRoot "$runId/repository-pester-case-inventory-v1.json") | `
+                (Get-Content -Raw (Join-Path $workRoot "$coreRunId/repository-pester-case-inventory-v1.json") | `
                         ConvertFrom-Json).complete | Should Be $true
 
                 $trustedPath=Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1'
@@ -2727,10 +3874,10 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
                     $orderedAssignment[0].Extent.StartOffset,$replacement)
                 [IO.File]::WriteAllText((Join-Path $runtime 'Invoke-ConsumerRepositoryCheck.ps1'),$mutantText,
                     [Text.UTF8Encoding]::new($false))
-                Remove-Item -LiteralPath (Join-Path $workRoot "$runId/repository-pester-case-inventory-v1.json")
+                Remove-Item -LiteralPath (Join-Path $workRoot "$coreRunId/repository-pester-case-inventory-v1.json")
                 try {
                     $env:FAKE_PESTER_SCENARIO = $scenario
-                    $env:STANDARD_VALIDATION_CORE_RUN_ID = $runId
+                    $env:STANDARD_VALIDATION_CORE_RUN_ID = $coreRunId
                     $env:STANDARD_VALIDATION_CORE_CHECK_ID = 'fixture-pester'
                     $env:STANDARD_VALIDATION_CORE_SKILLS = 'fixture'
                     Push-Location $candidate
@@ -2762,7 +3909,7 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
         $module = Get-Content -Raw -Encoding UTF8 $script:GateModule
         $requiredBarriers = @(
             'Required repository check is missing', 'General repository check is not a canonical tracked file',
-            'General repository check points to a deleted legacy path', 'SkillSpector exception set changed',
+            'General repository check points to a deleted legacy path', 'Assert-GateProtectedFilesWithExceptionShrinkOnly',
             'Unexpected workflow', 'Candidate consumer-gate.yml is missing',
             'Removed legacy path is present', 'Repository has advanced'
         )

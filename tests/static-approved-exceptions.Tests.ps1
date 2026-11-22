@@ -25,7 +25,7 @@ Describe 'Human-approved exact static exceptions' {
             baselines=@(@{skillId='example';path='config/skillspector-exceptions/example.baseline.json'})
             exceptions=@(@{fingerprint=('sha256:'+('a'*64));skillId='example';ruleId='E1';file='SKILL.md';severity='MEDIUM';exceptionId='example-e1';necessity='documentation';riskAssessment='limited';compensatingControls='exact fingerprint';owner='reviewer';approvedOn='2026-01-01'})
         }
-        $envelope=@{suppressedFindings=@(@{skillId='example';ruleId='E1';severity='medium';file='SKILL.md';suppressionReason='approved-example'})}
+        $envelope=@{suppressedFindings=@(@{skillId='example';ruleId='E1';severity='medium';file='SKILL.md';line=1;suppressionReason='approved-example'})}
     }
 
     # Scenario: suppression is absent, null or empty. Purpose: preserve the registry-free legacy path.
@@ -132,11 +132,166 @@ Describe 'Human-approved exact static exceptions' {
         $staticIndex=$report.sourceValidation.events.Count-1
         Set-SourceGateEnvelope $report $staticIndex {
             param($value)
-            $value | Add-Member -NotePropertyName suppressedFindings -NotePropertyValue @(@{skillId='alpha';ruleId='E1';severity='medium';file='SKILL.md';suppressionReason='approved-example'})
+            $value | Add-Member -NotePropertyName suppressedFindings -NotePropertyValue @(@{skillId='alpha';ruleId='E1';severity='medium';file='SKILL.md';line=1;suppressionReason='approved-example'})
         }
         Invoke-SourceGateFixture $report | Should -BeTrue
 
         Set-SourceGateEnvelope $report $staticIndex { param($value) $value.suppressedFindings[0].suppressionReason='unapproved' }
         { Invoke-SourceGateFixture $report } | Should -Throw 'BLOCKED|source report findings suppressed a finding that is not in the approved baseline'
+    }
+}
+
+Describe 'Consumer static child approved baselines' {
+    BeforeAll {
+        $repositoryRoot=Split-Path -Parent $PSScriptRoot
+        $childPath=Join-Path $repositoryRoot 'scripts/consumer/Invoke-ConsumerValidationChild.ps1'
+        $pwshPath=(Get-Process -Id $PID).Path
+        . (Join-Path $repositoryRoot 'scripts/Invoke-StandardValidation.ps1') -DefineFunctionsOnly -CandidateRoot $repositoryRoot -AdapterPath 'unused' -ArtifactsRoot $TestDrive -SourceRepository 'https://example.test/tests/static-child.git' -SourceRevision ('c'*40) -BaseRevision ('d'*40)
+
+        function New-StaticChildFixture {
+            param([switch]$WithRegistry,[ValidateSet('approved','new-finding','mutate-baseline','none')][string]$Mode='none',[switch]$MissingBaseline)
+            $root=Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            $skillRoot=Join-Path $root 'skills/example'
+            [void][IO.Directory]::CreateDirectory($skillRoot)
+            Set-Content -LiteralPath (Join-Path $skillRoot 'SKILL.md') -Encoding UTF8 -Value "---`nname: example`ndescription: fixture`n---`n"
+            $scannerPath=Join-Path $root 'fake-skillspector.ps1'
+            @'
+$skillRoot=[string]$args[1]
+$mode=[string]$env:P11_STATIC_FAKE_MODE
+$report=[ordered]@{
+    skill=[ordered]@{name='example';source=$skillRoot}
+    components=@([ordered]@{path='SKILL.md'})
+    issues=@()
+    execution_successful=$true
+    analysis_completeness=[ordered]@{execution_successful=$true;is_complete=$true;status='complete';coverage_percent=100;ledger_exceptions=@();scope_exclusions=@();limitations=@()}
+}
+$baselineIndex=[Array]::IndexOf($args,'--baseline')
+if($baselineIndex -ge 0){
+    $baselinePath=[string]$args[$baselineIndex+1]
+    if($mode -ceq 'mutate-baseline'){Add-Content -LiteralPath $baselinePath -Value ''}
+    $report.suppressed_count=1
+    $report.suppressed=@([ordered]@{
+        id='E1';severity='MEDIUM';location=[ordered]@{file='SKILL.md';start_line=1};suppressed=$true
+        suppression_reason='approved-example'
+    })
+}
+if($mode -ceq 'new-finding'){
+    $report.issues=@([ordered]@{id='NEW1';severity='HIGH';file='SKILL.md';message='new unapproved finding'})
+}
+$report|ConvertTo-Json -Depth 20
+$global:LASTEXITCODE=0
+'@ | Set-Content -LiteralPath $scannerPath -Encoding UTF8
+            $toolchainPath=Join-Path $root 'toolchain.json'
+            [ordered]@{
+                skillSpectorPath=$scannerPath
+                skillSpectorSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $scannerPath).Hash.ToLowerInvariant()
+            }|ConvertTo-Json|Set-Content -LiteralPath $toolchainPath -Encoding UTF8
+            if($WithRegistry){
+                $configRoot=Join-Path $root 'config/skillspector-exceptions'
+                [void][IO.Directory]::CreateDirectory($configRoot)
+                $baselinePath=Join-Path $configRoot 'example.baseline.json'
+                if(-not $MissingBaseline){
+                    [ordered]@{version=2;scanner_version='2.13.4';rules=@();fingerprints=@([ordered]@{hash=('sha256:'+('a'*64));rule_id='E1';file='SKILL.md';reason='approved-example'})}|
+                        ConvertTo-Json -Depth 10|Set-Content -LiteralPath $baselinePath -Encoding UTF8
+                }
+                [ordered]@{
+                    schemaVersion=1;contract='skillspector-human-approved-exceptions-v1'
+                    scanner=[ordered]@{package='skillspector';version='2.13.4';fingerprintSchema='skillspector-finding-fingerprint-v2'}
+                    approval=[ordered]@{approver='fixture-reviewer';approvedOn='2026-01-01';tracking='EXAMPLE-1'}
+                    review=[ordered]@{expiresOn='2099-01-01'}
+                    baselines=@([ordered]@{skillId='example';path='config/skillspector-exceptions/example.baseline.json'})
+                    exceptions=@([ordered]@{fingerprint=('sha256:'+('a'*64));skillId='example';ruleId='E1';file='SKILL.md';severity='MEDIUM';exceptionId='example-e1';necessity='fixture';riskAssessment='limited';compensatingControls='exact fingerprint';owner='fixture-owner';approvedOn='2026-01-01'})
+                }|ConvertTo-Json -Depth 10|Set-Content -LiteralPath (Join-Path $root 'config/skillspector-exceptions.json') -Encoding UTF8
+            }
+            [pscustomobject]@{Root=$root;SkillRoot=$skillRoot;ScannerPath=$scannerPath;ToolchainPath=$toolchainPath;BaselinePath=(Join-Path $root 'config/skillspector-exceptions/example.baseline.json');Mode=$Mode}
+        }
+
+        function Invoke-StaticChildFixture {
+            param($Fixture)
+            $stderrPath=Join-Path $Fixture.Root 'child.stderr'
+            $saved=@{
+                CandidateRoot=$env:STANDARD_VALIDATION_CANDIDATE_ROOT
+                CandidateId=$env:STANDARD_VALIDATION_CANDIDATE_ID
+                ActiveSkills=$env:STANDARD_VALIDATION_ACTIVE_SKILLS
+                SkillsRoot=$env:STANDARD_VALIDATION_SKILLS_ROOT
+                FakeMode=$env:P11_STATIC_FAKE_MODE
+            }
+            try{
+                $env:STANDARD_VALIDATION_CANDIDATE_ROOT=$Fixture.Root
+                $env:STANDARD_VALIDATION_CANDIDATE_ID='fixture-candidate'
+                $env:STANDARD_VALIDATION_ACTIVE_SKILLS='example'
+                $env:STANDARD_VALIDATION_SKILLS_ROOT=(Join-Path $Fixture.Root 'skills')
+                $env:P11_STATIC_FAKE_MODE=$Fixture.Mode
+                Push-Location $Fixture.Root
+                try{
+                    $stdout=@(& $pwshPath -NoProfile -NonInteractive -File $childPath -Mode static -ToolchainPath $Fixture.ToolchainPath `
+                        -ToolchainSha256 ((Get-FileHash -Algorithm SHA256 -LiteralPath $Fixture.ToolchainPath).Hash.ToLowerInvariant()) 2> $stderrPath)
+                    $exitCode=$LASTEXITCODE
+                }finally{Pop-Location}
+            }finally{
+                $env:STANDARD_VALIDATION_CANDIDATE_ROOT=$saved.CandidateRoot
+                $env:STANDARD_VALIDATION_CANDIDATE_ID=$saved.CandidateId
+                $env:STANDARD_VALIDATION_ACTIVE_SKILLS=$saved.ActiveSkills
+                $env:STANDARD_VALIDATION_SKILLS_ROOT=$saved.SkillsRoot
+                $env:P11_STATIC_FAKE_MODE=$saved.FakeMode
+            }
+            $stderr=if(Test-Path -LiteralPath $stderrPath){Get-Content -Raw -LiteralPath $stderrPath}else{''}
+            $envelope=if($exitCode-eq 0){($stdout -join "`n")|ConvertFrom-Json -Depth 100}else{$null}
+            [pscustomobject]@{ExitCode=$exitCode;Stdout=$stdout;Stderr=$stderr;Envelope=$envelope}
+        }
+    }
+
+    # Scenario: an active Skill has one approved MEDIUM fingerprint in its canonical baseline.
+    # Purpose: apply scanner-native suppression, project its evidence, and let central validation accept it.
+    It 'UnitT10_applies_the_bound_baseline_and_reports_native_suppression' {
+        $fixture=New-StaticChildFixture -WithRegistry -Mode approved
+        $result=Invoke-StaticChildFixture $fixture
+        $result.Stderr|Should -BeNullOrEmpty
+        $result.ExitCode|Should -Be 0
+        @($result.Envelope.nativeReports[0].arguments)|Should -Be @('scan',$fixture.SkillRoot,'--no-llm','--format','json','--baseline',$fixture.BaselinePath,'--show-suppressed')
+        @($result.Envelope.findings).Count|Should -Be 0
+        @($result.Envelope.suppressedFindings).Count|Should -Be 1
+        $result.Envelope.suppressedFindings[0].skillId|Should -BeExactly 'example'
+        $result.Envelope.suppressedFindings[0].ruleId|Should -BeExactly 'E1'
+        $result.Envelope.suppressedFindings[0].severity|Should -BeExactly 'medium'
+        $result.Envelope.suppressedFindings[0].file|Should -BeExactly 'SKILL.md'
+        $result.Envelope.suppressedFindings[0].line|Should -Be 1
+        $result.Envelope.suppressedFindings[0].suppressionReason|Should -BeExactly 'approved-example'
+        Assert-StandardValidationStaticExceptions -Envelope $result.Envelope -SnapshotRoot $fixture.Root -ActiveSkills @('example') -ScannerVersion '2.13.4' -Context 'Static analyzer'|Should -Be 1
+    }
+
+    # Scenario: the baseline suppresses one approved finding while SkillSpector reports a new HIGH finding.
+    # Purpose: keep non-baseline findings in the normal findings path and preserve blocking severity policy.
+    It 'UnitT20_keeps_a_new_finding_outside_the_baseline_blocking' {
+        $fixture=New-StaticChildFixture -WithRegistry -Mode new-finding
+        $result=Invoke-StaticChildFixture $fixture
+        $result.Stderr|Should -BeNullOrEmpty
+        $result.ExitCode|Should -Be 0
+        @($result.Envelope.suppressedFindings).Count|Should -Be 1
+        @($result.Envelope.findings).Count|Should -Be 1
+        {Assert-StandardValidationFindings -Envelope $result.Envelope -Context 'Static analyzer'}|Should -Throw 'FAILED|Static analyzer contains a high finding.'
+    }
+
+    # Scenario: a binding has no regular baseline file, or the scanner changes that file during analysis.
+    # Purpose: fail closed before accepting an unbound or mutable exception set.
+    It 'UnitT30_fails_closed_for_missing_or_mutated_bound_baselines' {
+        $missing=Invoke-StaticChildFixture (New-StaticChildFixture -WithRegistry -Mode approved -MissingBaseline)
+        $missing.ExitCode|Should -Not -Be 0
+        $missing.Stderr|Should -Match 'baseline.*missing|missing.*baseline'
+        $mutated=Invoke-StaticChildFixture (New-StaticChildFixture -WithRegistry -Mode mutate-baseline)
+        $mutated.ExitCode|Should -Not -Be 0
+        $mutated.Stderr|Should -Match 'Baseline changed during static analysis'
+    }
+
+    # Scenario: the candidate snapshot has no exception registry.
+    # Purpose: preserve the existing scanner command line and envelope exactly for registry-free repositories.
+    It 'UnitT40_preserves_the_registry_free_static_contract' {
+        $fixture=New-StaticChildFixture -Mode none
+        $result=Invoke-StaticChildFixture $fixture
+        $result.Stderr|Should -BeNullOrEmpty
+        $result.ExitCode|Should -Be 0
+        @($result.Envelope.nativeReports[0].arguments)|Should -Be @('scan',$fixture.SkillRoot,'--no-llm','--format','json')
+        $result.Envelope.PSObject.Properties.Name|Should -Not -Contain 'suppressedFindings'
+        @($result.Envelope.findings).Count|Should -Be 0
     }
 }

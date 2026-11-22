@@ -186,7 +186,7 @@ function New-TestMutantTrustAnchorCliRoot {
     if(-not[string]::IsNullOrEmpty($WindowsInstallerMutationSource)){
         $normalized=$WindowsInstallerMutationSource.Replace("`r`n","`n").Replace("`r","`n");$nativePath=Join-Path $root 'scripts/platform/WindowsInstallerMutation.cs';[IO.File]::WriteAllText($nativePath,$normalized,[Text.UTF8Encoding]::new($false));$hash=Get-TestSha256Text $normalized;$manifestPath=Join-Path $root 'scripts/platform-runtime.psd1';$manifest=[IO.File]::ReadAllText($manifestPath);$manifest=$manifest.Replace('b88b4b09c7bb5c3e71b762ddc6ebe72007ed0cca99977ab7a7272529c3ff9218',$hash);[IO.File]::WriteAllText($manifestPath,$manifest,[Text.UTF8Encoding]::new($false))
     }
-    if(-not[string]::IsNullOrEmpty($WindowsNativeSource)){$normalized=$WindowsNativeSource.Replace("`r`n","`n").Replace("`r","`n");$nativePath=Join-Path $root 'scripts/platform/WindowsNative.cs';[IO.File]::WriteAllText($nativePath,$normalized,[Text.UTF8Encoding]::new($false));$hash=Get-TestSha256Text $normalized;$manifestPath=Join-Path $root 'scripts/platform-runtime.psd1';$manifest=[IO.File]::ReadAllText($manifestPath);$manifest=$manifest.Replace('6eea8ca2701b6a6de88ee4a3348f053d07a0543d607832e667335c838bb7d433',$hash);[IO.File]::WriteAllText($manifestPath,$manifest,[Text.UTF8Encoding]::new($false))}
+    if(-not[string]::IsNullOrEmpty($WindowsNativeSource)){$normalized=$WindowsNativeSource.Replace("`r`n","`n").Replace("`r","`n");$nativePath=Join-Path $root 'scripts/platform/WindowsNative.cs';[IO.File]::WriteAllText($nativePath,$normalized,[Text.UTF8Encoding]::new($false));$hash=Get-TestSha256Text $normalized;$manifestPath=Join-Path $root 'scripts/platform-runtime.psd1';$manifest=[IO.File]::ReadAllText($manifestPath);$manifest=$manifest.Replace('225a83d8aba1ba5bf11f495eceb4690a221778d8f0d315ccdf6091cc5dc92560',$hash);[IO.File]::WriteAllText($manifestPath,$manifest,[Text.UTF8Encoding]::new($false))}
     return (Join-Path $root 'scripts/trust-anchor')
 }
 function Remove-TestAstExtents {
@@ -422,7 +422,7 @@ function Get-TrustAnchorProtectedContracts {
         'scripts/trust-anchor/ConvertTo-TrustAnchorPublicKeyXml.ps1'=@{TokenCount=86;Sha256='1f42500679c905fbb8662df71f08087535160891b3bcc1bfb39e88f50b539a9e'}
         'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1'=@{TokenCount=117;Sha256='7690182cf612e77daa3f106ae16dc46540e131e2849645591436ae342b6fe27f'}
         'scripts/platform/WindowsInstallerMutation.cs'=@{TokenCount=3104;Sha256='2b997cd7670a5623aa228230df8c80fccb791f63f00c948d0af865e97896fb18';Language='CSharp'}
-        'scripts/platform/WindowsNative.cs'=@{TokenCount=9135;Sha256='9bf94dc493535419b1527ba5a8f6e8c19850de84c7f752d86a20c7f70d1e0235';Language='CSharp'}
+        'scripts/platform/WindowsNative.cs'=@{TokenCount=9270;Sha256='c5e788c08d7d81d25c16746bed9dae448212880b5939889b878b443763dc438c';Language='CSharp'}
     }
 }
 function Test-TrustAnchorProtectedContract {

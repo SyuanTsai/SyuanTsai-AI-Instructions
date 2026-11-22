@@ -105,9 +105,9 @@ function Test-RolloutDirectoryExcluded {
 
 function Resolve-RolloutRepositoryIdentity {
     param([Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][string] $GitExecutable)
-    if ((Get-RolloutGitExitCode -Repository $Path -GitExecutable $GitExecutable -Arguments @('rev-parse','--is-inside-work-tree')) -ne 0) {
-        return $null
-    }
+    $insideExitCode = Get-RolloutGitExitCode -Repository $Path -GitExecutable $GitExecutable -Arguments @('rev-parse','--is-inside-work-tree')
+    if ($insideExitCode -eq 128) { return $null }
+    if ($insideExitCode -ne 0) { throw "Rollout Git exit code failure: git rev-parse --is-inside-work-tree failed with exit code $insideExitCode." }
     $inside = ((Invoke-RolloutGit -Repository $Path -GitExecutable $GitExecutable -Arguments @('rev-parse','--is-inside-work-tree')) | Select-Object -First 1).Trim()
     if ($inside -cne 'true') { return $null }
     $topLevel = Get-RolloutFullPath -Path (((Invoke-RolloutGit -Repository $Path -GitExecutable $GitExecutable -Arguments @('rev-parse','--show-toplevel')) | Select-Object -First 1).Trim())
@@ -115,18 +115,24 @@ function Resolve-RolloutRepositoryIdentity {
     if (-not [System.IO.Path]::IsPathRooted($commonDirectory)) { $commonDirectory = Join-Path $topLevel $commonDirectory }
     $commonDirectory = Get-RolloutFullPath -Path $commonDirectory
     $branch = ''
-    if ((Get-RolloutGitExitCode -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('symbolic-ref','-q','--short','HEAD')) -eq 0) {
+    $symbolicExitCode = Get-RolloutGitExitCode -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('symbolic-ref','-q','--short','HEAD')
+    if ($symbolicExitCode -notin @(0, 1)) { throw "Rollout Git exit code failure: git symbolic-ref -q --short HEAD failed with exit code $symbolicExitCode." }
+    if ($symbolicExitCode -eq 0) {
         $branch = ((Invoke-RolloutGit -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('symbolic-ref','-q','--short','HEAD')) | Select-Object -First 1).Trim()
     }
     if ([string]::IsNullOrWhiteSpace($branch)) {
-        $head = if ((Get-RolloutGitExitCode -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','HEAD')) -eq 0) {
-            ((Invoke-RolloutGit -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','HEAD')) | Select-Object -First 1).Trim()
+        $headExitCode = Get-RolloutGitExitCode -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','--quiet','HEAD')
+        if ($headExitCode -notin @(0, 1)) { throw "Rollout Git exit code failure: git rev-parse --verify --quiet HEAD failed with exit code $headExitCode." }
+        $head = if ($headExitCode -eq 0) {
+            ((Invoke-RolloutGit -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','--quiet','HEAD')) | Select-Object -First 1).Trim()
         }
         else { 'unborn' }
         $branch = "DETACHED:$head"
     }
     $origin = ''
-    if ((Get-RolloutGitExitCode -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('remote','get-url','origin')) -eq 0) {
+    $originExitCode = Get-RolloutGitExitCode -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('remote','get-url','origin')
+    if ($originExitCode -notin @(0, 2)) { throw "Rollout Git exit code failure: git remote get-url origin failed with exit code $originExitCode." }
+    if ($originExitCode -eq 0) {
         $origin = ((Invoke-RolloutGit -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('remote','get-url','origin')) | Select-Object -First 1).Trim()
     }
     return [pscustomobject][ordered]@{
@@ -182,7 +188,9 @@ function Get-AiInstructionsRepositoryRoots {
                 $identity = Resolve-RolloutRepositoryIdentity -Path $current -GitExecutable $GitExecutable
                 if ($null -ne $identity -and $repositoryIdentities.Add([string]$identity.Identity)) { $repositories.Add($identity) }
             }
-            catch { }
+            catch {
+                if ($_.Exception.Message.StartsWith('Rollout Git exit code failure:',[System.StringComparison]::Ordinal)) { throw }
+            }
         }
         try { $children = @([System.IO.Directory]::EnumerateDirectories($current)) }
         catch { continue }
@@ -212,13 +220,78 @@ function ConvertFrom-RolloutGitPath {
 }
 
 function Test-RolloutReservedAgentPath {
-    param([Parameter(Mandatory = $true)][string] $Path)
-    return Test-IsReservedAgentArtifactPath -Path (ConvertFrom-RolloutGitPath -Path $Path)
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [AllowEmptyCollection()][string[]] $ProtectedPaths=@()
+    )
+    $normalizedPath = ConvertFrom-RolloutGitPath -Path $Path
+    return (Test-IsReservedAgentArtifactPath -Path $normalizedPath) -and
+        -not (Test-IsProtectedClaudeFamilyPath -Path $normalizedPath -ProtectedPaths $ProtectedPaths)
+}
+
+function Get-RolloutClaudeOwnershipEvidence {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $OutputLines,
+        [Parameter(Mandatory = $true)][string] $ExpectedRepository
+    )
+    $failure = {
+        param([string] $Reason)
+        [pscustomobject][ordered]@{ Succeeded=$false; ProtectedPaths=@(); FailureReason=$Reason }
+    }
+    $prefix = 'AI instructions Claude ownership evidence: '
+    $evidenceLines = @($OutputLines | Where-Object { ([string]$_).StartsWith($prefix,[StringComparison]::Ordinal) })
+    if ($evidenceLines.Count -ne 1) {
+        return & $failure "Claude ownership evidence must contain exactly one versioned record; found $($evidenceLines.Count)."
+    }
+    try { $evidence = ([string]$evidenceLines[0]).Substring($prefix.Length) | ConvertFrom-Json -ErrorAction Stop }
+    catch { return & $failure "Claude ownership evidence is not valid JSON: $($_.Exception.Message)" }
+    if ($null -eq $evidence -or $evidence -is [System.Array]) {
+        return & $failure 'Claude ownership evidence root must be one object.'
+    }
+    $expectedProperties = @('schemaVersion','repository','projectOwned','protectedPaths')
+    $actualProperties = @($evidence.PSObject.Properties | ForEach-Object { [string]$_.Name })
+    if ($actualProperties.Count -ne $expectedProperties.Count -or
+        @($actualProperties | Where-Object { $expectedProperties -cnotcontains $_ }).Count -gt 0) {
+        return & $failure 'Claude ownership evidence has an unsupported property set.'
+    }
+    $integerTypes = @([byte],[sbyte],[int16],[uint16],[int32],[uint32],[int64],[uint64])
+    if ($null -eq $evidence.schemaVersion -or $integerTypes -notcontains $evidence.schemaVersion.GetType() -or
+        [string]$evidence.schemaVersion -cne '1') {
+        return & $failure "Claude ownership evidence schemaVersion is unsupported: '$($evidence.schemaVersion)'."
+    }
+    if ($evidence.repository -isnot [string] -or $evidence.projectOwned -isnot [bool] -or
+        $evidence.protectedPaths -isnot [System.Array]) {
+        return & $failure 'Claude ownership evidence contains invalid field types.'
+    }
+    try { $actualRepository = Get-RolloutFullPath -Path ([string]$evidence.repository) }
+    catch { return & $failure "Claude ownership evidence repository is invalid: $($_.Exception.Message)" }
+    $expectedRepositoryPath = Get-RolloutFullPath -Path $ExpectedRepository
+    if (-not $actualRepository.Equals($expectedRepositoryPath,[StringComparison]::OrdinalIgnoreCase)) {
+        return & $failure "Claude ownership evidence repository does not match the rollout target."
+    }
+    $protectedPaths = @($evidence.protectedPaths | ForEach-Object { [string]$_ })
+    $expectedProtectedPaths = @(if ([bool]$evidence.projectOwned) {
+        'CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses'
+    })
+    if (-not (Test-RolloutStringArraysEqual -Left $protectedPaths -Right $expectedProtectedPaths)) {
+        return & $failure 'Claude ownership evidence protected paths do not match its projectOwned decision.'
+    }
+    return [pscustomobject][ordered]@{ Succeeded=$true; ProtectedPaths=$protectedPaths; FailureReason=$null }
+}
+
+function Get-RolloutGitStatus {
+    param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string] $GitExecutable)
+    return @(Invoke-RolloutGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('-c','core.quotePath=true','status','--porcelain=v1','--untracked-files=all'))
 }
 
 function Get-RolloutNonAgentGitStatus {
-    param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string] $GitExecutable)
-    $status = @(Invoke-RolloutGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('-c','core.quotePath=true','status','--porcelain=v1','--untracked-files=all'))
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $GitExecutable,
+        [AllowEmptyCollection()][string[]] $StatusLines,
+        [AllowEmptyCollection()][string[]] $ProtectedPaths=@()
+    )
+    $status = if ($PSBoundParameters.ContainsKey('StatusLines')) { @($StatusLines) } else { @(Get-RolloutGitStatus -Repository $Repository -GitExecutable $GitExecutable) }
     return @(
         foreach ($line in $status) {
             $text = [string]$line
@@ -227,7 +300,7 @@ function Get-RolloutNonAgentGitStatus {
             $paths = if ($pathText -match ' -> ') { @($pathText -split ' -> ',2) } else { @($pathText) }
             $agentOnly = $true
             foreach ($path in $paths) {
-                if (-not (Test-RolloutReservedAgentPath -Path $path)) { $agentOnly = $false; break }
+                if (-not (Test-RolloutReservedAgentPath -Path $path -ProtectedPaths $ProtectedPaths)) { $agentOnly = $false; break }
             }
             if (-not $agentOnly) { $text }
         }
@@ -235,19 +308,25 @@ function Get-RolloutNonAgentGitStatus {
 }
 
 function Get-RolloutTrackedReservedPaths {
-    param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string] $GitExecutable)
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $GitExecutable,
+        [AllowEmptyCollection()][string[]] $ProtectedPaths=@()
+    )
     $trackedPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($line in @(Invoke-RolloutGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('-c','core.quotePath=true','ls-files'))) {
         [void]$trackedPaths.Add((ConvertFrom-RolloutGitPath -Path ([string]$line)))
     }
-    if ((Get-RolloutGitExitCode -Repository $Repository -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','HEAD')) -eq 0) {
+    $headExitCode = Get-RolloutGitExitCode -Repository $Repository -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','--quiet','HEAD')
+    if ($headExitCode -notin @(0, 1)) { throw "git rev-parse --verify --quiet HEAD failed with exit code $headExitCode." }
+    if ($headExitCode -eq 0) {
         foreach ($line in @(Invoke-RolloutGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('-c','core.quotePath=true','ls-tree','-r','--name-only','HEAD'))) {
             [void]$trackedPaths.Add((ConvertFrom-RolloutGitPath -Path ([string]$line)))
         }
     }
     return @(
         foreach ($path in $trackedPaths) {
-            if (Test-RolloutReservedAgentPath -Path $path) { $path }
+            if (Test-RolloutReservedAgentPath -Path $path -ProtectedPaths $ProtectedPaths) { $path }
         }
     ) | Sort-Object -Unique
 }
@@ -410,7 +489,7 @@ function Invoke-AiInstructionsRollout {
             $skipped.Add([pscustomobject][ordered]@{Repository=$repositoryRoot;Reason='authority repository'})
             continue
         }
-        $beforeStatus = @(Get-RolloutNonAgentGitStatus -Repository $repositoryRoot -GitExecutable $GitExecutable)
+        $beforeStatusLines = @(Get-RolloutGitStatus -Repository $repositoryRoot -GitExecutable $GitExecutable)
         $outputLines = @()
         $bootstrapFailure = $null
         try {
@@ -445,7 +524,16 @@ function Invoke-AiInstructionsRollout {
             }
         }
         $verificationReasons = New-Object 'System.Collections.Generic.List[string]'
-        $afterStatus = @(Get-RolloutNonAgentGitStatus -Repository $repositoryRoot -GitExecutable $GitExecutable)
+        $ownershipEvidence = Get-RolloutClaudeOwnershipEvidence -OutputLines $outputLines -ExpectedRepository $repositoryRoot
+        $protectedClaudePaths = @($ownershipEvidence.ProtectedPaths)
+        if (-not [bool]$ownershipEvidence.Succeeded) {
+            $verificationReasons.Add([string]$ownershipEvidence.FailureReason)
+        }
+        $afterStatusLines = @(Get-RolloutGitStatus -Repository $repositoryRoot -GitExecutable $GitExecutable)
+        $beforeStatus = @(Get-RolloutNonAgentGitStatus -Repository $repositoryRoot -GitExecutable $GitExecutable `
+            -StatusLines $beforeStatusLines -ProtectedPaths $protectedClaudePaths)
+        $afterStatus = @(Get-RolloutNonAgentGitStatus -Repository $repositoryRoot -GitExecutable $GitExecutable `
+            -StatusLines $afterStatusLines -ProtectedPaths $protectedClaudePaths)
         if (-not (Test-RolloutStringArraysEqual -Left $beforeStatus -Right $afterStatus)) {
             $nonAgentDrift.Add([pscustomobject][ordered]@{Repository=$repositoryRoot;Before=$beforeStatus;After=$afterStatus})
             $verificationReasons.Add('non-Agent Git state changed')
@@ -460,7 +548,8 @@ function Invoke-AiInstructionsRollout {
             $oldManifestsRemaining.Add([pscustomobject][ordered]@{Repository=$repositoryRoot;Path='.codex/ai-instructions.manifest.json'})
             $verificationReasons.Add('manifest is not current')
         }
-        $repositoryTracked = @(Get-RolloutTrackedReservedPaths -Repository $repositoryRoot -GitExecutable $GitExecutable)
+        $repositoryTracked = @(Get-RolloutTrackedReservedPaths -Repository $repositoryRoot -GitExecutable $GitExecutable `
+            -ProtectedPaths $protectedClaudePaths)
         foreach ($path in $repositoryTracked) { $trackedRemaining.Add([pscustomobject][ordered]@{Repository=$repositoryRoot;Path=$path}) }
         if ($repositoryTracked.Count -gt 0) { $verificationReasons.Add('tracked reserved Agent artifacts remain') }
         if ($null -ne $bootstrapFailure -or $verificationReasons.Count -gt 0) {

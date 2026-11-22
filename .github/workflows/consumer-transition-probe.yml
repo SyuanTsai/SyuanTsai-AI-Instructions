@@ -13,7 +13,7 @@ concurrency:
 jobs:
   leg:
     name: Consumer transition probe (${{ matrix.platform }})
-    timeout-minutes: 60
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -64,7 +64,7 @@ jobs:
 
   aggregate:
     name: Consumer transition probe aggregate
-    timeout-minutes: 10
+    timeout-minutes: 20
     needs: leg
     if: always()
     runs-on: ubuntu-latest

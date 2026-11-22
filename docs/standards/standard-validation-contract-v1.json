@@ -13,6 +13,14 @@
     "optionalEvidence": ["-SemanticEvidencePath", "-AiReviewEvidencePath", "-HumanApprovalEvidencePath", "-PublishInstallEvidencePath", "-PostInstallEvidencePath"],
     "developmentOnly": "-DevelopmentHarness",
     "lifecycle": "-CompleteLifecycle",
+    "lifecycleTrustAnchors": {
+      "status": "no-active-trust-anchor",
+      "supervisorStatus": "revoked",
+      "humanApprovalStatus": "revoked",
+      "revokedOn": "2026-11-20",
+      "revocationReason": "private-key-custody-unknown",
+      "completeLifecycle": "BLOCKED-pending-new-trust-anchor"
+    },
     "result": "-OutputPath <atomic JSON evidence path>",
     "exitCodes": { "PASS": 0, "BLOCKED": 10, "FAILED": 20, "INVALID": 30, "CANCELLED": 40 }
   },

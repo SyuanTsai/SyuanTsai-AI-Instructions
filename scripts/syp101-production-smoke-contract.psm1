@@ -33,8 +33,8 @@ function Assert-Syp101SmokeRepositoryClean {
         throw "Production smoke repository is not clean after $Phase`: $(@($statusResult.Output) -join ', ')"
     }
     $indexResult = Invoke-Syp101SmokeContractGit -Repository $repositoryPath -Arguments @('diff','--cached','--quiet','--exit-code') -AllowNonZero
+    if ($indexResult.ExitCode -notin @(0, 1)) { throw "Production smoke could not inspect the Git index after $Phase (git exit code $($indexResult.ExitCode))." }
     if ($indexResult.ExitCode -eq 1) { throw "Production smoke Git index is not clean after $Phase." }
-    if ($indexResult.ExitCode -gt 1) { throw "Production smoke could not inspect the Git index after $Phase." }
 }
 
 Export-ModuleMember -Function Assert-Syp101SmokeRepositoryClean

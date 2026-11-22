@@ -90,18 +90,107 @@ function Get-CanonicalRepositoryRoot {
     return $root
 }
 
+$script:RepoSharedSkillsPlatformRuntimeModule = $null
+
+function Resolve-RepoSharedSkillsPlatformRuntimeModule {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][object[]]$ImportedModules,
+        [Parameter(Mandatory=$true)][string]$RuntimeRoot
+    )
+
+    $modules = @($ImportedModules)
+    if ($modules.Count -ne 1 -or $modules[0] -isnot [Management.Automation.PSModuleInfo]) {
+        throw 'AI instructions bootstrap platform runtime import did not return exactly one module.'
+    }
+
+    $module = $modules[0]
+    $expectedRoot = [IO.Path]::GetFullPath($RuntimeRoot).TrimEnd([char[]]@('\','/'))
+    $expectedPath = [IO.Path]::GetFullPath((Join-Path $expectedRoot 'platform-runtime.psm1')).TrimEnd([char[]]@('\','/'))
+    $actualRoot = [IO.Path]::GetFullPath([string]$module.ModuleBase).TrimEnd([char[]]@('\','/'))
+    $actualPath = [IO.Path]::GetFullPath([string]$module.Path).TrimEnd([char[]]@('\','/'))
+    $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+
+    if (-not [string]::Equals($actualRoot,$expectedRoot,$comparison)) {
+        throw 'AI instructions bootstrap platform runtime module was not loaded from the verified runtime root.'
+    }
+    if (-not [string]::Equals($actualPath,$expectedPath,$comparison)) {
+        throw 'AI instructions bootstrap platform runtime module path does not match the verified RootModule path.'
+    }
+    return $module
+}
+
+function Set-RepoSharedSkillsPlatformRuntime {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Module)
+
+    if ($null -eq $Module -or $Module -isnot [Management.Automation.PSModuleInfo]) {
+        throw 'Repository Skill migration platform runtime must be a non-null PSModuleInfo.'
+    }
+    foreach ($commandName in @('Open-PlatformDirectory','Resolve-PlatformPhysicalPath')) {
+        if (-not $Module.ExportedCommands.ContainsKey($commandName)) {
+            throw "Repository Skill migration platform runtime does not expose '$commandName'."
+        }
+    }
+    $script:RepoSharedSkillsPlatformRuntimeModule = $Module
+}
+
+function Get-UnixPhysicalRootIdentity {
+    param([Parameter(Mandatory=$true)][string]$CanonicalPath,[Parameter(Mandatory=$true)][string]$RootName)
+    if ($null -eq $script:RepoSharedSkillsPlatformRuntimeModule) {
+        throw 'Repository and USER physical root identity cannot be verified: the verified platform runtime was not provided; migration fails closed.'
+    }
+    $runtime = $script:RepoSharedSkillsPlatformRuntimeModule
+    $item = $null
+    try { $item = Get-Item -Force -LiteralPath $CanonicalPath -ErrorAction Stop }
+    catch [Management.Automation.ItemNotFoundException] { return $null }
+    catch [IO.DirectoryNotFoundException] { return $null }
+    catch {
+        throw "$RootName physical root identity cannot be obtained; migration fails closed. $($_.Exception.Message)"
+    }
+    if (-not $item.PSIsContainer) {
+        throw "$RootName physical root is not a directory; migration fails closed."
+    }
+
+    $lease = $null
+    try {
+        # Root-only leases reject symlink components. Resolve every component first so
+        # the lease observes the directory a root alias actually targets.
+        $physicalPath = & $runtime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path $CanonicalPath
+        $lease = & $runtime.ExportedCommands['Open-PlatformDirectory'] -Root $physicalPath -RootOnly
+        return [pscustomobject]@{
+            Device = [uint64]$lease.Observation.Device
+            Inode = [uint64]$lease.Observation.Inode
+        }
+    }
+    catch {
+        throw "$RootName physical root identity cannot be obtained; migration fails closed. $($_.Exception.Message)"
+    }
+    finally { if ($null -ne $lease) { $lease.Dispose() } }
+}
+
 function Assert-RepoAndUserRootsDistinct {
     [CmdletBinding()]
     param([Parameter(Mandatory=$true)][string]$Repository,[Parameter(Mandatory=$true)][string]$UserHome)
 
     $repositoryCanonical = Get-CanonicalRepositoryRoot $Repository
     $userCanonical = Get-CanonicalRepositoryRoot $UserHome
-    if ($repositoryCanonical.Equals($userCanonical,[StringComparison]::OrdinalIgnoreCase)) {
+    $isWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    $pathComparison = if ($isWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    if ($repositoryCanonical.Equals($userCanonical,$pathComparison)) {
         throw 'Repository and USER roots must be physically distinct; canonical root alias detected.'
     }
 
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-        throw 'Repository and USER physical root identity cannot be verified on this platform; migration fails closed.'
+    if (-not $isWindows) {
+        $repositoryIdentity = Get-UnixPhysicalRootIdentity -CanonicalPath $repositoryCanonical -RootName 'Repository'
+        if ($null -eq $repositoryIdentity) { throw 'Repository physical root is missing; migration fails closed.' }
+        $userIdentity = Get-UnixPhysicalRootIdentity -CanonicalPath $userCanonical -RootName 'USER'
+        if ($null -eq $userIdentity) { return $true }
+        if ([uint64]$repositoryIdentity.Device -eq [uint64]$userIdentity.Device -and
+            [uint64]$repositoryIdentity.Inode -eq [uint64]$userIdentity.Inode) {
+            throw 'Repository and USER roots resolve to the same physical directory; aliased roots are not eligible for Skill migration.'
+        }
+        return $true
     }
     $repositoryIdentity = [CodexAiInstructions.RepositoryRootIdentity]::TryGetDirectoryIdentity($repositoryCanonical)
     if ($null -eq $repositoryIdentity) { throw 'Repository physical root is missing; migration fails closed.' }
@@ -332,4 +421,4 @@ function Assert-RepoSharedSkillsMigrationEvidence {
     }
 }
 
-Export-ModuleMember -Function Get-RepoSharedSkillsMigrationPlan, Assert-RepoSharedSkillsMigrationEvidence, Get-RepoSkillMigrationGitState, Get-UserSharedSkillsReadiness, Assert-RepoAndUserRootsDistinct
+Export-ModuleMember -Function Get-RepoSharedSkillsMigrationPlan, Assert-RepoSharedSkillsMigrationEvidence, Get-RepoSkillMigrationGitState, Get-UserSharedSkillsReadiness, Assert-RepoAndUserRootsDistinct, Resolve-RepoSharedSkillsPlatformRuntimeModule, Set-RepoSharedSkillsPlatformRuntime

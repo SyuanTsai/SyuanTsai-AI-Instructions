@@ -6,29 +6,29 @@
       "id": "general",
       "requestedRef": "main",
       "requestedRefType": "branch",
-      "resolvedCommit": "5f642e2ebe219cd1c74222a9f4ed88548518efbe",
-      "resolvedVersion": "main@5f642e2e"
+      "resolvedCommit": "cd8a82d52e411f58fb959f17aa8fb8871847edc4",
+      "resolvedVersion": "main@cd8a82d5"
     },
     {
       "id": "code-collaboration",
       "requestedRef": "main",
       "requestedRefType": "branch",
-      "resolvedCommit": "bc6acc19defe781d26f6d41c3c28b715334976a3",
-      "resolvedVersion": "main@bc6acc19"
+      "resolvedCommit": "505b15ed754b15f3b0b8f83b18280d6a1575d6e3",
+      "resolvedVersion": "main@505b15ed"
     },
     {
       "id": "knowledge-content",
       "requestedRef": "main",
       "requestedRefType": "branch",
-      "resolvedCommit": "645390635c2cead49b79f864031f8b7ee3b6b3d2",
-      "resolvedVersion": "main@64539063"
+      "resolvedCommit": "94551fbd58e0d3799e4d101c39bd6acb3baecae2",
+      "resolvedVersion": "main@94551fbd"
     },
     {
       "id": "atlassian-ecosystem",
       "requestedRef": "main",
       "requestedRefType": "branch",
-      "resolvedCommit": "a25fd9fe97c35d2a1ee80bf832cae793784c34ce",
-      "resolvedVersion": "main@a25fd9fe"
+      "resolvedCommit": "441ee0f4f982274ecda6ba93855111427b6f73d8",
+      "resolvedVersion": "main@441ee0f4"
     }
   ]
 }
