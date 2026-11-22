@@ -609,15 +609,20 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         }
     }
 
-    # Scenario: The shell edge downloads and hands off to PowerShell through a dedicated private child temp directory.
-    # Purpose: L7 bounded HTTPS, M5 env -i allowlist, and exact empty-directory cleanup keep .NET runtime state out of the run root.
+    # Scenario: The shell edge downloads and hands off to PowerShell through a persistent setup-owned private child temp directory.
+    # Purpose: L7 bounded HTTPS and M5 env -i keep unbounded .NET runtime state outside the exactly reclaimed per-run directory.
     It 'UnitT33_uses_https_only_bounded_downloads_and_an_environment_allowlist' {
         $script:SetupShellText | Should Match "curl -q --proto '=https' --proto-redir '=https' --tlsv1\.2"
         $script:SetupShellText | Should Match '--max-time [0-9]+'
         $script:SetupShellText | Should Match 'wget --no-config --https-only --secure-protocol=TLSv1_2 --timeout=[0-9]+'
-        $script:SetupShellText | Should Match ([regex]::Escape('run_clean mkdir "$run_tmp/pwsh-tmp"'))
-        $script:SetupShellText | Should Match ([regex]::Escape('"TMPDIR=$run_tmp/pwsh-tmp"'))
-        $script:SetupShellText | Should Match ([regex]::Escape('run_clean rmdir "$run_tmp/pwsh-tmp/.dotnet/shm" "$run_tmp/pwsh-tmp/.dotnet" "$run_tmp/pwsh-tmp"'))
+        $script:SetupShellText | Should Match ([regex]::Escape('pwsh_tmp="$setup_root/pwsh-tmp"'))
+        $script:SetupShellText | Should Match ([regex]::Escape('if [ -L "$pwsh_tmp" ]; then refuse unsafe-path'))
+        $script:SetupShellText | Should Match ([regex]::Escape('[ -d "$pwsh_tmp" ] || refuse unsafe-path'))
+        $script:SetupShellText | Should Match ([regex]::Escape('run_clean mkdir "$pwsh_tmp"'))
+        $script:SetupShellText | Should Match ([regex]::Escape('find "$pwsh_tmp" -prune -type d -user "$uid" -perm 0700 -print'))
+        $script:SetupShellText | Should Match ([regex]::Escape('"TMPDIR=$pwsh_tmp"'))
+        $script:SetupShellText | Should Not Match ([regex]::Escape('run_clean mkdir "$run_tmp/pwsh-tmp"'))
+        $script:SetupShellText | Should Not Match ([regex]::Escape('run_clean rmdir "$run_tmp/pwsh-tmp'))
         $script:SetupShellText | Should Not Match '"TMPDIR=\$run_tmp"'
         $script:SetupShellText | Should Match '(?m)^"\$env_path" -i "\$@" "\$bootstrap/pwsh" -NoLogo -NoProfile -NonInteractive -File '
         $script:SetupShellText | Should Match 'setup_root="\$home/\.local/share/ai-instructions-setup"'
@@ -907,13 +912,16 @@ Describe 'setup-agent-environment Windows native fixture (SYP-354 P10a)' {
 
         function Set-WinSetupDurabilityHook {
             param([AllowNull()][scriptblock]$Hook)
-            $runtimeModule = @(Get-Module platform-runtime)[0]
-            & $runtimeModule {
-                param($Value)
-                $windowsModule = @(Get-Module -All Windows)[0]
-                if ($null -eq $windowsModule) { throw 'The nested Windows platform module is not loaded.' }
-                & $windowsModule { param($NestedValue) $script:WindowsPublicationDurabilityTestHook = $NestedValue } $Value
-            } $Hook
+            $setupModules = @(Get-Module agent-environment-setup)
+            if ($setupModules.Count -ne 1) { throw "Expected one loaded agent-environment-setup module; found $($setupModules.Count)." }
+            $runtimeModule = & $setupModules[0] { $script:AgentEnvironmentSetupPlatformRuntime }
+            if ($null -eq $runtimeModule) { throw 'The setup module has no bound platform-runtime module instance.' }
+            $windowsPath = [IO.Path]::GetFullPath((Join-Path $runtimeModule.ModuleBase 'platform/Windows.psm1'))
+            $windowsModules = @($runtimeModule.NestedModules | Where-Object {
+                $_.Name -ceq 'Windows' -and [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath([string]$_.Path),$windowsPath)
+            })
+            if ($windowsModules.Count -ne 1) { throw "Expected one Windows nested module at '$windowsPath'; found $($windowsModules.Count)." }
+            & $windowsModules[0] { param($Value) $script:WindowsPublicationDurabilityTestHook = $Value } $Hook
         }
 
         $script:WinPublicationCrashScript = Join-Path $script:WinRoot 'invoke-publication-crash.ps1'
@@ -1449,6 +1457,17 @@ Publish-AgentEnvironmentSetupFile -SetupRoot $SetupRoot -Directory receipts -Lea
         }
     }
 
+    # Scenario: Removing and reimporting the setup module preserves platform-runtime while hiding its nested Windows module from Get-Module -All.
+    # Purpose: The durability hook resolves the exact nested module instance retained by the runtime instead of relying on session visibility.
+    It 'InterT18a_resolves_the_runtime_nested_Windows_module_after_setup_module_reimport' {
+        Remove-Module agent-environment-setup -Force
+        Import-Module (Join-Path $script:WinRepositoryRoot 'scripts/agent-environment-setup.psm1') -DisableNameChecking -Force
+        $runtimeModule = @(Get-Module platform-runtime)[0]
+        (& $runtimeModule { @(Get-Module -All Windows).Count }) | Should Be 0
+        @($runtimeModule.NestedModules | Where-Object { $_.Name -ceq 'Windows' }).Count | Should Be 1
+        { Set-WinSetupDurabilityHook $null } | Should Not Throw
+    }
+
     # Scenario: The create-only runtime rename succeeds, then the platform primitive injects a failure at the pwsh parent-directory flush.
     # Purpose: J2 publishes no pointer, leaves the durable-state-unknown runtime as an untouched orphan, and a real-entry rerun uses a new attempt.
     It 'InterT19_recovers_from_runtime_parent_flush_failure_with_a_new_attempt' {
@@ -1744,13 +1763,25 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
                 [string]::IsNullOrEmpty($PreservedPath) -or $_.FullName -ne $PreservedPath
             })
             if ($remaining.Count -eq 0) { return }
-            $bounded = foreach ($directory in @($remaining | Select-Object -First 4)) {
-                $entries = @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction SilentlyContinue | Select-Object -First 8 | ForEach-Object {
-                    $_.Name + ':' + $(if ($_.PSIsContainer) { 'directory' } elseif ($null -ne $_.LinkType) { 'link' } else { 'file' })
-                })
-                "$($directory.Name)[$($entries -join ',')]"
+            $bounded = [Collections.Generic.List[string]]::new()
+            $pending = [Collections.Generic.Queue[object]]::new()
+            foreach ($directory in @($remaining | Sort-Object Name)) {
+                $pending.Enqueue([pscustomobject]@{ Item=$directory; Relative=$directory.Name; Depth=0 })
             }
-            throw "Expected no current setup run directories under '$TmpRoot'; found $($remaining.Count). Bounded entries: $($bounded -join '; ')"
+            while ($pending.Count -gt 0 -and $bounded.Count -lt 16) {
+                $node = $pending.Dequeue()
+                $item = $node.Item
+                $isLink = $null -ne $item.LinkType -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+                $kind = if ($isLink) { 'link' } elseif ($item.PSIsContainer) { 'directory' } else { 'file' }
+                $bounded.Add("$($node.Relative):$kind")
+                if ($node.Depth -ge 4 -or $isLink -or -not $item.PSIsContainer) { continue }
+                $remainingCapacity = 16 - $bounded.Count - $pending.Count
+                if ($remainingCapacity -le 0) { continue }
+                foreach ($child in @(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -First $remainingCapacity)) {
+                    $pending.Enqueue([pscustomobject]@{ Item=$child; Relative="$($node.Relative)/$($child.Name)"; Depth=([int]$node.Depth+1) })
+                }
+            }
+            throw "Expected no current setup run directories under '$TmpRoot'; found $($remaining.Count). Bounded entries (depth<=4, total<=16): $($bounded -join '; ')"
         }
     }
 
@@ -1775,6 +1806,7 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         $runtimeReceipt = Get-Content -Raw -LiteralPath (Join-Path $setupRoot "receipts/runtime-$($script:UnixVersion)-$($script:UnixRid).json") | ConvertFrom-Json
         $runtimeRoot = ConvertFrom-AgentEnvironmentSetupHomePath ([string]$runtimeReceipt.runtimeClosure.rootPath) $userHome
         Get-UnixMode $setupRoot | Should Be '700'
+        Get-UnixMode (Join-Path $setupRoot 'pwsh-tmp') | Should Be '700'
         Get-UnixMode $runtimeRoot | Should Be '700'
         Get-UnixMode (Join-Path $runtimeRoot 'pwsh') | Should Be '700'
         Get-UnixMode (Join-Path $setupRoot 'receipts/setup-receipt.json') | Should Be '600'
@@ -1783,8 +1815,8 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         $offline.Stdout.Contains($userHome) | Should Be $false
     }
 
-    # Scenario: HOME is reached through a symbolic link, or a setup-root ancestor is a dangling link.
-    # Purpose: S1 refuses link ancestors as unsafe-path and leaves outside bytes untouched.
+    # Scenario: HOME is reached through a link, a setup ancestor dangles, or the persistent PowerShell temp directory is linked or non-private.
+    # Purpose: S1/M7 refuse unsafe paths and modes before child runtime state can escape the setup-owned 0700 boundary.
     It 'InterT21_refuses_symbolic_and_dangling_link_ancestors' {
         $real = New-UnixHome 'link-real'
         $alias = Join-Path $script:UnixRoot 'home-link-alias'
@@ -1797,6 +1829,21 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         $run.ExitCode | Should Be 13
         [IO.File]::ReadAllText($script:UnixSentinel) | Should Be 'sentinel'
         Test-Path -LiteralPath (Join-Path $script:UnixRoot 'missing-target') | Should Be $false
+
+        $linkedTmpHome = New-UnixHome 'linked-pwsh-tmp'
+        $linkedTmp = Join-Path $linkedTmpHome '.local/share/ai-instructions-setup/pwsh-tmp'
+        [void][IO.Directory]::CreateSymbolicLink($linkedTmp,$script:UnixRoot)
+        $run = Invoke-UnixSetup $linkedTmpHome @('--offline')
+        $run.ExitCode | Should Be 13; $run.Json.code | Should Be 'unsafe-path'
+
+        $broadTmpHome = New-UnixHome 'broad-pwsh-tmp'
+        $broadTmp = Join-Path $broadTmpHome '.local/share/ai-instructions-setup/pwsh-tmp'
+        [void][IO.Directory]::CreateDirectory($broadTmp)
+        [IO.File]::SetUnixFileMode($broadTmp,[IO.UnixFileMode]493)
+        try {
+            $run = Invoke-UnixSetup $broadTmpHome @('--offline')
+            $run.ExitCode | Should Be 13; $run.Json.code | Should Be 'unsafe-path'
+        } finally { [IO.File]::SetUnixFileMode($broadTmp,[IO.UnixFileMode]448) }
     }
 
     # Scenario: The cached archive is corrupted, or missing in --offline mode.

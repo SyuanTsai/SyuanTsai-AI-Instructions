@@ -135,11 +135,6 @@ cleanup() {
                     run_clean rm -f "$run_tmp/$asset_name" "$run_tmp/._$asset_name" \
                         "$run_tmp/download/$asset_name" "$run_tmp/download/._$asset_name" 2>/dev/null || :
                 fi
-                # On macOS the .NET named-mutex implementation leaves these
-                # empty TMPDIR-relative directories behind after pwsh exits.
-                # Remove only the exact runtime-defined and setup-owned paths;
-                # rmdir neither scans nor deletes a non-empty directory tree.
-                run_clean rmdir "$run_tmp/pwsh-tmp/.dotnet/shm" "$run_tmp/pwsh-tmp/.dotnet" "$run_tmp/pwsh-tmp" 2>/dev/null || :
                 run_clean rmdir "$run_tmp/download" "$run_tmp" 2>/dev/null || : ;;
         esac
     fi
@@ -406,6 +401,16 @@ fi
 # --- Setup root and per-run temp (M4, M7, M8) --------------------------------
 run_clean mkdir -p "$setup_root" || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'Cannot create the setup root.'
 check_ancestors "$setup_root" 'The setup root'
+pwsh_tmp="$setup_root/pwsh-tmp"
+check_ancestors "$pwsh_tmp" 'The PowerShell temp directory'
+if [ -L "$pwsh_tmp" ]; then refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The PowerShell temp directory is a symbolic link.'; fi
+if [ -e "$pwsh_tmp" ]; then
+    [ -d "$pwsh_tmp" ] || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The PowerShell temp path is not a directory.'
+else
+    run_clean mkdir "$pwsh_tmp" || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'Cannot create the PowerShell temp directory.'
+fi
+[ -n "$(run_clean find "$pwsh_tmp" -prune -type d -user "$uid" -perm 0700 -print)" ] ||
+    refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The PowerShell temp directory must be owned by the current uid with mode 0700.'
 if [ -L "$setup_root/tmp" ]; then refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The setup tmp directory is a symbolic link.'; fi
 run_clean mkdir -p "$setup_root/tmp" || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'Cannot create the setup tmp directory.'
 check_owner_mode "$setup_root/tmp" 'The setup tmp directory'
@@ -498,8 +503,7 @@ run_clean chmod 0700 "$bootstrap/pwsh"
 
 # --- S4: hand-off with an explicit environment allowlist (M5) ----------------
 if [ "$os_token" = osx ]; then default_lang=en_US.UTF-8; else default_lang=C.UTF-8; fi
-run_clean mkdir "$run_tmp/pwsh-tmp" || refuse internal-error "$EXIT_INTERNAL_ERROR" 'Cannot create the private PowerShell temp directory.'
-set -- "HOME=$home" "PATH=${PATH-/usr/bin:/bin}" "LANG=${LANG:-$default_lang}" "TMPDIR=$run_tmp/pwsh-tmp" "PSModulePath=$bootstrap/Modules"
+set -- "HOME=$home" "PATH=${PATH-/usr/bin:/bin}" "LANG=${LANG:-$default_lang}" "TMPDIR=$pwsh_tmp" "PSModulePath=$bootstrap/Modules"
 if [ -n "${LC_ALL+x}" ]; then set -- "$@" "LC_ALL=$LC_ALL"; fi
 if [ -n "${HTTPS_PROXY+x}" ]; then set -- "$@" "HTTPS_PROXY=$HTTPS_PROXY"; fi
 if [ -n "${HTTP_PROXY+x}" ]; then set -- "$@" "HTTP_PROXY=$HTTP_PROXY"; fi
