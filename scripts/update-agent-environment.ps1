@@ -269,6 +269,7 @@ try {
         $command=$reconcilerCommands['Get-UserSkillsDesiredState']
         $desiredStateParameters=@{RuntimeRoot=$runtimeRoot;Configuration=$configuration;CatalogRepository=[string]$bundle.repository;CatalogCommit=[string]$bundle.commit;WorkingRoot=$temporaryRoot}
         if($null-ne$userProjectionGateContext){$desiredStateParameters.GateContext=$userProjectionGateContext}
+        if($command.Parameters.ContainsKey('UserHome')){$desiredStateParameters.UserHome=$userHomePath}
         $desiredState = & $command @desiredStateParameters
         $mode = if ($VerifyOnly) { 'VerifyOnly' } elseif ($WhatIfPreference) { 'WhatIf' } else { 'Apply' }
         $command=$reconcilerCommands['Invoke-UserSkillsReconciliation']

@@ -40,9 +40,13 @@ $script:repoManifestV4DowngradeMessage =
 
 $bootstrapPlatformRuntimeRoot = [System.IO.Path]::GetFullPath($RuntimeRoot)
 $bootstrapPlatformRuntimePath = Join-Path $bootstrapPlatformRuntimeRoot 'platform-runtime.psd1'
+Import-Module (Join-Path $PSScriptRoot 'repo-shared-skills-migration.psm1') -Force
 try {
-    Import-Module $bootstrapPlatformRuntimePath -Force -ErrorAction Stop
-    Assert-PlatformRuntimeInventory -Root $bootstrapPlatformRuntimeRoot -ManifestPath $bootstrapPlatformRuntimePath | Out-Null
+    $bootstrapPlatformRuntimeImport = @(Import-Module $bootstrapPlatformRuntimePath -Force -PassThru -ErrorAction Stop)
+    $bootstrapPlatformRuntimeModule = Resolve-RepoSharedSkillsPlatformRuntimeModule `
+        -ImportedModules $bootstrapPlatformRuntimeImport -RuntimeRoot $bootstrapPlatformRuntimeRoot
+    & $bootstrapPlatformRuntimeModule.ExportedCommands['Assert-PlatformRuntimeInventory'] `
+        -Root $bootstrapPlatformRuntimeRoot -ManifestPath $bootstrapPlatformRuntimePath | Out-Null
 }
 catch {
     throw [System.InvalidOperationException]::new(
@@ -56,7 +60,7 @@ Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ai-instructions-runtime-contract.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'agent-artifact-remediation.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'license-delivery.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'repo-shared-skills-migration.psm1') -Force
+Set-RepoSharedSkillsPlatformRuntime -Module $bootstrapPlatformRuntimeModule
 Import-Module (Join-Path $PSScriptRoot 'skills-selection.psm1') -Force
 
 if (-not ('CodexAiInstructions.NativeFileMutation' -as [type])) {
@@ -1467,7 +1471,11 @@ function Get-ProjectCandidateDesiredState {
     if (($expectedProjections -join "`n") -cne ($actualProjections -join "`n") -or $expectedProjections.Count -eq 0) {
         throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'Project candidate projections do not match the verified sync configuration.')
     }
-    $selectedSkillIds = @(Resolve-SkillsSelection -Catalog $Catalog -Selection $SyncConfiguration.catalog)
+    $configuredCapabilityEvidence = @()
+    if ($null -ne $SyncConfiguration.PSObject.Properties['capabilityEvidence']) {
+        $configuredCapabilityEvidence = @($SyncConfiguration.capabilityEvidence)
+    }
+    $selectedSkillIds = @(Resolve-SkillsSelection -Catalog $Catalog -Selection $SyncConfiguration.catalog -CapabilityEvidence $configuredCapabilityEvidence)
     [string[]]$expectedSkillIds = @($selectedSkillIds)
     [Array]::Sort($expectedSkillIds,[StringComparer]::Ordinal)
     [string[]]$actualSkillIds = @($inventory.skills | ForEach-Object { [string]$_.id })

@@ -35,32 +35,64 @@ function Get-CurrentPlatformId {
     return 'unix'
 }
 
-function Get-ExplicitCapabilityEvidence {
-    $raw = [string]$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE
-    if ([string]::IsNullOrWhiteSpace($raw)) {
-        return @()
-    }
+function Assert-CapabilityEvidenceItems {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Evidence,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
 
-    try {
-        $parsed = $raw | ConvertFrom-Json
-    }
-    catch {
-        throw "AI_INSTRUCTIONS_CAPABILITY_EVIDENCE is not valid JSON: $($_.Exception.Message)"
-    }
-
-    $evidence = @($parsed)
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($item in $evidence) {
         $kind = [string](Get-OptionalPropertyValue -Object $item -Name 'kind' -DefaultValue '')
         $id = [string](Get-OptionalPropertyValue -Object $item -Name 'id' -DefaultValue '')
         $state = [string](Get-OptionalPropertyValue -Object $item -Name 'state' -DefaultValue '')
         if (@('command','connector','environment') -cnotcontains $kind -or
             $id -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' -or
-            @('available','authenticated','configured') -cnotcontains $state) {
-            throw "AI_INSTRUCTIONS_CAPABILITY_EVIDENCE contains invalid capability evidence: kind='$kind' id='$id' state='$state'."
+            @('absent','available','authenticated','configured') -cnotcontains $state) {
+            throw "$Context contains invalid capability evidence: kind='$kind' id='$id' state='$state'."
+        }
+        foreach ($propertyName in @($item.PSObject.Properties.Name)) {
+            if ($propertyName -cnotin @('kind','id','state')) {
+                throw "$Context contains unsupported capability evidence property '$propertyName'."
+            }
+        }
+        if (-not $seen.Add("$kind`n$id")) {
+            throw "$Context contains duplicate capability evidence for '$kind`:$id'."
         }
     }
 
-    return $evidence
+    return $Evidence
+}
+
+function Get-ExplicitCapabilityEvidence {
+    param([AllowEmptyCollection()][object[]] $ConfiguredEvidence = @())
+
+    $configured = @(Assert-CapabilityEvidenceItems -Evidence @($ConfiguredEvidence) -Context 'Stored capability evidence')
+    $raw = [string]$env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE
+    $environmentEvidence = @()
+    if (-not [string]::IsNullOrWhiteSpace($raw)) {
+        $trimmed = $raw.Trim()
+        if (-not $trimmed.StartsWith('[')) {
+            try { [void]($raw | ConvertFrom-Json -ErrorAction Stop) }
+            catch { throw "AI_INSTRUCTIONS_CAPABILITY_EVIDENCE is not valid JSON: $($_.Exception.Message)" }
+            throw 'AI_INSTRUCTIONS_CAPABILITY_EVIDENCE must be a JSON array.'
+        }
+        try {
+            $converted = $raw | ConvertFrom-Json -ErrorAction Stop
+            $parsed = @($converted)
+        }
+        catch {
+            throw "AI_INSTRUCTIONS_CAPABILITY_EVIDENCE is not valid JSON: $($_.Exception.Message)"
+        }
+        $environmentEvidence = @(Assert-CapabilityEvidenceItems -Evidence @($parsed) -Context 'AI_INSTRUCTIONS_CAPABILITY_EVIDENCE')
+    }
+
+    $effective = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::Ordinal)
+    foreach ($item in @($configured + $environmentEvidence)) {
+        $effective["$([string]$item.kind)`n$([string]$item.id)"] = $item
+    }
+
+    return @($effective.Values | Sort-Object @{Expression={[string]$_.kind}},@{Expression={[string]$_.id}})
 }
 
 function Test-ExplicitCapabilityEvidence {
@@ -227,6 +259,53 @@ function Test-SkillCompatibility {
     return $true
 }
 
+function Get-SkillUnknownCapabilityState {
+    param(
+        [Parameter(Mandatory = $true)][object] $Skill,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Evidence
+    )
+
+    $compatibility = Get-OptionalPropertyValue -Object $Skill -Name 'compatibility'
+    if ($null -eq $compatibility) { return [pscustomobject]@{Preserve=$false;Missing=@()} }
+    $nonCapabilityCompatibility = [pscustomobject]@{
+        platforms = @(Get-OptionalPropertyValue -Object $compatibility -Name 'platforms' -DefaultValue @('any'))
+        shells = @(Get-OptionalPropertyValue -Object $compatibility -Name 'shells' -DefaultValue @())
+        requiredCapabilities = @()
+        anyOfCapabilities = @()
+    }
+    if (-not (Test-SkillCompatibility -Skill ([pscustomobject]@{compatibility=$nonCapabilityCompatibility}) -Evidence $Evidence)) {
+        return [pscustomobject]@{Preserve=$false;Missing=@()}
+    }
+
+    $missing = New-Object System.Collections.Generic.List[string]
+    foreach ($requirement in @(Get-OptionalPropertyValue -Object $compatibility -Name 'requiredCapabilities' -DefaultValue @())) {
+        if (Test-CapabilityRequirement -Requirement $requirement -Evidence $Evidence) { continue }
+        $kind = [string](Get-OptionalPropertyValue -Object $requirement -Name 'kind' -DefaultValue '')
+        $id = [string](Get-OptionalPropertyValue -Object $requirement -Name 'id' -DefaultValue '')
+        if ($kind -notin @('connector','environment') -or (Test-ExplicitCapabilityEvidence -Evidence $Evidence -Kind $kind -Id $id -State 'absent')) {
+            return [pscustomobject]@{Preserve=$false;Missing=@()}
+        }
+        $missing.Add("$kind`:$id")
+    }
+    foreach ($alternativeSet in @(Get-OptionalPropertyValue -Object $compatibility -Name 'anyOfCapabilities' -DefaultValue @())) {
+        $satisfied = $false
+        $unknownAlternatives = New-Object System.Collections.Generic.List[string]
+        foreach ($requirement in @($alternativeSet)) {
+            if (Test-CapabilityRequirement -Requirement $requirement -Evidence $Evidence) { $satisfied=$true;break }
+            $kind = [string](Get-OptionalPropertyValue -Object $requirement -Name 'kind' -DefaultValue '')
+            $id = [string](Get-OptionalPropertyValue -Object $requirement -Name 'id' -DefaultValue '')
+            if ($kind -in @('connector','environment') -and -not (Test-ExplicitCapabilityEvidence -Evidence $Evidence -Kind $kind -Id $id -State 'absent')) {
+                $unknownAlternatives.Add("$kind`:$id")
+            }
+        }
+        if ($satisfied) { continue }
+        if ($unknownAlternatives.Count -eq 0) { return [pscustomobject]@{Preserve=$false;Missing=@()} }
+        foreach ($value in $unknownAlternatives) { $missing.Add($value) }
+    }
+    $missingValues = @($missing.ToArray() | Sort-Object -Unique)
+    return [pscustomobject]@{Preserve=($missingValues.Count -gt 0);Missing=$missingValues}
+}
+
 function Get-ConditionalDependencyState {
     param(
         [Parameter(Mandatory = $true)][object] $Dependency,
@@ -367,7 +446,9 @@ function Resolve-SkillsSelection {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][object] $Catalog,
-        [Parameter(Mandatory = $true)][object] $Selection
+        [Parameter(Mandatory = $true)][object] $Selection,
+        [AllowEmptyCollection()][object[]] $CapabilityEvidence = @(),
+        [AllowEmptyCollection()][string[]] $InstalledSkillIds = @()
     )
 
     $profilesById = @{}
@@ -391,7 +472,18 @@ function Resolve-SkillsSelection {
         }
     }
 
-    $evidence = @(Get-ExplicitCapabilityEvidence)
+    $evidence = @(Get-ExplicitCapabilityEvidence -ConfiguredEvidence $CapabilityEvidence)
+    $installed = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($installedSkillId in $InstalledSkillIds) {
+        $normalizedInstalledId = Resolve-ConfiguredSkillId -SkillId ([string]$installedSkillId) -SkillsById $skillsById -AliasesById $aliasesById
+        if ([string]::IsNullOrWhiteSpace($normalizedInstalledId) -or -not $skillsById.ContainsKey($normalizedInstalledId)) {
+            continue
+        }
+        if ([string]$skillsById[$normalizedInstalledId].lifecycle.status -eq 'removed') {
+            continue
+        }
+        [void]$installed.Add($normalizedInstalledId)
+    }
     $requestedProfiles = @($Selection.profiles)
     if ($requestedProfiles.Count -eq 0) {
         $requestedProfiles = @(
@@ -467,6 +559,12 @@ function Resolve-SkillsSelection {
         }
         if (-not (Test-SkillCompatibility -Skill $skill -Evidence $evidence) -and
             -not (Test-SkillCompatibilityRepairableByConditionalDependency -Skill $skill -Evidence $evidence -SkillsById $skillsById)) {
+            $unknownState = Get-SkillUnknownCapabilityState -Skill $skill -Evidence $evidence
+            if ($installed.Contains($skillId) -and [bool]$unknownState.Preserve) {
+                $missingText = @($unknownState.Missing) -join ', '
+                Write-Warning "Preserved installed Skill '$skillId' because these capability requirements are not satisfied but are not explicitly absent: $missingText. Declare or modify evidence with -CapabilityEvidence; declare state 'absent' to remove it."
+                continue
+            }
             if ($explicitIncludes.ContainsKey($skillId)) {
                 throw "Explicitly included Skill '$skillId' is incompatible with the current platform, shell, or capability evidence."
             }
@@ -516,6 +614,14 @@ function Resolve-SkillsSelection {
                     throw "Required dependency '$dependencyId' for selected Skill '$skillId' is removed."
                 }
                 if (-not (Test-SkillCompatibility -Skill $dependencySkill -Evidence $evidence)) {
+                    $dependencyUnknownState = Get-SkillUnknownCapabilityState -Skill $dependencySkill -Evidence $evidence
+                    if ($installed.Contains($dependencyId) -and [bool]$dependencyUnknownState.Preserve) {
+                        $missingText = @($dependencyUnknownState.Missing) -join ', '
+                        Write-Warning "Preserved installed Skill '$dependencyId' because these capability requirements are not satisfied but are not explicitly absent: $missingText. Declare or modify evidence with -CapabilityEvidence; declare state 'absent' to remove it."
+                        $selected[$dependencyId] = $true
+                        $changed = $true
+                        continue
+                    }
                     throw "Required dependency '$dependencyId' for selected Skill '$skillId' is incompatible with the current platform, shell, or capability evidence."
                 }
 
