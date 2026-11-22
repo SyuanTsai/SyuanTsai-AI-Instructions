@@ -251,6 +251,33 @@ function Install-TestHistoricalRepoSkills {
     [IO.File]::AppendAllText((Join-Path $TargetRoot '.git/info/exclude'),"`n/.agents/skills/`n")
 }
 
+Describe 'bootstrap-ai-instructions platform runtime startup' {
+    BeforeEach {
+        $archiveRoot = Join-Path $TestDrive 'archive'
+        $sourceRoot = Join-Path $archiveRoot 'example-ai-instructions-main'
+        $sourceArchive = Join-Path $TestDrive 'source.zip'
+        $targetRoot = Join-Path $TestDrive 'target'
+        $configurationPath = Join-Path $TestDrive 'sync-config.json'
+        $provenancePath = Join-Path $TestDrive 'provenance.json'
+        New-TestSource -Path $sourceRoot
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        New-TestRepository -Path $targetRoot
+        New-TestConfiguration -Path $configurationPath
+        $script:TestConfigurationPath = $configurationPath
+        $script:TestProvenancePath = $provenancePath
+    }
+
+    # Scenario: A clean repository runs the production bootstrap with its manifest-imported platform runtime.
+    # Purpose: Prove startup accepts the verified RootModule capture and reaches complete instruction publication.
+    It 'InterT10_completes_bootstrap_with_the_manifest_imported_platform_runtime' {
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        ($output -join ' ') | Should Not Match 'closure-invalid'
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $true
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $true
+    }
+}
+
 Describe 'bootstrap-ai-instructions' {
     BeforeEach {
         $archiveRoot = Join-Path $TestDrive 'archive'

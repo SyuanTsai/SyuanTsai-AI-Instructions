@@ -1040,7 +1040,7 @@ function Save-Syp214FixtureEvidence {
 Describe 'SYP214 whole-Skill migration evidence' {
     BeforeEach {
         Import-Module (Join-Path $PSScriptRoot '../scripts/skills-catalog-contract.psm1') -Force
-        Import-Module (Join-Path $PSScriptRoot '../scripts/repo-shared-skills-migration.psm1')
+        Import-Module (Join-Path $PSScriptRoot '../scripts/repo-shared-skills-migration.psm1') -Force
         $caseRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         $targetRoot = Join-Path $caseRoot 'consumer'
         $userHome = Join-Path $caseRoot 'user'
@@ -1217,6 +1217,83 @@ Describe 'SYP214 whole-Skill migration evidence' {
     }
 
     Context 'Repository and USER root aliases are isolated' {
+    # Scenario: The migration runtime setter receives invalid modules and then two valid runtime module objects.
+    # Purpose: Reject incomplete runtime closures and replace a prior injected module for repeated bootstrap runs.
+    It 'InterT43_validates_and_replaces_the_injected_platform_runtime_module' {
+        { Set-RepoSharedSkillsPlatformRuntime -Module $null } | Should Throw
+        $incompleteModule=New-Module -Name ('IncompleteRuntime'+[guid]::NewGuid().ToString('N')) -ScriptBlock {
+            function Open-PlatformDirectory {}
+            Export-ModuleMember -Function Open-PlatformDirectory
+        }
+        { Set-RepoSharedSkillsPlatformRuntime -Module $incompleteModule } |
+            Should Throw "Repository Skill migration platform runtime does not expose 'Resolve-PlatformPhysicalPath'."
+        $firstModule=New-Module -Name ('FirstRuntime'+[guid]::NewGuid().ToString('N')) -ScriptBlock {
+            function Open-PlatformDirectory {}
+            function Resolve-PlatformPhysicalPath {}
+            Export-ModuleMember -Function Open-PlatformDirectory,Resolve-PlatformPhysicalPath
+        }
+        $secondModule=New-Module -Name ('SecondRuntime'+[guid]::NewGuid().ToString('N')) -ScriptBlock {
+            function Open-PlatformDirectory {}
+            function Resolve-PlatformPhysicalPath {}
+            Export-ModuleMember -Function Open-PlatformDirectory,Resolve-PlatformPhysicalPath
+        }
+
+        Set-RepoSharedSkillsPlatformRuntime -Module $firstModule
+        Set-RepoSharedSkillsPlatformRuntime -Module $secondModule
+
+        $migrationModule=Get-Module repo-shared-skills-migration
+        (& $migrationModule { $script:RepoSharedSkillsPlatformRuntimeModule }) | Should Be $secondModule
+    }
+
+    # Scenario: Bootstrap-style manifest imports return one module repeatedly, including a Windows root spelling variant, while another directory supplies a lookalike module.
+    # Purpose: Accept only the exact platform runtime RootModule closure and keep bootstrap wiring ahead of migration use.
+    It 'InterT44_captures_only_the_verified_manifest_import_for_migration' {
+        $runtimeRoot=Join-Path $script:RepositoryRoot 'scripts'
+        $runtimePath=Join-Path $runtimeRoot 'platform-runtime.psd1'
+
+        $firstImport=@(Import-Module $runtimePath -Force -PassThru -ErrorAction Stop)
+        $firstCapture=Resolve-RepoSharedSkillsPlatformRuntimeModule -ImportedModules $firstImport -RuntimeRoot $runtimeRoot
+        $firstImport.Count | Should Be 1
+        $firstCapture | Should Be $firstImport[0]
+
+        $secondImport=@(Import-Module $runtimePath -Force -PassThru -ErrorAction Stop)
+        $secondCapture=Resolve-RepoSharedSkillsPlatformRuntimeModule -ImportedModules $secondImport -RuntimeRoot $runtimeRoot
+        $secondImport.Count | Should Be 1
+        $secondCapture | Should Be $secondImport[0]
+
+        if ($IsWindows) {
+            $caseVariantRoot=if([char]::IsUpper($runtimeRoot[0])){$runtimeRoot.Substring(0,1).ToLowerInvariant()+$runtimeRoot.Substring(1)}else{$runtimeRoot.Substring(0,1).ToUpperInvariant()+$runtimeRoot.Substring(1)}
+            (Resolve-RepoSharedSkillsPlatformRuntimeModule -ImportedModules $secondImport -RuntimeRoot $caseVariantRoot) |
+                Should Be $secondImport[0]
+        }
+
+        $foreignRoot=Join-Path $TestDrive 'foreign-runtime'
+        New-Item -ItemType Directory -Path $foreignRoot | Out-Null
+        Set-TestText -Path (Join-Path $foreignRoot 'platform-runtime.psm1') -Value 'function Get-ForeignRuntime { $true }; Export-ModuleMember -Function Get-ForeignRuntime'
+        $foreignImport=@(Import-Module (Join-Path $foreignRoot 'platform-runtime.psm1') -Force -PassThru -ErrorAction Stop)
+        { Resolve-RepoSharedSkillsPlatformRuntimeModule -ImportedModules $foreignImport -RuntimeRoot $runtimeRoot } |
+            Should Throw 'verified runtime root'
+
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null
+        $parseErrors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count | Should Be 0
+        $commands=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst]},$true))
+        $runtimeCaptures=@($commands | Where-Object { $_.GetCommandName() -ceq 'Resolve-RepoSharedSkillsPlatformRuntimeModule' })
+        $runtimeSetters=@($commands | Where-Object { $_.GetCommandName() -ceq 'Set-RepoSharedSkillsPlatformRuntime' })
+        $migrationGuards=@($commands | Where-Object {
+            $_.GetCommandName() -in @('Assert-RepoAndUserRootsDistinct','Get-RepoSharedSkillsMigrationPlan')
+        } | Sort-Object { $_.Extent.StartOffset })
+
+        $runtimeCaptures.Count | Should Be 1
+        $runtimeSetters.Count | Should Be 1
+        $runtimeSetters[0].Extent.Text | Should Match '(?i)-Module\s+\$bootstrapPlatformRuntimeModule'
+        $migrationGuards.Count | Should BeGreaterThan 0
+        $runtimeCaptures[0].Extent.EndOffset | Should BeLessThan $runtimeSetters[0].Extent.StartOffset
+        $runtimeSetters[0].Extent.EndOffset | Should BeLessThan $migrationGuards[0].Extent.StartOffset
+    }
+
     # Scenario: Repository and USER roots identify the same physical directory through different path spellings.
     # Purpose: Reject migration eligibility before USER or Git evidence is observed, regardless of lexical or filesystem aliases.
     It 'InterT40_rejects_<Alias>_Repository_and_USER_roots_before_observation' -TestCases @(
@@ -1279,6 +1356,104 @@ Describe 'SYP214 whole-Skill migration evidence' {
         (Test-Syp214InventoryEqual -Left $separateUserBefore -Right (Get-Syp214TreeInventory -Root $userHome)) | Should Be $true
         }
         finally { if($substAlias){Remove-Syp214SubstAlias -Alias $substAlias} }
+    }
+
+    # Register only on the native host; keep this file's Core CI skip count at zero.
+    if($IsLinux -or $IsMacOS){
+        # Scenario: Repository and USER roots are separate existing Unix directories.
+        # Purpose: Permit migration when native device and inode observations prove the roots are distinct.
+        It 'InterT46_allows_distinct_Unix_repository_and_USER_roots' {
+            $platformRuntimePath=Join-Path $PSScriptRoot '../scripts/platform-runtime.psd1'
+            $platformRuntime=Import-Module $platformRuntimePath -Force -PassThru
+            & $platformRuntime.ExportedCommands['Assert-PlatformRuntimeInventory'] -Root (Split-Path -Parent $platformRuntimePath) -ManifestPath $platformRuntimePath | Out-Null
+            Set-RepoSharedSkillsPlatformRuntime -Module $platformRuntime
+            $unixRepository=Join-Path $caseRoot 'unix-repository'
+            $unixUser=Join-Path $caseRoot 'unix-user'
+            [void][IO.Directory]::CreateDirectory($unixRepository)
+            [void][IO.Directory]::CreateDirectory($unixUser)
+
+            (Assert-RepoAndUserRootsDistinct -Repository $unixRepository -UserHome $unixUser) | Should Be $true
+        }
+
+        # Scenario: The USER path is a symbolic-link alias of the repository root.
+        # Purpose: Compare resolved directory identities and reject a lexical alias before migration.
+        It 'InterT47_rejects_a_Unix_USER_symlink_to_the_repository_root' {
+            $platformRuntimePath=Join-Path $PSScriptRoot '../scripts/platform-runtime.psd1'
+            $platformRuntime=Import-Module $platformRuntimePath -Force -PassThru
+            & $platformRuntime.ExportedCommands['Assert-PlatformRuntimeInventory'] -Root (Split-Path -Parent $platformRuntimePath) -ManifestPath $platformRuntimePath | Out-Null
+            Set-RepoSharedSkillsPlatformRuntime -Module $platformRuntime
+            $unixRepository=Join-Path $caseRoot 'unix-repository'
+            $unixUserAlias=Join-Path $caseRoot 'unix-user-alias'
+            [void][IO.Directory]::CreateDirectory($unixRepository)
+            New-Item -ItemType SymbolicLink -Path $unixUserAlias -Target $unixRepository | Out-Null
+
+            { Assert-RepoAndUserRootsDistinct -Repository $unixRepository -UserHome $unixUserAlias } |
+                Should Throw 'Repository and USER roots resolve to the same physical directory; aliased roots are not eligible for Skill migration.'
+        }
+
+        # Scenario: The repository path is a symbolic-link alias of the USER root.
+        # Purpose: Apply the same physical-identity rejection regardless of which root is the alias.
+        It 'InterT48_rejects_a_Unix_repository_symlink_to_the_USER_root' {
+            $platformRuntimePath=Join-Path $PSScriptRoot '../scripts/platform-runtime.psd1'
+            $platformRuntime=Import-Module $platformRuntimePath -Force -PassThru
+            & $platformRuntime.ExportedCommands['Assert-PlatformRuntimeInventory'] -Root (Split-Path -Parent $platformRuntimePath) -ManifestPath $platformRuntimePath | Out-Null
+            Set-RepoSharedSkillsPlatformRuntime -Module $platformRuntime
+            $unixUser=Join-Path $caseRoot 'unix-user'
+            $unixRepositoryAlias=Join-Path $caseRoot 'unix-repository-alias'
+            [void][IO.Directory]::CreateDirectory($unixUser)
+            New-Item -ItemType SymbolicLink -Path $unixRepositoryAlias -Target $unixUser | Out-Null
+
+            { Assert-RepoAndUserRootsDistinct -Repository $unixRepositoryAlias -UserHome $unixUser } |
+                Should Throw 'Repository and USER roots resolve to the same physical directory; aliased roots are not eligible for Skill migration.'
+        }
+
+        # Scenario: Two existing Unix directories differ only by letter case on a case-sensitive filesystem.
+        # Purpose: Keep canonical-path comparison ordinal so distinct case variants remain eligible.
+        It 'InterT49_allows_distinct_case_variant_Unix_roots' {
+            $platformRuntimePath=Join-Path $PSScriptRoot '../scripts/platform-runtime.psd1'
+            $platformRuntime=Import-Module $platformRuntimePath -Force -PassThru
+            & $platformRuntime.ExportedCommands['Assert-PlatformRuntimeInventory'] -Root (Split-Path -Parent $platformRuntimePath) -ManifestPath $platformRuntimePath | Out-Null
+            Set-RepoSharedSkillsPlatformRuntime -Module $platformRuntime
+            $lowerRoot=Join-Path $caseRoot 'case-root'
+            $upperRoot=Join-Path $caseRoot 'CASE-ROOT'
+            [void][IO.Directory]::CreateDirectory($lowerRoot)
+            if([IO.Directory]::Exists($upperRoot)){
+                Set-TestInconclusive 'The test filesystem is case-insensitive; distinct case-variant directories cannot be created.'
+                return
+            }
+            [void][IO.Directory]::CreateDirectory($upperRoot)
+
+            (Assert-RepoAndUserRootsDistinct -Repository $lowerRoot -UserHome $upperRoot) | Should Be $true
+        }
+
+        # Scenario: One Unix root is absent while the other root exists.
+        # Purpose: Fail closed for a missing repository while preserving the supported missing-USER state.
+        It 'InterT50_distinguishes_missing_Unix_repository_and_USER_roots' {
+            $platformRuntimePath=Join-Path $PSScriptRoot '../scripts/platform-runtime.psd1'
+            $platformRuntime=Import-Module $platformRuntimePath -Force -PassThru
+            & $platformRuntime.ExportedCommands['Assert-PlatformRuntimeInventory'] -Root (Split-Path -Parent $platformRuntimePath) -ManifestPath $platformRuntimePath | Out-Null
+            Set-RepoSharedSkillsPlatformRuntime -Module $platformRuntime
+            $existingRoot=Join-Path $caseRoot 'existing-root'
+            $missingRepository=Join-Path $caseRoot 'missing-repository'
+            $missingUser=Join-Path $caseRoot 'missing-user'
+            [void][IO.Directory]::CreateDirectory($existingRoot)
+
+            { Assert-RepoAndUserRootsDistinct -Repository $missingRepository -UserHome $existingRoot } |
+                Should Throw 'Repository physical root is missing; migration fails closed.'
+            (Assert-RepoAndUserRootsDistinct -Repository $existingRoot -UserHome $missingUser) | Should Be $true
+        }
+
+        # Scenario: Unix root identity validation starts without a caller-provided verified platform runtime.
+        # Purpose: Fail closed instead of importing an unverified sibling runtime closure.
+        It 'InterT51_rejects_Unix_root_identity_without_an_injected_platform_runtime' {
+            $unixRepository=Join-Path $caseRoot 'unix-repository'
+            $unixUser=Join-Path $caseRoot 'unix-user'
+            [void][IO.Directory]::CreateDirectory($unixRepository)
+            [void][IO.Directory]::CreateDirectory($unixUser)
+
+            { Assert-RepoAndUserRootsDistinct -Repository $unixRepository -UserHome $unixUser } |
+                Should Throw 'Repository and USER physical root identity cannot be verified: the verified platform runtime was not provided; migration fails closed.'
+        }
     }
 
     }
