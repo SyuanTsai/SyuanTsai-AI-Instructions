@@ -188,6 +188,29 @@ function Get-TestInstallJournalV1 {
     return $journal
 }
 
+function New-TestLargeUserReconcilerJournalJson {
+    $examplePath = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json'
+    $convertParameters = @{ InputObject=(Get-Content -Raw -Encoding UTF8 -LiteralPath $examplePath) }
+    if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) { $convertParameters.DateKind = 'String' }
+    $journal = ConvertFrom-Json @convertParameters
+    $manifestOperation = $journal.operations[0]
+    $operations = New-Object System.Collections.Generic.List[object]
+    $pathPadding = @(('x' * 120),('y' * 120),('z' * 120)) -join '/'
+    for ($index = 1; $index -le 220; $index++) {
+        $convertParameters.InputObject = $manifestOperation | ConvertTo-Json -Depth 20
+        $operation = ConvertFrom-Json @convertParameters
+        $operation.sequence = $index
+        $operation.targetRelativePath = ".agents/skills/performance-fixture-$('{0:D3}' -f $index)/references/$pathPadding/payload.json"
+        $operation.stageLeaf = "file-$index.stage"
+        $operations.Add($operation)
+    }
+    $manifestOperation.sequence = 221
+    $manifestOperation.stageLeaf = 'file-221.stage'
+    $operations.Add($manifestOperation)
+    $journal.operations = $operations.ToArray()
+    return ($journal | ConvertTo-Json -Depth 20)
+}
+
 function Get-TestLinuxInstallJournalV1 {
     $journal = Get-TestInstallJournalV1
     $journal.platform.os = 'linux'
@@ -4113,5 +4136,84 @@ exit /b %errorlevel%
         $withoutEvidence.PSObject.Properties.Name|Should Not Contain 'capabilityEvidence'
         $duplicate=@([pscustomobject]@{kind='connector';id='datadog';state='configured'},[pscustomobject]@{kind='connector';id='datadog';state='absent'})
         (Get-RuntimeContractError {ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration $null -CatalogRepository $script:CanonicalRepository -CatalogRef ('f'*40) -CapabilityEvidence $duplicate})|Should Match 'duplicate'
+    }
+
+    # Scenario: The install-journal tokenizer implementation is inspected without executing a timing-sensitive benchmark.
+    # Purpose: Prevent reintroducing Regex.Match overloads whose start-at argument makes token scanning quadratic on PowerShell 7.7.
+    It 'UnitT236_uses_only_single_argument_regex_Match_calls_in_the_install_journal_tokenizer' {
+        $parseTokens = $null
+        $parseErrors = $null
+        $moduleAst = [Management.Automation.Language.Parser]::ParseFile($script:RuntimeContractModule,[ref]$parseTokens,[ref]$parseErrors)
+        @($parseErrors).Count | Should Be 0
+        $functionAst = $moduleAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Assert-AiInstructionsInstallJournalUnambiguousJson'
+        },$true)
+        $functionAst | Should Not BeNullOrEmpty
+        $startAtCalls = @($functionAst.Body.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+                [string]$node.Member.Value -ceq 'Match' -and
+                @($node.Arguments).Count -ge 2
+        },$true))
+        $startAtCalls.Count | Should Be 0
+    }
+
+    # Scenario: A valid USER reconciler journal contains more than 200 operations and at least 250 KiB of JSON.
+    # Purpose: Keep full v1 conversion usable on runtimes where repeated Regex.Match(input,startat) rescans the entire input.
+    It 'UnitT237_converts_a_large_user_reconciler_journal_within_the_regression_budget' {
+        $json = New-TestLargeUserReconcilerJournalJson
+        ([Text.UTF8Encoding]::new($false).GetByteCount($json)) | Should BeGreaterThan 255999
+        $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+        $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json
+        $stopwatch.Stop()
+        @($journal.operations).Count | Should BeGreaterThan 200
+        $stopwatch.Elapsed.TotalSeconds | Should BeLessThan 15
+    }
+
+    # Scenario: A legal USER reconciler journal is followed only by JSON whitespace.
+    # Purpose: Preserve the tokenizer contract that permits whitespace after the root value.
+    It 'UnitT238_accepts_install_journal_trailing_whitespace' {
+        $json = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($json + " `t`r`n") | Out-Null } | Should Not Throw
+    }
+
+    # Scenario: A non-JSON character is inserted between two otherwise adjacent root-object tokens.
+    # Purpose: Preserve contiguous token scanning and reject content that cannot belong to the journal JSON grammar.
+    It 'UnitT239_rejects_an_invalid_character_between_install_journal_tokens' {
+        $json = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')
+        $json = $json.Replace('"schemaVersion": 1,','"schemaVersion": 1,@')
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json | Out-Null } | Should Throw
+    }
+
+    # Scenario: A valid journal string contains an escaped reverse solidus, an escaped quote, and a surrogate pair.
+    # Purpose: Preserve valid JSON escape and supplementary-plane Unicode handling while linearizing token traversal.
+    It 'UnitT240_accepts_escaped_content_and_a_paired_surrogate_in_an_install_journal_string' {
+        $json = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')
+        $json = $json.Replace('"processStartIdentity": "2026-11-06T01:02:00.0000000Z"','"processStartIdentity": "fixture\\path\"quoted\"-\uD83D\uDE80"')
+        $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json
+        $journal.owner.processStartIdentity | Should BeExactly ('fixture\path"quoted"-' + [char]::ConvertFromUtf32(0x1F680))
+    }
+}
+
+Describe 'SYP-522 install journal path indexing' {
+    # Scenario: The v1 validator indexes every previously accepted target by its normalized path prefixes.
+    # Purpose: Keep ancestor and descendant collision detection linear in total path segments instead of comparing every operation pair.
+    It 'UnitT241_indexes_journal_path_prefixes_without_a_pairwise_operation_loop' {
+        $parseTokens = $null
+        $parseErrors = $null
+        $moduleAst = [Management.Automation.Language.Parser]::ParseFile($script:RuntimeContractModule,[ref]$parseTokens,[ref]$parseErrors)
+        @($parseErrors).Count | Should Be 0
+        $functionAst = $moduleAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Assert-AiInstructionsInstallJournalV1'
+        },$true)
+        $functionAst | Should Not BeNullOrEmpty
+        $functionText = [string]$functionAst.Extent.Text
+        $functionText | Should Match 'pathInfoByKey'
+        $functionText | Should Match 'descendantSequenceByAncestor'
+        $functionText | Should Not Match 'foreach\s*\(\s*\$otherPath\s+in\s+\$validatedOperationPaths\s*\)'
     }
 }

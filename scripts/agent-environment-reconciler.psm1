@@ -6,6 +6,8 @@ $script:agentEnvironmentRefusalCodes = @(
     'capability-unavailable','platform-mismatch','downgrade-refused','mixed-generation','unsupported-version',
     'closure-invalid','interrupted-install','projection-runtime-unavailable','runtime-baseline-unavailable'
 )
+$script:agentEnvironmentRuntimeContractModule = $null
+$script:agentEnvironmentInstallJournalValidationCache = $null
 
 if($null-eq('SyuanTsai.AiInstructions.AgentEnvironmentTrustedInstallReadLease' -as [type])){
     Add-Type -TypeDefinition @'
@@ -684,7 +686,8 @@ function Import-AgentEnvironmentRuntimeModules {
     )) {
         $modulePath = Join-Path $RuntimeRoot $moduleName
         if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) { throw "Installed Agent environment runtime module is missing: $moduleName" }
-        Import-Module $modulePath -Force
+        $module = Import-Module $modulePath -Force -PassThru
+        if ($moduleName -ceq 'ai-instructions-runtime-contract.psm1') { $script:agentEnvironmentRuntimeContractModule = $module }
     }
 }
 
@@ -701,7 +704,7 @@ function Import-AgentEnvironmentRecoveryRuntimeModules {
     $moduleName='ai-instructions-runtime-contract.psm1'
     $modulePath=Join-Path $RuntimeRoot $moduleName
     if(-not(Test-Path -LiteralPath $modulePath -PathType Leaf)){throw "Installed Agent environment runtime module is missing: $moduleName"}
-    Import-Module $modulePath -Force
+    $script:agentEnvironmentRuntimeContractModule = Import-Module $modulePath -Force -PassThru
     Import-AgentEnvironmentPlatformRuntime -RuntimeRoot $RuntimeRoot
 }
 
@@ -1408,6 +1411,77 @@ function Assert-AgentEnvironmentOrphanTransactionTreeSafe {
     }
 }
 
+function Get-AgentEnvironmentInstallJournalValidationCache {
+    param([Parameter(Mandatory=$true)][string]$TransactionPath,[Parameter(Mandatory=$true)][string]$TransactionId)
+    $key=([IO.Path]::GetFullPath($TransactionPath).TrimEnd([char[]]@('\','/')))+"`n"+$TransactionId
+    if($null-eq$script:agentEnvironmentInstallJournalValidationCache-or[string]$script:agentEnvironmentInstallJournalValidationCache.key-cne$key){
+        $script:agentEnvironmentInstallJournalValidationCache=[pscustomobject][ordered]@{
+            key=$key
+            byHash=(New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal))
+            order=(New-Object 'Collections.Generic.Queue[string]')
+        }
+    }
+    return $script:agentEnvironmentInstallJournalValidationCache
+}
+
+function Add-AgentEnvironmentInstallJournalValidationCacheEntry {
+    param(
+        [Parameter(Mandatory=$true)][object]$Cache,
+        [Parameter(Mandatory=$true)][string]$Sha256,
+        [Parameter(Mandatory=$true)][object]$Journal,
+        [switch]$AuthorityBound
+    )
+    if($Cache.byHash.ContainsKey($Sha256)){
+        if($AuthorityBound){$Cache.byHash[$Sha256].authorityBound=$true}
+        return
+    }
+    $Cache.byHash.Add($Sha256,[pscustomobject][ordered]@{journal=$Journal;authorityBound=[bool]$AuthorityBound})
+    $Cache.order.Enqueue($Sha256)
+    while($Cache.order.Count-gt4){$expired=$Cache.order.Dequeue();[void]$Cache.byHash.Remove($expired)}
+}
+
+function ConvertFrom-AgentEnvironmentInstallJournalSnapshotJson {
+    param([Parameter(Mandatory=$true)][string]$Json)
+    $parameters=@{InputObject=$Json;ErrorAction='Stop'}
+    if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'}
+    try{return ConvertFrom-Json @parameters}
+    catch{throw 'Validated transaction journal serialization could not be materialized as a cache snapshot.'}
+}
+
+function ConvertFrom-AgentEnvironmentInstallJournalEvidence {
+    param(
+        [Parameter(Mandatory=$true)][object]$Evidence,
+        [Parameter(Mandatory=$true)][string]$ExpectedTransactionId,
+        [AllowNull()][object]$Cache
+    )
+    if([string]$Evidence.entryKind-cne'file'){return $null}
+    $sha256=[string]$Evidence.state.sha256
+    if($null-ne$Cache){
+        $cached=$null
+        if($Cache.byHash.TryGetValue($sha256,[ref]$cached)){return [pscustomobject][ordered]@{journal=$cached.journal;sha256=$sha256;cacheHit=$true;authorityBound=[bool]$cached.authorityBound}}
+    }
+    $journal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([string]$Evidence.json) -ExpectedTransactionId $ExpectedTransactionId
+    return [pscustomobject][ordered]@{journal=$journal;sha256=$sha256;cacheHit=$false;authorityBound=$false}
+}
+
+function Assert-AgentEnvironmentTrustedInstallJournalTransition {
+    param([Parameter(Mandatory=$true)][object]$Previous,[Parameter(Mandatory=$true)][object]$Next,[switch]$AuthorityAlreadyBound)
+    $trustedFailure=$null
+    try{
+        if($null-eq$script:agentEnvironmentRuntimeContractModule){throw 'AI instructions runtime contract module is not available for trusted journal transition validation.'}
+        & $script:agentEnvironmentRuntimeContractModule {param($Before,$After,$Bound)Assert-AiInstructionsInstallJournalV1TrustedTransition -Previous $Before -Next $After -AuthorityAlreadyBound:$Bound|Out-Null} $Previous $Next ([bool]$AuthorityAlreadyBound)
+        return
+    }catch{$trustedFailure=$_}
+    try{Assert-AiInstructionsInstallJournalStoreTransition -Previous $Previous -Next $Next|Out-Null}
+    catch{throw}
+    throw $trustedFailure
+}
+
+function Assert-AgentEnvironmentJournalBytesEqual {
+    param([Parameter(Mandatory=$true)][byte[]]$Expected,[Parameter(Mandatory=$true)][byte[]]$Actual)
+    if(-not[Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($Expected,$Actual)){throw 'Transaction journal stage readback bytes do not match the serialized journal bytes.'}
+}
+
 function Write-AgentEnvironmentInstallJournal {
     param(
         [Parameter(Mandatory = $true)][string]$TransactionPath,
@@ -1415,18 +1489,29 @@ function Write-AgentEnvironmentInstallJournal {
         [Parameter(Mandatory = $true)][object]$Journal,
         [object]$RecoveryMutationContext
     )
-    Assert-AiInstructionsInstallJournalV1 -Journal $Journal | Out-Null
+    $useValidationCache=$null-eq$RecoveryMutationContext
+    $validationCache=if($useValidationCache){Get-AgentEnvironmentInstallJournalValidationCache -TransactionPath $TransactionPath -TransactionId ([string]$Journal.transactionId)}else{$null}
+    if(-not$useValidationCache){Assert-AiInstructionsInstallJournalV1 -Journal $Journal|Out-Null}
     $path=Join-Path $TransactionPath 'journal.json'
-    $currentJournal=$null;$fallbackJournal=$null
+    $currentJournal=$null;$fallbackJournal=$null;$currentEntry=$null;$fallbackEntry=$null
     $currentEvidence=Get-AgentEnvironmentPrivateFileJournalEvidence -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.json'
     $fallbackEvidence=Get-AgentEnvironmentPrivateFileJournalEvidence -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.prev'
     foreach($pair in @(@('journal.json',$currentEvidence),@('journal.prev',$fallbackEvidence))){if($null-ne$pair[1].entryKind-and[string]$pair[1].entryKind-cne'file'){throw "Transaction journal leaf '$($pair[0])' is not a verified regular single-link file."}}
-    if([string]$currentEvidence.entryKind-ceq'file'){$currentJournal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([string]$currentEvidence.json) -ExpectedTransactionId ([string]$Journal.transactionId)}
-    if([string]$fallbackEvidence.entryKind-ceq'file'){$fallbackJournal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([string]$fallbackEvidence.json) -ExpectedTransactionId ([string]$Journal.transactionId)}
-    if($null-ne$currentJournal-and$null-ne$fallbackJournal){Assert-AiInstructionsInstallJournalStoreTransition -Previous $fallbackJournal -Next $currentJournal|Out-Null}
+    if([string]$currentEvidence.entryKind-ceq'file'){$currentEntry=ConvertFrom-AgentEnvironmentInstallJournalEvidence -Evidence $currentEvidence -ExpectedTransactionId ([string]$Journal.transactionId) -Cache $validationCache;$currentJournal=$currentEntry.journal}
+    if([string]$fallbackEvidence.entryKind-ceq'file'){$fallbackEntry=ConvertFrom-AgentEnvironmentInstallJournalEvidence -Evidence $fallbackEvidence -ExpectedTransactionId ([string]$Journal.transactionId) -Cache $validationCache;$fallbackJournal=$fallbackEntry.journal}
+    if($null-ne$currentJournal-and$null-ne$fallbackJournal){
+        if($useValidationCache-and$currentEntry.authorityBound-and$fallbackEntry.authorityBound){Assert-AgentEnvironmentTrustedInstallJournalTransition -Previous $fallbackJournal -Next $currentJournal -AuthorityAlreadyBound}
+        else{Assert-AiInstructionsInstallJournalStoreTransition -Previous $fallbackJournal -Next $currentJournal|Out-Null}
+    }
     $authoritativeJournal=if($null-ne$currentJournal){$currentJournal}else{$fallbackJournal}
-    if($null-ne$authoritativeJournal){Assert-AiInstructionsInstallJournalStoreTransition -Previous $authoritativeJournal -Next $Journal|Out-Null}
+    if($null-ne$authoritativeJournal){if($useValidationCache){Assert-AgentEnvironmentTrustedInstallJournalTransition -Previous $authoritativeJournal -Next $Journal}else{Assert-AiInstructionsInstallJournalStoreTransition -Previous $authoritativeJournal -Next $Journal|Out-Null}}
+    elseif($useValidationCache){Assert-AiInstructionsInstallJournalV1 -Journal $Journal|Out-Null}
+    if($useValidationCache){
+        if($null-ne$currentEntry){Add-AgentEnvironmentInstallJournalValidationCacheEntry -Cache $validationCache -Sha256 ([string]$currentEntry.sha256) -Journal $currentJournal -AuthorityBound}
+        if($null-ne$fallbackEntry){Add-AgentEnvironmentInstallJournalValidationCacheEntry -Cache $validationCache -Sha256 ([string]$fallbackEntry.sha256) -Journal $fallbackJournal -AuthorityBound}
+    }
     $bytes=(New-Object Text.UTF8Encoding($false)).GetBytes(($Journal|ConvertTo-Json -Depth 30)+[Environment]::NewLine)
+    $bytesSha256=Get-AgentEnvironmentBytesSha256 $bytes
     Assert-AgentEnvironmentRecoveryMutationContext $RecoveryMutationContext
     $stageLease=$null
     try{
@@ -1439,8 +1524,14 @@ function Write-AgentEnvironmentInstallJournal {
         $stageLease.WriteNewBytes($bytes)
         $stageObserved=Assert-PlatformFileIdentity -Lease $stageLease -Expected $stageLease.Observation -SingleLink -VerifyPath
         $stageBytes=$stageLease.ReadAllBytes([int]$stageObserved.Size)
-        $readBack=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([Text.UTF8Encoding]::new($false,$true).GetString($stageBytes)) -ExpectedTransactionId ([string]$Journal.transactionId)
-        if($null-ne$authoritativeJournal){Assert-AiInstructionsInstallJournalStoreTransition -Previous $authoritativeJournal -Next $readBack|Out-Null}
+        if($useValidationCache){
+            Assert-AgentEnvironmentJournalBytesEqual -Expected $bytes -Actual $stageBytes
+            $readBack=ConvertFrom-AgentEnvironmentInstallJournalSnapshotJson -Json ([Text.UTF8Encoding]::new($false,$true).GetString($stageBytes))
+            Add-AgentEnvironmentInstallJournalValidationCacheEntry -Cache $validationCache -Sha256 $bytesSha256 -Journal $readBack -AuthorityBound
+        }else{
+            $readBack=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([Text.UTF8Encoding]::new($false,$true).GetString($stageBytes)) -ExpectedTransactionId ([string]$Journal.transactionId)
+            if($null-ne$authoritativeJournal){Assert-AiInstructionsInstallJournalStoreTransition -Previous $authoritativeJournal -Next $readBack|Out-Null}
+        }
         if([string]$env:AI_INSTRUCTIONS_USER_RECONCILER_FAILFAST-ceq'after-journal-stage-flush'){[Environment]::FailFast('Injected USER reconciler FailFast after journal stage flush.')}
 
         # An older fallback may be removed before replacement only while journal.json is
@@ -1456,7 +1547,10 @@ function Write-AgentEnvironmentInstallJournal {
     finally{if($null-ne$stageLease){$stageLease.Dispose()}}
     $publishedEvidence=Get-AgentEnvironmentPrivateFileJournalEvidence -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.json'
     if([string]$publishedEvidence.entryKind-cne'file'){throw 'Published transaction journal is not a verified regular single-link file.'}
-    ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([string]$publishedEvidence.json) -ExpectedTransactionId ([string]$Journal.transactionId)|Out-Null
+    if($useValidationCache){
+        if([string]$publishedEvidence.state.sha256-cne$bytesSha256-or[int64]$publishedEvidence.state.length-ne[int64]$bytes.Length){throw 'Published transaction journal bytes do not match the validated stage bytes.'}
+        ConvertFrom-AgentEnvironmentInstallJournalEvidence -Evidence $publishedEvidence -ExpectedTransactionId ([string]$Journal.transactionId) -Cache $validationCache|Out-Null
+    }else{ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([string]$publishedEvidence.json) -ExpectedTransactionId ([string]$Journal.transactionId)|Out-Null}
     if([string]$env:AI_INSTRUCTIONS_USER_RECONCILER_FAILFAST-ceq'after-journal-publish'){[Environment]::FailFast('Injected USER reconciler FailFast after journal publish.')}
     if($null-eq$currentJournal-and$null-ne$fallbackJournal){Remove-AgentEnvironmentTransactionPrivateFile -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.prev' -RecoveryMutationContext $RecoveryMutationContext}
 }
