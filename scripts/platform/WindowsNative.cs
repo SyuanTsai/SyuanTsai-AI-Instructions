@@ -109,6 +109,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private struct SecurityAttributes { public int Length; public IntPtr Descriptor; public int Inherit; }
         [StructLayout(LayoutKind.Sequential)]
         private struct GenericMapping { public uint Read, Write, Execute, All; }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TokenOwnerInformation { public IntPtr Owner; }
         [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out Information information);
@@ -132,6 +134,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint information, IntPtr descriptor);
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenProcessToken(IntPtr process, uint desiredAccess, out SafeAccessTokenHandle token);
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenThreadToken(IntPtr thread, uint desiredAccess, bool openAsSelf, out SafeAccessTokenHandle token);
+        [DllImport("advapi32.dll", SetLastError = true)] private static extern bool GetTokenInformation(SafeAccessTokenHandle token, int informationClass, IntPtr information, uint informationLength, out uint returnLength);
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool CreatePrivateObjectSecurityEx(IntPtr parentDescriptor, IntPtr creatorDescriptor, out IntPtr newDescriptor, IntPtr objectType, bool isContainerObject, uint autoInheritFlags, IntPtr token, ref GenericMapping genericMapping);
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool DestroyPrivateObjectSecurity(ref IntPtr descriptor);
         [DllImport("ntdll.dll")] private static extern int NtOpenFile(out SafeFileHandle handle, uint access, ref ObjectAttributes attributes, out IoStatusBlock status, uint share, uint options);
@@ -338,6 +341,36 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 }
                 finally { LocalFree(descriptor); }
             }
+        }
+        public static string GetCurrentProcessTokenOwnerSid()
+        {
+            SafeAccessTokenHandle token;
+            Check(OpenProcessToken(GetCurrentProcess(), 0x0008u, out token), "OpenProcessToken(TokenOwner)");
+            using (token)
+            {
+                uint length;
+                bool measured = GetTokenInformation(token, 4, IntPtr.Zero, 0, out length); // TokenOwner
+                int measurementError = Marshal.GetLastWin32Error();
+                if (measured || measurementError != 122 || length < (uint)IntPtr.Size)
+                    throw new PlatformWin32Exception("GetTokenInformation(TokenOwner size)", measurementError);
+                IntPtr buffer = Marshal.AllocHGlobal(checked((int)length));
+                try
+                {
+                    Check(GetTokenInformation(token, 4, buffer, length, out length), "GetTokenInformation(TokenOwner)");
+                    TokenOwnerInformation owner = (TokenOwnerInformation)Marshal.PtrToStructure(buffer, typeof(TokenOwnerInformation));
+                    if (owner.Owner == IntPtr.Zero) throw new IOException("The current process token has no TokenOwner SID.");
+                    return new SecurityIdentifier(owner.Owner).Value;
+                }
+                finally { Marshal.FreeHGlobal(buffer); }
+            }
+        }
+        public static bool IsAcceptedOwnerSid(string ownerSid, string currentUserSid, string tokenOwnerSid)
+        {
+            if (String.IsNullOrWhiteSpace(ownerSid)) throw new ArgumentException("An observed owner SID is required.", "ownerSid");
+            if (String.IsNullOrWhiteSpace(currentUserSid)) throw new ArgumentException("The current user SID is required.", "currentUserSid");
+            if (String.IsNullOrWhiteSpace(tokenOwnerSid)) throw new ArgumentException("The process TokenOwner SID is required.", "tokenOwnerSid");
+            SecurityIdentifier owner = new SecurityIdentifier(ownerSid);
+            return owner.Equals(new SecurityIdentifier(currentUserSid)) || owner.Equals(new SecurityIdentifier(tokenOwnerSid));
         }
         public static WindowsPermissions GetInheritedFilePermissions(WindowsLease parent)
         {

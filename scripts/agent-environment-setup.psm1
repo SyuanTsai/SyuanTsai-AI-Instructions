@@ -630,9 +630,10 @@ function Open-AgentEnvironmentSetupPrivateDirectoryGuard {
         if ($IsWindows) {
             $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
             try { $currentSid = $identity.User.Value } finally { $identity.Dispose() }
+            $tokenOwnerSid = [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetCurrentProcessTokenOwnerSid()
             $ownerSid = [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetOwnerSid($lease)
-            if ($ownerSid -cne $currentSid -or [bool]$permissions.ReadOnly) {
-                throw (New-AgentEnvironmentSetupRefusal unsafe-path "Setup directory '$Directory' must be owned by the current SID and writable by that owner.")
+            if (-not [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::IsAcceptedOwnerSid($ownerSid,$currentSid,$tokenOwnerSid) -or [bool]$permissions.ReadOnly) {
+                throw (New-AgentEnvironmentSetupRefusal unsafe-path "Setup directory '$Directory' must be owned by the current SID or process TokenOwner and writable by that owner.")
             }
             $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new([string]$permissions.Sddl)
             $acl = $descriptor.DiscretionaryAcl

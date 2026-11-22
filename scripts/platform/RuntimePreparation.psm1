@@ -592,7 +592,7 @@ function Open-PlatformRuntimeDirectoryLease {
 }
 
 function Assert-PlatformRuntimePrivateLease {
-    param($Lease,[string]$Platform,[string]$Context,[uint32]$UnixMode,[uint32]$EffectiveUid,[string]$CurrentSid)
+    param($Lease,[string]$Platform,[string]$Context,[uint32]$UnixMode,[uint32]$EffectiveUid,[string]$CurrentSid,[string]$TokenOwnerSid)
     if($Platform -cne 'windows'){
         $permissions=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetPermissionSnapshot($Lease)
         if([Convert]::ToUInt32([string]$permissions.Mode,8) -ne $UnixMode -or [uint64]$permissions.Uid -ne [uint64]$EffectiveUid){
@@ -602,7 +602,7 @@ function Assert-PlatformRuntimePrivateLease {
     }
     $permissions=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetPermissions($Lease)
     $owner=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetOwnerSid($Lease)
-    if($owner -cne $CurrentSid -or [bool]$permissions.ReadOnly){throw "$Context must be owned by the current SID and writable by that owner."}
+    if(-not [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::IsAcceptedOwnerSid($owner,$CurrentSid,$TokenOwnerSid) -or [bool]$permissions.ReadOnly){throw "$Context must be owned by the current SID or process TokenOwner and writable by that owner."}
     $descriptor=[Security.AccessControl.RawSecurityDescriptor]::new([string]$permissions.Sddl)
     $acl=$descriptor.DiscretionaryAcl
     if($null -eq $acl -or $acl.Count -eq 0){throw "$Context must have a non-empty private DACL."}
@@ -616,16 +616,17 @@ function Assert-PlatformRuntimePrivateLease {
 
 function Assert-PlatformRuntimePrivatePermissions {
     param([string]$RootPath,[string]$ExecutablePath,$Closure,[string[]]$Directories,[string]$Platform)
-    $effectiveUid=[uint32]0;$currentSid=$null
+    $effectiveUid=[uint32]0;$currentSid=$null;$tokenOwnerSid=$null
     if($Platform -ceq 'windows'){
         $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
         try{$currentSid=$identity.User.Value}finally{$identity.Dispose()}
+        $tokenOwnerSid=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetCurrentProcessTokenOwnerSid()
     }else{$effectiveUid=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetEffectiveUserId()}
     $lease=Open-PlatformRuntimeDirectoryLease $RootPath '' $Platform
-    try{Assert-PlatformRuntimePrivateLease $lease $Platform 'Runtime root' 448 $effectiveUid $currentSid}finally{$lease.Dispose()}
+    try{Assert-PlatformRuntimePrivateLease $lease $Platform 'Runtime root' 448 $effectiveUid $currentSid $tokenOwnerSid}finally{$lease.Dispose()}
     foreach($relative in @($Directories)){
         $lease=Open-PlatformRuntimeDirectoryLease $RootPath $relative $Platform
-        try{Assert-PlatformRuntimePrivateLease $lease $Platform "Runtime directory '$relative'" 448 $effectiveUid $currentSid}finally{$lease.Dispose()}
+        try{Assert-PlatformRuntimePrivateLease $lease $Platform "Runtime directory '$relative'" 448 $effectiveUid $currentSid $tokenOwnerSid}finally{$lease.Dispose()}
     }
     foreach($file in @($Closure.files)){
         $relative=[string]$file.path
@@ -640,7 +641,7 @@ function Assert-PlatformRuntimePrivatePermissions {
             }
             try{
                 $expectedMode=if([string]::Equals([IO.Path]::GetFullPath((Join-Path $RootPath $relative)),[IO.Path]::GetFullPath($ExecutablePath),$(if($Platform -ceq 'windows'){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}))){448}else{384}
-                Assert-PlatformRuntimePrivateLease $lease $Platform "Runtime file '$relative'" $expectedMode $effectiveUid $currentSid
+                Assert-PlatformRuntimePrivateLease $lease $Platform "Runtime file '$relative'" $expectedMode $effectiveUid $currentSid $tokenOwnerSid
             }finally{$lease.Dispose()}
         }finally{$parent.Dispose()}
     }

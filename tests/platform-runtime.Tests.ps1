@@ -154,6 +154,38 @@ Describe 'Platform setup directory durability close' {
     }
 }
 
+if ($IsWindows) {
+Describe 'Windows process token owner acceptance' {
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+    }
+
+    # Scenario: An elevated process creates an object whose owner is the process token's BUILTIN\Administrators TokenOwner.
+    # Purpose: Accept the Windows default owner used by elevated tokens without requiring a real elevated test process.
+    It 'UnitT10_accepts_the_injected_process_token_owner' {
+        $userSid = 'S-1-5-21-1000-1000-1000-1001'
+        $administratorsSid = 'S-1-5-32-544'
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::IsAcceptedOwnerSid($administratorsSid,$userSid,$administratorsSid) | Should Be $true
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::IsAcceptedOwnerSid($userSid,$userSid,$administratorsSid) | Should Be $true
+    }
+
+    # Scenario: A non-elevated token has the user SID as TokenOwner while an object is owned by Administrators or another SID.
+    # Purpose: Keep the accepted owner set limited to the actual TokenOwner and user SID instead of broadly trusting Administrators.
+    It 'UnitT20_rejects_administrators_and_unrelated_owners_when_the_token_owner_is_the_user' {
+        $userSid = 'S-1-5-21-1000-1000-1000-1001'
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::IsAcceptedOwnerSid('S-1-5-32-544',$userSid,$userSid) | Should Be $false
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::IsAcceptedOwnerSid('S-1-5-18',$userSid,$userSid) | Should Be $false
+    }
+
+    # Scenario: Production queries the current process token owner on the native Windows host.
+    # Purpose: Prove the injected decision helper is backed by a real TokenOwner primitive in the production path.
+    It 'UnitT30_reads_the_current_process_token_owner_sid' {
+        $tokenOwnerSid = [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetCurrentProcessTokenOwnerSid()
+        $tokenOwnerSid | Should Match '^S-1-\d+(?:-\d+)+$'
+    }
+}
+}
+
 Describe 'Platform stdin transport primitives' {
     BeforeAll {
         Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
