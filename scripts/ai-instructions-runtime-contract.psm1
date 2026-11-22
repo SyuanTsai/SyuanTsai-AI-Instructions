@@ -2560,8 +2560,9 @@ function Assert-AiInstructionsInstallJournalUnambiguousJson {
     [void]$stack.Add([pscustomobject]@{ kind='root'; mode='value'; seen=$null })
     $position = 0
     try {
+        $match = $tokenRegex.Match($Json)
         while ($position -lt $Json.Length) {
-            $match = $tokenRegex.Match($Json,$position)
+            if ($position -gt 0) { $match = $match.NextMatch() }
             if (-not $match.Success -or $match.Index -ne $position) {
                 if ([string]::IsNullOrWhiteSpace($Json.Substring($position))) { break }
                 throw 'AI instructions install journal JSON token is invalid.'
