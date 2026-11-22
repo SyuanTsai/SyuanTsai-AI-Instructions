@@ -5,6 +5,13 @@ docs/examples/diagram-design-acceptance/* text eol=lf
 instructions/common/** text eol=lf
 tests/golden/*.golden text eol=lf
 tests/fixtures/syp500/** -text
+scripts/setup-agent-environment* text eol=lf
+scripts/agent-environment-setup.psm1 text eol=lf
+scripts/platform-runtime.* text eol=lf
+scripts/installer-safe-mutation.psm1 text eol=lf
+scripts/WindowsDacl.psm1 text eol=lf
+scripts/Resolve-StandardValidationTool.ps1 text eol=lf
+scripts/platform/** text eol=lf
 .codex/AGENTS*.md text eol=lf
 .codex/AI-Rules/*.md text eol=lf
 .github/copilot-instructions*.md text eol=lf

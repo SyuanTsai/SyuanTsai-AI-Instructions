@@ -680,6 +680,50 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
 
 # Register only on the native host; keep this file's Core CI skip count at zero.
 if ($setupTestIsWindows) {
+Describe 'setup-agent-environment Git for Windows autocrlf trust closure (SYP-518)' {
+    BeforeAll {
+        $script:AutoCrlfRepositoryRoot = Split-Path -Parent $PSScriptRoot
+        $entryText = [IO.File]::ReadAllText((Join-Path $script:AutoCrlfRepositoryRoot 'scripts/setup-agent-environment.ps1'))
+        $setupBoundMatch = [regex]::Match($entryText,'(?ms)\$setupBound\s*=\s*@\((.*?)\)\s*\r?\n\s*\$trustFiles')
+        if (-not $setupBoundMatch.Success) { throw 'The setup verifier trust closure cannot be parsed.' }
+        $setupBound = @([regex]::Matches($setupBoundMatch.Groups[1].Value,"'([^']+)'") | ForEach-Object { [string]$_.Groups[1].Value })
+        $manifest = Import-PowerShellDataFile -LiteralPath (Join-Path $script:AutoCrlfRepositoryRoot 'scripts/platform-runtime.psd1')
+        $script:AutoCrlfTrustClosure = @($setupBound + @($manifest.FileList | ForEach-Object { 'scripts/' + [string]$_ }) | Select-Object -Unique)
+
+        $script:AutoCrlfFixtureSource = Join-Path $TestDrive 'autocrlf-source'
+        $script:AutoCrlfFixtureClone = Join-Path $TestDrive 'autocrlf-clone'
+        [void][IO.Directory]::CreateDirectory($script:AutoCrlfFixtureSource)
+        Copy-Item -LiteralPath (Join-Path $script:AutoCrlfRepositoryRoot '.gitattributes') -Destination $script:AutoCrlfFixtureSource
+        foreach ($relative in $script:AutoCrlfTrustClosure) {
+            $target = Join-Path $script:AutoCrlfFixtureSource $relative
+            [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
+            Copy-Item -LiteralPath (Join-Path $script:AutoCrlfRepositoryRoot $relative) -Destination $target
+        }
+        [IO.File]::WriteAllText((Join-Path $script:AutoCrlfFixtureSource 'uncovered.txt'),"negative`ncontrol`n",[Text.UTF8Encoding]::new($false))
+        & git -C $script:AutoCrlfFixtureSource init -q 2>$null | Out-Null
+        & git -C $script:AutoCrlfFixtureSource -c core.autocrlf=false add -A 2>$null | Out-Null
+        & git -C $script:AutoCrlfFixtureSource -c user.name=setup-test -c user.email=setup-test@example.invalid -c core.autocrlf=false commit -q -m fixture 2>$null | Out-Null
+        & git -c core.autocrlf=true clone -q --no-local $script:AutoCrlfFixtureSource $script:AutoCrlfFixtureClone 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'The core.autocrlf=true fixture clone failed.' }
+    }
+
+    # Scenario: Git for Windows checks out a fresh repository with core.autocrlf=true while the setup verifier hashes raw worktree bytes.
+    # Purpose: Keep every verifier-derived trust-closure file byte-identical to its committed blob, with an uncovered text file proving the negative control converts to CRLF.
+    It 'InterT10_keeps_the_raw_setup_trust_closure_equal_to_HEAD_in_an_autocrlf_clone' {
+        $mismatches = foreach ($relative in $script:AutoCrlfTrustClosure) {
+            $expected = [string](& git -C $script:AutoCrlfFixtureClone rev-parse "HEAD:$relative" 2>$null)
+            $raw = [string](& git -C $script:AutoCrlfFixtureClone hash-object --no-filters -- (Join-Path $script:AutoCrlfFixtureClone $relative) 2>$null)
+            if ($expected -cne $raw) { $relative }
+        }
+        @($mismatches).Count | Should Be 0
+
+        $negativeExpected = [string](& git -C $script:AutoCrlfFixtureClone rev-parse 'HEAD:uncovered.txt' 2>$null)
+        $negativeRaw = [string](& git -C $script:AutoCrlfFixtureClone hash-object --no-filters -- (Join-Path $script:AutoCrlfFixtureClone 'uncovered.txt') 2>$null)
+        $negativeRaw | Should Not BeExactly $negativeExpected
+        [string](& git -C $script:AutoCrlfFixtureClone ls-files --eol -- uncovered.txt 2>$null) | Should Match 'w/crlf'
+    }
+}
+
 Describe 'setup-agent-environment Windows native fixture (SYP-354 P10a)' {
     BeforeAll {
         $script:WinRepositoryRoot = Split-Path -Parent $PSScriptRoot
