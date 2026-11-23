@@ -5661,7 +5661,13 @@ function Test-RepositoryTransactionStateEqual {
         'update-git-ref'{return [bool]$Actual.exists-eq[bool]$Expected.exists-and(-not$Expected.exists-or[string]$Actual.objectId-ceq[string]$Expected.objectId)}
         'store-git-stash-evidence'{return [bool]$Actual.exists-eq[bool]$Expected.exists-and[string]$Actual.objectId-ceq[string]$Expected.objectId}
         'update-git-head'{return [string]$Actual.mode-ceq[string]$Expected.mode-and[string]$Actual.reference-ceq[string]$Expected.reference-and[string]$Actual.objectId-ceq[string]$Expected.objectId-and[string]$Actual.rawSha256-ceq[string]$Expected.rawSha256}
-        'ensure-directory-anchor'{if([bool]$Actual.exists-ne[bool]$Expected.exists){return $false};if(-not$Expected.exists){return $true};return [string]$Actual.identity.kind-ceq[string]$Expected.identity.kind-and[string]::Equals([string]$Actual.identity.device,[string]$Expected.identity.device,[StringComparison]::OrdinalIgnoreCase)-and[string]::Equals([string]$Actual.identity.fileId,[string]$Expected.identity.fileId,[StringComparison]::OrdinalIgnoreCase)}
+        'ensure-directory-anchor'{
+            if([bool]$Actual.exists-ne[bool]$Expected.exists){return $false}
+            if(-not$Expected.exists){return $true}
+            $identityEqual=[string]$Actual.identity.kind-ceq[string]$Expected.identity.kind-and[string]::Equals([string]$Actual.identity.device,[string]$Expected.identity.device,[StringComparison]::OrdinalIgnoreCase)-and[string]::Equals([string]$Actual.identity.fileId,[string]$Expected.identity.fileId,[StringComparison]::OrdinalIgnoreCase)
+            if(-not$identityEqual-or$IsWindows){return $identityEqual}
+            return Test-RepositoryTransactionDisplacedMetadataEqual -Actual $Actual.permissions -Expected $Expected.permissions
+        }
         'replace-git-index'{return Test-RepositoryTransactionIndexStateEqual $Actual $Expected}
         default{return Test-ProjectPublicationStateEqual $Actual $Expected}
     }

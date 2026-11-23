@@ -3996,19 +3996,57 @@ Describe 'bootstrap Unix snapshot routing contract' {
             $sourceArchive = Join-Path $unixCaseRoot 'source.zip'
             $configurationPath = Join-Path $unixCaseRoot 'sync-config.json'
             $provenancePath = Join-Path $unixCaseRoot 'provenance.json'
+            $tempRoot = Join-Path $unixCaseRoot 'temp'
             New-TestSource -Path $sourceRoot
             Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
             New-TestConfiguration -Path $configurationPath
             New-TestProvenance -ArchivePath $sourceArchive -Path $provenancePath
+            New-Item -ItemType Directory -Path $tempRoot | Out-Null
             Remove-Item -LiteralPath (Join-Path $unixRepository '.git/info') -Recurse -Force
+            $hadTempRoot = Test-Path Env:TMPDIR
+            $previousTempRoot = $env:TMPDIR
+            $hadFailpoint = Test-Path Env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+            $previousFailpoint = $env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+            try {
+                $env:TMPDIR = $tempRoot
+                $env:AI_INSTRUCTIONS_INSTALL_FAILPOINT = 'before-committed-journal-write'
+                $interruptedOutput = & $script:TestPowerShellExecutable -NoProfile -NonInteractive -File $script:BootstrapScript `
+                    -SourceArchivePath $sourceArchive -TargetRoot $unixRepository -ConfigurationPath $configurationPath `
+                    -ProvenancePath $provenancePath 2>&1
+                $interruptedExitCode = $LASTEXITCODE
+                $transactionRoot = Join-Path $unixRepository '.git/.ai-instructions-txn'
+                $journals = @(Get-ChildItem -LiteralPath $transactionRoot -Filter 'journal.json' -File -Recurse -Force)
+                $journal = Get-Content -Raw -LiteralPath $journals[0].FullName | ConvertFrom-Json
+                $anchors = @($journal.operations | Where-Object {
+                    [string]$_.kind -ceq 'ensure-directory-anchor' -and
+                    [string]$_.role -ceq 'shared-exclude-directory-anchor'
+                })
 
-            $output = & $script:TestPowerShellExecutable -NoProfile -NonInteractive -File $script:BootstrapScript `
-                -SourceArchivePath $sourceArchive -TargetRoot $unixRepository -ConfigurationPath $configurationPath `
-                -ProvenancePath $provenancePath 2>&1
+                $interruptedExitCode | Should Not Be 0
+                (ConvertTo-TestDiagnosticText -Output @($interruptedOutput)) |
+                    Should Match 'AI instructions installer failpoint: before-committed-journal-write'
+                $journals.Count | Should Be 1
+                $anchors.Count | Should Be 1
+                [string]$anchors[0].target.kind | Should Be 'git-shared-exclude-directory'
+                [IO.Path]::GetFullPath([string]$anchors[0].target.value) |
+                    Should Be ([IO.Path]::GetFullPath((Join-Path $unixRepository '.git/info')))
+                [string]$anchors[0].after.permissions.kind | Should Be 'unix-mode'
+                @(Get-ChildItem -LiteralPath $tempRoot -Directory -Force).Count | Should BeGreaterThan 0
+                @(Get-ChildItem -LiteralPath $tempRoot -Filter 'skill-migration.json' -File -Recurse -Force).Count | Should Be 0
 
+                Remove-Item Env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+                $output = & $script:TestPowerShellExecutable -NoProfile -NonInteractive -File $script:BootstrapScript `
+                    -SourceArchivePath $sourceArchive -TargetRoot $unixRepository -ConfigurationPath $configurationPath `
+                    -ProvenancePath $provenancePath 2>&1
+            }
+            finally {
+                if ($hadTempRoot) { $env:TMPDIR = $previousTempRoot } else { Remove-Item Env:TMPDIR -ErrorAction SilentlyContinue }
+                if ($hadFailpoint) { $env:AI_INSTRUCTIONS_INSTALL_FAILPOINT = $previousFailpoint }
+                else { Remove-Item Env:AI_INSTRUCTIONS_INSTALL_FAILPOINT -ErrorAction SilentlyContinue }
+            }
             $LASTEXITCODE | Should Be 0
             Test-Path -LiteralPath (Join-Path $unixRepository '.git/info/exclude') -PathType Leaf | Should Be $true
-            @(Get-ChildItem -LiteralPath $unixCaseRoot -Filter 'skill-migration.json' -File -Recurse -Force).Count | Should Be 0
+            @(Get-ChildItem -LiteralPath $tempRoot -Filter 'skill-migration.json' -File -Recurse -Force).Count | Should Be 0
             (ConvertTo-TestDiagnosticText -Output @($output)) | Should Not Match 'skill-migration\.json'
         }
 
@@ -4087,13 +4125,17 @@ Describe 'bootstrap Unix snapshot routing contract' {
             $message | Should Match 'Managed target (?:path crosses a reparse point|platform rollback snapshot failed closed):'
         }
 
-        # Scenario: Mode drift, same-byte inode replacement, or a symlink swap occurs after the no-follow read.
+        # Scenario: Mode, same-inode content or length, same-byte inode replacement, or symlink drift occurs after the no-follow read.
         # Purpose: Re-observation must reject every drift class for both exclude and target snapshots.
         It 'InterT200_fails_closed_for_<Drift>_drift_during_a_<SnapshotKind>_snapshot' -TestCases @(
             @{SnapshotKind='exclude';Drift='mode'},
+            @{SnapshotKind='exclude';Drift='content'},
+            @{SnapshotKind='exclude';Drift='length'},
             @{SnapshotKind='exclude';Drift='inode'},
             @{SnapshotKind='exclude';Drift='symlink'},
             @{SnapshotKind='target';Drift='mode'},
+            @{SnapshotKind='target';Drift='content'},
+            @{SnapshotKind='target';Drift='length'},
             @{SnapshotKind='target';Drift='inode'},
             @{SnapshotKind='target';Drift='symlink'}
         ) {
@@ -4108,6 +4150,14 @@ Describe 'bootstrap Unix snapshot routing contract' {
                 if ($Drift -ceq 'mode') {
                     & chmod 0600 -- $path
                     if ($LASTEXITCODE -ne 0) { throw "chmod drift injection failed for $path" }
+                }
+                elseif ($Drift -ceq 'content') {
+                    [byte[]]$changedBytes = [byte[]]$bytes.Clone()
+                    $changedBytes[0] = $changedBytes[0] -bxor 1
+                    [IO.File]::WriteAllBytes($path,$changedBytes)
+                }
+                elseif ($Drift -ceq 'length') {
+                    [IO.File]::WriteAllBytes($path,[byte[]]($bytes + [byte]0x21))
                 }
                 elseif ($Drift -ceq 'inode') {
                     $replacement = $path + '.replacement'
@@ -4239,25 +4289,79 @@ Describe 'bootstrap Unix snapshot routing contract' {
             }
         }
 
-        # Scenario: Content and identity are unchanged after planning, but the Unix mode changes before apply.
-        # Purpose: Keep permission drift in the source-state comparison fail-closed.
+        # Scenario: A write intent captures content, identity and permissions before the Unix mode changes.
+        # Purpose: Drive the real planning-to-apply transaction path and refuse before target bytes change.
         It 'InterT230_rejects_Unix_permission_drift_between_snapshot_and_apply' {
             $path = Join-Path $unixRepository 'AGENTS.md'
-            [IO.File]::WriteAllText($path,"# stable target`n",[Text.UTF8Encoding]::new($false))
+            [byte[]]$originalBytes = [Text.UTF8Encoding]::new($false).GetBytes("# stable target`n")
+            [IO.File]::WriteAllBytes($path,$originalBytes)
             & chmod 0644 -- $path
             if ($LASTEXITCODE -ne 0) { throw "chmod fixture setup failed for $path" }
-            $parentLease = Open-PlatformDirectory -Root $unixRepository -RootOnly
+            $context = New-ProjectPublicationContext -Repository $unixRepository
+            $script:ProjectPublicationContext = $context
+            $message = $null
             try {
-                $expected = Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf 'AGENTS.md' `
-                    -LiteralPath $path -PlatformOs $(if($IsLinux){'linux'}else{'macos'}) -IncludePermissions
+                Set-ProjectPublicationFileBytes -RelativePath 'AGENTS.md' `
+                    -Bytes ([Text.UTF8Encoding]::new($false).GetBytes("# changed target`n"))
                 & chmod 0600 -- $path
                 if ($LASTEXITCODE -ne 0) { throw "chmod drift injection failed for $path" }
-                $actual = Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf 'AGENTS.md' `
-                    -LiteralPath $path -PlatformOs $(if($IsLinux){'linux'}else{'macos'}) -IncludePermissions
+                $context.RepositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $unixRepository
+                Invoke-RepositoryInstallTransaction -Context $context
             }
-            finally { $parentLease.Dispose() }
+            catch { $message = $_.Exception.Message }
+            finally {
+                Close-RepositoryIndexTransactionLock -Lock $context.RepositoryIndexLock
+                if ($null -ne $context.Lease) { $context.Lease.Dispose(); $context.Lease = $null }
+                if ($null -ne $context.ContainerLease) { $context.ContainerLease.Dispose(); $context.ContainerLease = $null }
+                $script:ProjectPublicationContext = $null
+            }
 
-            (Test-ProjectPublicationStateEqual -Actual $actual -Expected $expected) | Should Be $false
+            $message | Should Match 'Repository transaction sequence 1 role instruction target AGENTS\.md is in a third state; evidence was retained for manual inspection and cleanup\.'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) |
+                Should Be ([Convert]::ToBase64String($originalBytes))
+        }
+
+        # Scenario: A newly published common Git info anchor keeps its inode but its mode drifts before terminal verification.
+        # Purpose: Reject the journaled anchor as a third state instead of committing permission drift.
+        It 'InterT240_rejects_permission_drift_on_a_created_shared_exclude_directory_anchor' {
+            $infoPath = Join-Path $unixRepository '.git/info'
+            $excludePath = Join-Path $infoPath 'exclude'
+            Remove-Item -LiteralPath $infoPath -Recurse -Force
+            $snapshot = New-GitInfoExcludeSnapshot -Repository $unixRepository -UsePlatformRuntime
+            $context = New-ProjectPublicationContext -Repository $unixRepository
+            $script:ProjectPublicationContext = $context
+            Set-ManagedGitInfoExclude -Repository $unixRepository -ManagedPaths @('AGENTS.md') -Snapshot $snapshot
+            $realFailpoint = (Get-Command Invoke-AiInstructionsInstallFailpoint -CommandType Function).ScriptBlock
+            $driftInjected = $false
+            $failpointHook = {
+                param([Parameter(Mandatory = $true)][string] $Name)
+                if (-not $driftInjected -and $Name -cmatch '^after-operation-[1-9][0-9]*-before-journal$' -and
+                    (Test-Path -LiteralPath $infoPath -PathType Container) -and
+                    -not (Test-Path -LiteralPath $excludePath)) {
+                    & chmod 0777 -- $infoPath
+                    if ($LASTEXITCODE -ne 0) { throw "chmod anchor drift injection failed for $infoPath" }
+                    $driftInjected = $true
+                }
+                & $realFailpoint -Name $Name
+            }.GetNewClosure()
+            Set-Item -LiteralPath Function:\Invoke-AiInstructionsInstallFailpoint -Value $failpointHook
+            $message = $null
+            try {
+                $context.RepositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $unixRepository
+                Invoke-RepositoryInstallTransaction -Context $context
+            }
+            catch { $message = $_.Exception.Message }
+            finally {
+                Set-Item -LiteralPath Function:\Invoke-AiInstructionsInstallFailpoint -Value $realFailpoint
+                Close-RepositoryIndexTransactionLock -Lock $context.RepositoryIndexLock
+                if ($null -ne $context.Lease) { $context.Lease.Dispose(); $context.Lease = $null }
+                if ($null -ne $context.ContainerLease) { $context.ContainerLease.Dispose(); $context.ContainerLease = $null }
+                $script:ProjectPublicationContext = $null
+            }
+
+            $driftInjected | Should Be $true
+            $message | Should Match 'Repository transaction terminal verification failed for sequence [1-9][0-9]*\.'
+            Test-Path -LiteralPath $excludePath -PathType Leaf | Should Be $true
         }
     }
 }
