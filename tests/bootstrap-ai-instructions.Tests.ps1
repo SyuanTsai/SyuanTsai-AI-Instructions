@@ -3944,8 +3944,9 @@ Describe 'bootstrap Unix snapshot routing contract' {
         }
 
         BeforeEach {
-            $unixRepository = Join-Path $TestDrive 'unix-repository'
-            $unixBackupRoot = Join-Path $TestDrive 'unix-backup'
+            $unixCaseRoot = Join-Path $TestDrive ('unix-case-' + [guid]::NewGuid().ToString('N'))
+            $unixRepository = Join-Path $unixCaseRoot 'repository'
+            $unixBackupRoot = Join-Path $unixCaseRoot 'backup'
             New-TestRepository -Path $unixRepository
         }
 
@@ -3990,11 +3991,11 @@ Describe 'bootstrap Unix snapshot routing contract' {
         # Scenario: A normal Unix bootstrap starts from a repository whose common Git info directory is absent.
         # Purpose: Create info/exclude through the unified transaction and never emit a legacy migration journal.
         It 'InterT150_creates_a_missing_common_Git_info_directory_through_the_unified_transaction' {
-            $archiveRoot = Join-Path $TestDrive 'unix-archive'
+            $archiveRoot = Join-Path $unixCaseRoot 'archive'
             $sourceRoot = Join-Path $archiveRoot 'example-ai-instructions-main'
-            $sourceArchive = Join-Path $TestDrive 'unix-source.zip'
-            $configurationPath = Join-Path $TestDrive 'unix-sync-config.json'
-            $provenancePath = Join-Path $TestDrive 'unix-provenance.json'
+            $sourceArchive = Join-Path $unixCaseRoot 'source.zip'
+            $configurationPath = Join-Path $unixCaseRoot 'sync-config.json'
+            $provenancePath = Join-Path $unixCaseRoot 'provenance.json'
             New-TestSource -Path $sourceRoot
             Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
             New-TestConfiguration -Path $configurationPath
@@ -4007,14 +4008,14 @@ Describe 'bootstrap Unix snapshot routing contract' {
 
             $LASTEXITCODE | Should Be 0
             Test-Path -LiteralPath (Join-Path $unixRepository '.git/info/exclude') -PathType Leaf | Should Be $true
-            @(Get-ChildItem -LiteralPath $TestDrive -Filter 'skill-migration.json' -File -Recurse -Force).Count | Should Be 0
+            @(Get-ChildItem -LiteralPath $unixCaseRoot -Filter 'skill-migration.json' -File -Recurse -Force).Count | Should Be 0
             (ConvertTo-TestDiagnosticText -Output @($output)) | Should Not Match 'skill-migration\.json'
         }
 
         # Scenario: A linked worktree resolves info/exclude through its common Git directory.
         # Purpose: Keep snapshot authority bound to the shared common-dir exclude rather than the worktree .git file.
         It 'InterT160_resolves_a_linked_worktree_snapshot_to_the_common_Git_directory' {
-            $linkedRoot = Join-Path $TestDrive 'unix-linked-worktree'
+            $linkedRoot = Join-Path $unixCaseRoot 'linked-worktree'
             Invoke-TestGit -Repository $unixRepository -Arguments @('worktree','add','--quiet','-b','unix-linked-fixture',$linkedRoot) | Out-Null
             try {
                 $snapshot = New-GitInfoExcludeSnapshot -Repository $linkedRoot -UsePlatformRuntime
@@ -4034,7 +4035,7 @@ Describe 'bootstrap Unix snapshot routing contract' {
         ) {
             param($LinkKind)
             $excludePath = Join-Path $unixRepository '.git/info/exclude'
-            $outside = Join-Path $TestDrive 'outside-exclude'
+            $outside = Join-Path $unixCaseRoot 'outside-exclude'
             Remove-Item -LiteralPath $excludePath -Force
             if ($LinkKind -ceq 'file') { [IO.File]::WriteAllText($outside,"outside`n") }
             New-Item -ItemType SymbolicLink -Path $excludePath -Target $outside | Out-Null
@@ -4051,7 +4052,7 @@ Describe 'bootstrap Unix snapshot routing contract' {
         # Purpose: Refuse parent traversal even when the symlink target is a physical directory.
         It 'InterT180_fails_closed_when_the_common_Git_info_directory_is_a_symlink' {
             $infoPath = Join-Path $unixRepository '.git/info'
-            $outsideInfo = Join-Path $TestDrive 'outside-info'
+            $outsideInfo = Join-Path $unixCaseRoot 'outside-info'
             Remove-Item -LiteralPath $infoPath -Recurse -Force
             New-Item -ItemType Directory -Path $outsideInfo | Out-Null
             New-Item -ItemType SymbolicLink -Path $infoPath -Target $outsideInfo | Out-Null
@@ -4072,7 +4073,7 @@ Describe 'bootstrap Unix snapshot routing contract' {
         ) {
             param($LinkKind)
             $targetPath = Join-Path $unixRepository 'AGENTS.md'
-            $outside = Join-Path $TestDrive 'outside-target'
+            $outside = Join-Path $unixCaseRoot 'outside-target'
             if ($LinkKind -ceq 'file') { [IO.File]::WriteAllText($outside,"outside`n") }
             New-Item -ItemType SymbolicLink -Path $targetPath -Target $outside | Out-Null
             $message = $null
@@ -4152,16 +4153,16 @@ Describe 'bootstrap Unix snapshot routing contract' {
         # Scenario: A caller explicitly requests the obsolete skill-migration journal on Unix.
         # Purpose: Refuse with a platform-specific message before Windows-only journal parsing or mutation APIs run.
         It 'InterT210_refuses_legacy_skill_migration_recovery_on_Unix' {
-            $archiveRoot = Join-Path $TestDrive 'recover-archive'
+            $archiveRoot = Join-Path $unixCaseRoot 'recover-archive'
             $sourceRoot = Join-Path $archiveRoot 'example-ai-instructions-main'
-            $sourceArchive = Join-Path $TestDrive 'recover-source.zip'
-            $configurationPath = Join-Path $TestDrive 'recover-sync-config.json'
-            $provenancePath = Join-Path $TestDrive 'recover-provenance.json'
+            $sourceArchive = Join-Path $unixCaseRoot 'recover-source.zip'
+            $configurationPath = Join-Path $unixCaseRoot 'recover-sync-config.json'
+            $provenancePath = Join-Path $unixCaseRoot 'recover-provenance.json'
             New-TestSource -Path $sourceRoot
             Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
             New-TestConfiguration -Path $configurationPath
             New-TestProvenance -ArchivePath $sourceArchive -Path $provenancePath
-            $journalPath = Join-Path $TestDrive 'target-backup/skill-migration.json'
+            $journalPath = Join-Path $unixCaseRoot 'target-backup/skill-migration.json'
 
             $output = & $script:TestPowerShellExecutable -NoProfile -NonInteractive -File $script:BootstrapScript `
                 -SourceArchivePath $sourceArchive -TargetRoot $unixRepository -ConfigurationPath $configurationPath `
@@ -4170,6 +4171,93 @@ Describe 'bootstrap Unix snapshot routing contract' {
             $LASTEXITCODE | Should Not Be 0
             (ConvertTo-TestDiagnosticText -Output @($output)) |
                 Should Match 'Legacy Skill migration journal recovery is unavailable on Unix; repository recovery uses the unified transaction journal\.'
+        }
+
+        # Scenario: A full Unix bootstrap either creates fresh target/exclude files or replaces both in place.
+        # Purpose: Journal the permissions publication actually produces while preserving existing mode, uid and gid.
+        It 'InterT220_applies_a_full_Unix_bootstrap_with_<PublicationKind>_target_and_exclude_permissions' -TestCases @(
+            @{PublicationKind='new'},
+            @{PublicationKind='replaced'}
+        ) {
+            param($PublicationKind)
+            $archiveRoot = Join-Path $unixCaseRoot 'apply-archive'
+            $sourceRoot = Join-Path $archiveRoot 'example-ai-instructions-main'
+            $sourceArchive = Join-Path $unixCaseRoot 'apply-source.zip'
+            $configurationPath = Join-Path $unixCaseRoot 'apply-sync-config.json'
+            $provenancePath = Join-Path $unixCaseRoot 'apply-provenance.json'
+            New-TestSource -Path $sourceRoot
+            Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+            New-TestConfiguration -Path $configurationPath
+            New-TestProvenance -ArchivePath $sourceArchive -Path $provenancePath
+            $targetPath = Join-Path $unixRepository 'AGENTS.md'
+            $infoPath = Join-Path $unixRepository '.git/info'
+            $excludePath = Join-Path $infoPath 'exclude'
+            $beforeStates = @{}
+            if ($PublicationKind -ceq 'new') {
+                Remove-Item -LiteralPath $excludePath -Force
+                Remove-Item -LiteralPath $infoPath -Force
+            }
+            else {
+                [IO.File]::WriteAllText($targetPath,"# original target`n",[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText($excludePath,"# original exclude`n",[Text.UTF8Encoding]::new($false))
+                foreach ($path in @($targetPath,$excludePath)) {
+                    & chmod 0640 -- $path
+                    if ($LASTEXITCODE -ne 0) { throw "chmod fixture setup failed for $path" }
+                    $parentLease = Open-PlatformDirectory -Root (Split-Path -Parent $path) -RootOnly
+                    try {
+                        $beforeStates[$path] = Get-AiInstructionsInstallFileState -ParentLease $parentLease `
+                            -Leaf (Split-Path -Leaf $path) -LiteralPath $path `
+                            -PlatformOs $(if($IsLinux){'linux'}else{'macos'}) -IncludePermissions
+                    }
+                    finally { $parentLease.Dispose() }
+                }
+            }
+
+            $output = & $script:TestPowerShellExecutable -NoProfile -NonInteractive -File $script:BootstrapScript `
+                -SourceArchivePath $sourceArchive -TargetRoot $unixRepository -ConfigurationPath $configurationPath `
+                -ProvenancePath $provenancePath 2>&1
+
+            $LASTEXITCODE | Should Be 0
+            (ConvertTo-TestDiagnosticText -Output @($output)) | Should Not Match 'readback differs|interrupted-install'
+            foreach ($path in @($targetPath,$excludePath)) {
+                $parentLease = Open-PlatformDirectory -Root (Split-Path -Parent $path) -RootOnly
+                try {
+                    $afterState = Get-AiInstructionsInstallFileState -ParentLease $parentLease `
+                        -Leaf (Split-Path -Leaf $path) -LiteralPath $path `
+                        -PlatformOs $(if($IsLinux){'linux'}else{'macos'}) -IncludePermissions
+                }
+                finally { $parentLease.Dispose() }
+                [string]$afterState.permissions.kind | Should Be 'unix-mode'
+                if ($PublicationKind -ceq 'new') {
+                    [string]$afterState.permissions.mode | Should Be '0600'
+                }
+                else {
+                    foreach ($name in @('mode','uid','gid')) {
+                        [string]$afterState.permissions.$name | Should Be ([string]$beforeStates[$path].permissions.$name)
+                    }
+                }
+            }
+        }
+
+        # Scenario: Content and identity are unchanged after planning, but the Unix mode changes before apply.
+        # Purpose: Keep permission drift in the source-state comparison fail-closed.
+        It 'InterT230_rejects_Unix_permission_drift_between_snapshot_and_apply' {
+            $path = Join-Path $unixRepository 'AGENTS.md'
+            [IO.File]::WriteAllText($path,"# stable target`n",[Text.UTF8Encoding]::new($false))
+            & chmod 0644 -- $path
+            if ($LASTEXITCODE -ne 0) { throw "chmod fixture setup failed for $path" }
+            $parentLease = Open-PlatformDirectory -Root $unixRepository -RootOnly
+            try {
+                $expected = Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf 'AGENTS.md' `
+                    -LiteralPath $path -PlatformOs $(if($IsLinux){'linux'}else{'macos'}) -IncludePermissions
+                & chmod 0600 -- $path
+                if ($LASTEXITCODE -ne 0) { throw "chmod drift injection failed for $path" }
+                $actual = Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf 'AGENTS.md' `
+                    -LiteralPath $path -PlatformOs $(if($IsLinux){'linux'}else{'macos'}) -IncludePermissions
+            }
+            finally { $parentLease.Dispose() }
+
+            (Test-ProjectPublicationStateEqual -Actual $actual -Expected $expected) | Should Be $false
         }
     }
 }
