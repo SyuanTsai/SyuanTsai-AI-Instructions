@@ -1041,6 +1041,10 @@ Describe 'SYP214 whole-Skill migration evidence' {
     BeforeEach {
         Import-Module (Join-Path $PSScriptRoot '../scripts/skills-catalog-contract.psm1') -Force
         Import-Module (Join-Path $PSScriptRoot '../scripts/repo-shared-skills-migration.psm1') -Force
+        $platformRuntimePath=Join-Path $PSScriptRoot '../scripts/platform-runtime.psd1'
+        $platformRuntime=Import-Module $platformRuntimePath -Force -PassThru
+        & $platformRuntime.ExportedCommands['Assert-PlatformRuntimeInventory'] -Root (Split-Path -Parent $platformRuntimePath) -ManifestPath $platformRuntimePath | Out-Null
+        Set-RepoSharedSkillsPlatformRuntime -Module $platformRuntime
         $caseRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         $targetRoot = Join-Path $caseRoot 'consumer'
         $userHome = Join-Path $caseRoot 'user'
@@ -1162,10 +1166,14 @@ Describe 'SYP214 whole-Skill migration evidence' {
         @{State='customized'}, @{State='extra-file'}, @{State='tracked'}, @{State='staged'},
         @{State='not-ignored'}, @{State='unknown-ownership'}, @{State='incomplete-source'}, @{State='mixed-source'},
         @{State='newer-unverified-user'}, @{State='legacy-unowned-repo'}, @{State='mixed-version'}, @{State='reparse'}
+        $(if (-not $IsWindows) { @{State='reparse-file'}, @{State='reparse-dangling'} })
     ) {
         param($State)
         # Given
         $locked = $null
+        $reparsePath = $null
+        $reparseTarget = $null
+        $repoBytesBefore = @{}
         $repoFile = Join-Path $targetRoot '.agents/skills/syp214-fixture/SKILL.md'
         $userFile = Join-Path $userHome '.agents/skills/syp214-fixture/SKILL.md'
         $userManifestPath = Join-Path $userHome '.agents/catalog-skills.manifest.json'
@@ -1183,15 +1191,44 @@ Describe 'SYP214 whole-Skill migration evidence' {
             'incomplete-source' { $trusted.files=@($entries[0]) }
             'mixed-source' { $manifest.files[0].sourceId='other-source' }
             'mixed-version' { $manifest.files[0].sourceVersion='different' }
-            'reparse' { New-Item -ItemType Junction -Path (Join-Path (Split-Path $repoFile) 'linked') -Target $userHome | Out-Null }
+            'reparse' {
+                $linkType = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+                $reparsePath = Join-Path (Split-Path $repoFile) 'linked'
+                $reparseTarget = $userHome
+                New-Item -ItemType $linkType -Path $reparsePath -Target $reparseTarget | Out-Null
+            }
+            'reparse-file' {
+                $reparsePath = Join-Path (Split-Path $repoFile) 'linked-file'
+                $reparseTarget = $userFile
+                New-Item -ItemType SymbolicLink -Path $reparsePath -Target $reparseTarget | Out-Null
+            }
+            'reparse-dangling' {
+                $reparsePath = Join-Path (Split-Path $repoFile) 'linked-dangling'
+                $reparseTarget = Join-Path $caseRoot 'missing-link-target'
+                Test-Path -LiteralPath $reparseTarget | Should Be $false
+                New-Item -ItemType SymbolicLink -Path $reparsePath -Target $reparseTarget | Out-Null
+            }
             'newer-unverified-user' { $doc=Get-Content -Raw $userManifestPath|ConvertFrom-Json; foreach($entry in $doc.files){$entry.sourceCommit=('d'*40)}; $doc|ConvertTo-Json -Depth 10|Set-Content $userManifestPath }
             'legacy-unowned-repo' { $manifest.schemaVersion=1 }
+        }
+        if ($State -like 'reparse*') {
+            foreach ($entry in $entries) {
+                $repoBytesBefore[[string]$entry.targetPath] = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot $entry.targetPath)))
+            }
         }
         # When / Then
         try {
             $plan = @(Get-RepoSharedSkillsMigrationPlan -Repository $targetRoot -Manifest $manifest -TrustedSkills @($trusted) -UserHome $userHome)
             $plan[0].removable | Should Be $false
-            $plan[0].reason | Should Not BeNullOrEmpty
+            if ($State -like 'reparse*') {
+                $plan[0].reason | Should Be 'Skill tree contains a reparse point.' # scripts/repo-shared-skills-migration.psm1:238
+                ((Get-Item -Force -LiteralPath $reparsePath).Attributes -band [IO.FileAttributes]::ReparsePoint) | Should Not Be 0
+                foreach ($entry in $entries) {
+                    [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot $entry.targetPath))) | Should Be $repoBytesBefore[[string]$entry.targetPath]
+                }
+                if ($State -eq 'reparse-dangling') { Test-Path -LiteralPath $reparseTarget | Should Be $false }
+            }
+            else { $plan[0].reason | Should Not BeNullOrEmpty }
             Test-Path $repoFile | Should Be $true
             @($plan[0].entries).Count | Should Be 2
         }
@@ -1296,9 +1333,10 @@ Describe 'SYP214 whole-Skill migration evidence' {
 
     # Scenario: Repository and USER roots identify the same physical directory through different path spellings.
     # Purpose: Reject migration eligibility before USER or Git evidence is observed, regardless of lexical or filesystem aliases.
-    It 'InterT40_rejects_<Alias>_Repository_and_USER_roots_before_observation' -TestCases @(
-        @{Alias='identical'},@{Alias='case-only'},@{Alias='trailing-separator'},@{Alias='junction'},@{Alias='subst'}
-    ) {
+    $rootAliasCases=@(@{Alias='identical'},@{Alias='case-only'},@{Alias='trailing-separator'},@{Alias='junction'})
+    # Register only on the native host; SUBST is an intrinsically Windows-only drive-letter alias primitive.
+    if($IsWindows){$rootAliasCases+=@{Alias='subst'}}
+    It 'InterT40_rejects_<Alias>_Repository_and_USER_roots_before_observation' -TestCases $rootAliasCases {
         param($Alias)
         $substAlias=$null
         try {
@@ -1446,6 +1484,8 @@ Describe 'SYP214 whole-Skill migration evidence' {
         # Scenario: Unix root identity validation starts without a caller-provided verified platform runtime.
         # Purpose: Fail closed instead of importing an unverified sibling runtime closure.
         It 'InterT51_rejects_Unix_root_identity_without_an_injected_platform_runtime' {
+            $migrationModule=Get-Module repo-shared-skills-migration
+            & $migrationModule { $script:RepoSharedSkillsPlatformRuntimeModule=$null }
             $unixRepository=Join-Path $caseRoot 'unix-repository'
             $unixUser=Join-Path $caseRoot 'unix-user'
             [void][IO.Directory]::CreateDirectory($unixRepository)
@@ -2250,7 +2290,8 @@ Describe 'SYP214 USER-only bootstrap sync v5 preflight' {
         $result = Invoke-Syp214Bootstrap -RecoverSkillMigration $journalPath -CaptureFailure
 
         $result.exitCode | Should Not Be 0
-        ($result.output -join [Environment]::NewLine) | Should Match 'AI Instructions sync configuration schema version 5 requires a projection-aware installer\.'
+        $normalizedOutput = ((($result.output -join [Environment]::NewLine) -replace '\x1b\[[0-9;?]*[ -/]*[@-~]','') -replace '\x1b','') -replace '(?m)^\s*\|\s?',' ' -replace '\s+',' '
+        $normalizedOutput | Should Match 'AI Instructions sync configuration schema version 5 requires a projection-aware installer\.'
         (Get-Item -LiteralPath $markerPath).Length | Should Be $markerLength
         (Get-FileHash -LiteralPath $markerPath -Algorithm SHA256).Hash | Should Be $markerHash
         (Get-Item -LiteralPath $journalPath).Length | Should Be $journalLength
