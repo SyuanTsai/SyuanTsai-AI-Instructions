@@ -2268,7 +2268,7 @@ function New-GitInfoExcludeSnapshot {
         ProtectedPaths = @()
         PlatformState = $null
     }
-    if ($UsePlatformRuntime) {
+    if ($UsePlatformRuntime -or -not $IsWindows) {
         Import-Module (Join-Path $PSScriptRoot 'ai-instructions-install-transaction.psm1') -Force
         $parent=[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($path));$leaf=[IO.Path]::GetFileName($path)
         $parentLease=Open-PlatformDirectory -Root $parent -RootOnly
@@ -2768,7 +2768,8 @@ function New-TargetMutationSnapshot {
         [Parameter(Mandatory = $true)][string] $TargetRoot,
         [Parameter(Mandatory = $true)][string[]] $RelativePaths,
         [Parameter(Mandatory = $true)][string] $BackupRoot,
-        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @()
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @(),
+        [switch] $UsePlatformRuntime
     )
 
     New-Item -ItemType Directory -Force -Path $BackupRoot | Out-Null
@@ -2810,6 +2811,62 @@ function New-TargetMutationSnapshot {
         $daclRecord = $null
         $readOnly = $false
         $originalIdentity = $null
+        $platformState = $null
+        if ($UsePlatformRuntime -or -not $IsWindows) {
+            Import-Module (Join-Path $PSScriptRoot 'ai-instructions-install-transaction.psm1') -Force
+            $parentPath = [IO.Path]::GetDirectoryName($targetPath)
+            if (Test-Path -LiteralPath $parentPath -PathType Container) {
+                $parentLease = Open-PlatformDirectory -Root $parentPath -RootOnly
+                try {
+                    $leaf = [IO.Path]::GetFileName($targetPath)
+                    $platformOs = if ($IsLinux) { 'linux' } elseif ($IsMacOS) { 'macos' } else { 'windows' }
+                    $platformState = Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf `
+                        -LiteralPath $targetPath -PlatformOs $platformOs -IncludePermissions
+                    if ([bool]$platformState.exists) {
+                        [byte[]]$observedBytes = [IO.File]::ReadAllBytes($targetPath)
+                        $readbackState = Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf `
+                            -LiteralPath $targetPath -PlatformOs $platformOs -IncludePermissions
+                        if (-not (Test-ProjectPublicationStateEqual -Actual $readbackState -Expected $platformState) -or
+                            -not (Test-RepositoryTransactionDisplacedMetadataEqual -Actual $readbackState.permissions -Expected $platformState.permissions) -or
+                            (Get-ByteArraySha256 -Bytes $observedBytes) -cne [string]$platformState.sha256) {
+                            throw "Managed target changed while its platform rollback snapshot was captured: $relativePath"
+                        }
+                        $originalType = 'file'
+                        $backupPath = Join-Path $BackupRoot ('{0:D6}.bin' -f $backupIndex)
+                        [IO.File]::WriteAllBytes($backupPath,$observedBytes)
+                        $backupIndex++
+                    }
+                }
+                finally { $parentLease.Dispose() }
+            }
+            else {
+                $platformState = [pscustomobject][ordered]@{
+                    exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null
+                }
+            }
+            if (-not [bool]$platformState.exists -and (Test-Path -LiteralPath $targetPath)) {
+                throw "Managed target path must be a file or missing: $relativePath"
+            }
+            $fileStates.Add([pscustomobject][ordered]@{
+                RelativePath = $relativePath
+                TargetPath = $targetPath
+                OriginalType = $originalType
+                BackupPath = $backupPath
+                OriginalDacl = $null
+                OriginalReadOnly = $false
+                OriginalIdentity = $null
+                PlatformState = $platformState
+                AppliedFileIdentity = $null
+                MutationApplied = $false
+                AppliedType = $null
+                AppliedBytes = $null
+                Publication = $null
+                PublicationDaclRecord = $null
+                PublicationReadOnly = $false
+                LegacyRecovery = $false
+            })
+            continue
+        }
         if (Test-Path -LiteralPath $targetPath -PathType Leaf) {
             $originalType = 'file'
             $backupPath = Join-Path $BackupRoot ('{0:D6}.bin' -f $backupIndex)
@@ -2846,6 +2903,7 @@ function New-TargetMutationSnapshot {
             OriginalDacl = $daclRecord
             OriginalReadOnly = $readOnly
             OriginalIdentity = $originalIdentity
+            PlatformState = $platformState
             AppliedFileIdentity = $null
             MutationApplied = $false
             AppliedType = $null
@@ -6764,8 +6822,8 @@ try {
         -not ($projectMutationPaths.Count -gt 0 -and [string]$_ -ceq $manifestRelativePath)
     })
     $mutationBackupRoot = Join-Path $workingPath 'target-backup'
-    $mutationSnapshot = New-TargetMutationSnapshot -TargetRoot $targetRootPath -RelativePaths $snapshotMutationPaths -BackupRoot $mutationBackupRoot -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths
-    $excludeSnapshot = New-GitInfoExcludeSnapshot -Repository $targetRootPath -UsePlatformRuntime:($projectMutationPaths.Count -gt 0)
+    $mutationSnapshot = New-TargetMutationSnapshot -TargetRoot $targetRootPath -RelativePaths $snapshotMutationPaths -BackupRoot $mutationBackupRoot -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths -UsePlatformRuntime:(-not $IsWindows)
+    $excludeSnapshot = New-GitInfoExcludeSnapshot -Repository $targetRootPath -UsePlatformRuntime:((-not $IsWindows) -or $projectMutationPaths.Count -gt 0)
     $migrationJournalPath = Join-Path $mutationBackupRoot 'skill-migration.json'
     $migrationGitState = $null
     if (@($skillMigration | Where-Object removable).Count -gt 0) {

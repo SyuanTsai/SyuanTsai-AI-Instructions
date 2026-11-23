@@ -5777,8 +5777,9 @@ Describe 'SYP352 cross-platform and three-AI Standard contract' -Tag 'SYP352' {
         $purposeMatch.Success | Should -Be $true
         $purpose = $purposeMatch.Groups['body'].Value
 
-        $purpose | Should -Match '本機 Agent 開發、安裝、執行、驗證、測試、acceptance 與 CI host \*\*MUST\*\* 支援 Windows、Linux、macOS'
-        $purpose | Should -Match 'WSL 視同 Linux host'
+        $purpose | Should -Match '本機 Agent 開發、安裝、執行、驗證、測試與 acceptance host \*\*MUST\*\* 支援 Windows、Linux、macOS'
+        $purpose | Should -Match 'WSL 不在支援範圍'
+        $purpose | Should -Match '不代表 Linux／macOS 已成為 required checks'
         $purpose | Should -Match '下游產品的 target/deployment OS.*遠端 SaaS'
         $purpose | Should -Match 'owned production Skills.*active.*dormant.*bundled.*Skill-Darktide-Translate'
         $purpose | Should -Match 'Source owner \*\*MUST\*\* 確保 `SKILL\.md` description 與 README 不誤導支援範圍'

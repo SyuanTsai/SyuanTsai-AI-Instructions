@@ -3870,3 +3870,51 @@ $result = [ordered]@{
         }
     }
 }
+
+Describe 'bootstrap Unix snapshot routing contract' {
+    # Scenario: The bootstrap plans only Instructions and therefore has no project Skill mutation.
+    # Purpose: Prove on every test host that Unix snapshot capture cannot fall through to Windows-native metadata APIs.
+    It 'InterT120_routes_non_Windows_target_and_exclude_snapshots_through_the_platform_runtime' {
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path -LiteralPath $script:BootstrapScript).Path,
+            [ref]$tokens,
+            [ref]$parseErrors)
+        @($parseErrors).Count | Should Be 0
+
+        $functions = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+        }, $true))
+        foreach ($functionName in @('New-TargetMutationSnapshot','New-GitInfoExcludeSnapshot')) {
+            $function = @($functions | Where-Object Name -CEQ $functionName)
+            $function.Count | Should Be 1
+            $functionText = [string]$function[0].Extent.Text
+            $functionText | Should Match '\[switch\]\s*\$UsePlatformRuntime'
+            $functionText | Should Match 'PlatformState'
+
+            $platformBranches = @($function[0].FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                    $node.Clauses.Count -gt 0 -and
+                    [string]$node.Clauses[0].Item1.Extent.Text -match '\$UsePlatformRuntime'
+            }, $true))
+            $platformBranches.Count | Should Be 1
+            $platformText = [string]$platformBranches[0].Clauses[0].Item2.Extent.Text
+            $platformText | Should Match 'Open-PlatformDirectory'
+            $platformText | Should Match 'Get-AiInstructionsInstallFileState'
+            $platformText | Should Not Match 'NativeFileMutation'
+        }
+
+        foreach ($commandName in @('New-TargetMutationSnapshot','New-GitInfoExcludeSnapshot')) {
+            $productionCalls = @($ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandAst] -and
+                    [string]$node.GetCommandName() -ceq $commandName
+            }, $true))
+            $productionCalls.Count | Should Be 1
+            [string]$productionCalls[0].Extent.Text | Should Match '-UsePlatformRuntime:\s*\(\s*(?:\(\s*)?-not\s+\$IsWindows\s*\)'
+        }
+    }
+}

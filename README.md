@@ -9,10 +9,10 @@
 **How it works**
 - One common instruction source generates the Codex, GitHub Copilot and Claude variants, so the three tools follow the same rules.
 - The Skills catalog points to separate Skill repositories ([Skill-General](https://github.com/SyuanTsai/Skill-General), Skill-Atlassian-Ecosystem, Skill-Code-Collaboration, Skill-Knowledge-Content) and locks each one to a commit SHA and content hash.
-- A bootstrap fans the instruction files out into product repositories. Shared Skills are installed once per user under `~/.agents/skills` by default; on Windows, an explicit `-WriterSchema V3V5` opt-in also projects the same managed bytes to `~/.claude/skills` and manages the repository-instructions section in `~/.claude/CLAUDE.md`. Later `Auto` installs and updates preserve that v3/v5 selection and any config-v5 capability evidence declared with `-CapabilityEvidence` (or the legacy environment variable); `state: "absent"` explicitly revokes a capability, while `-ClearCapabilityEvidence` clears stored evidence. When connector or environment evidence is unknown, a capability-gated Skill already listed in the managed USER manifest is preserved and updated with a warning; a fresh install still filters it. Unmanaged differing bytes fail with `unmanaged-collision` and must be backed up and moved manually; Linux and macOS projection remain unsupported under SYP-508. A verified v3/v5 runtime may additionally project Skills into explicitly selected project roots. That project selection is global and applies to every consumer repository not covered by an exclusion. Updates are checked and reported, not silently auto-installed.
+- A bootstrap fans the instruction files out into product repositories on Windows, Linux and macOS. Shared Skills are installed once per user under `~/.agents/skills` by default; the optional V3V5 USER projection remains Windows-only and also projects the same managed bytes to `~/.claude/skills` while managing the repository-instructions section in `~/.claude/CLAUDE.md`. Later `Auto` installs and updates preserve that v3/v5 selection and any config-v5 capability evidence declared with `-CapabilityEvidence` (or the legacy environment variable); `state: "absent"` explicitly revokes a capability, while `-ClearCapabilityEvidence` clears stored evidence. When connector or environment evidence is unknown, a capability-gated Skill already listed in the managed USER manifest is preserved and updated with a warning; a fresh install still filters it. Unmanaged differing bytes fail with `unmanaged-collision` and must be backed up and moved manually. A verified v3/v5 runtime may additionally project Skills into explicitly selected project roots. That project selection is global and applies to every consumer repository not covered by an exclusion. Updates are checked and reported, not silently auto-installed.
 - CI validates contracts and runs security scanning on Skills before anything is published.
 
-**Who it's for:** engineers who want repeatable, reviewable AI-assisted workflows. Local tooling is Windows-only (see below).
+**Who it's for:** engineers who want repeatable, reviewable AI-assisted workflows on Windows, Linux or macOS. WSL is not supported.
 
 ## 概覽
 
@@ -23,16 +23,16 @@
 **運作方式**
 - 由同一份共用指令產生 Codex、GitHub Copilot、Claude 三種版本，三個工具遵循相同規則。
 - Skills 目錄指向獨立的 Skill Repository（[Skill-General](https://github.com/SyuanTsai/Skill-General)、Skill-Atlassian-Ecosystem、Skill-Code-Collaboration、Skill-Knowledge-Content），並以 commit SHA 與內容雜湊鎖定版本。
-- bootstrap 將指令檔分發到各產品 Repository；共用 Skills 預設由獨立 updater 安裝在使用者層級的 `~/.agents/skills`。在 Windows 上明確使用 `-WriterSchema V3V5` 選擇啟用後，同一份受管 bytes 也會投影到 `~/.claude/skills`，並管理 `~/.claude/CLAUDE.md` 的 Repository Instructions 區段；後續 `Auto` 安裝與更新會沿用 v3/v5，以及透過 `-CapabilityEvidence`（或舊環境變數介面）寫入 config v5 的能力證據。`state: "absent"` 可明確撤銷能力，`-ClearCapabilityEvidence` 可清除已存證據；connector／environment 證據未知時，受管 USER manifest 已列出的 capability-gated Skill 會保留、更新並提示，但全新安裝仍會過濾。若未受管的同名檔案 bytes 不同，會以 `unmanaged-collision` 拒絕，必須由使用者先備份並移開；Linux 與 macOS 投影仍由 SYP-508 處理、目前不支援。通過驗證的 v3/v5 runtime 可再把 Skills 投影到明確選取的 project roots；這是全域 opt-in，會套用到所有未排除的 consumer Repository。有新版本時只檢查並通知，不會自動悄悄安裝。
+- bootstrap 在 Windows、Linux 與 macOS 將指令檔分發到各產品 Repository；共用 Skills 預設由獨立 updater 安裝在使用者層級的 `~/.agents/skills`。選用的 V3V5 USER projection 仍只支援 Windows；啟用後，同一份受管 bytes 也會投影到 `~/.claude/skills`，並管理 `~/.claude/CLAUDE.md` 的 Repository Instructions 區段。後續 `Auto` 安裝與更新會沿用 v3/v5，以及透過 `-CapabilityEvidence`（或舊環境變數介面）寫入 config v5 的能力證據。`state: "absent"` 可明確撤銷能力，`-ClearCapabilityEvidence` 可清除已存證據；connector／environment 證據未知時，受管 USER manifest 已列出的 capability-gated Skill 會保留、更新並提示，但全新安裝仍會過濾。若未受管的同名檔案 bytes 不同，會以 `unmanaged-collision` 拒絕，必須由使用者先備份並移開。通過驗證的 v3/v5 runtime 可再把 Skills 投影到明確選取的 project roots；這是全域 opt-in，會套用到所有未排除的 consumer Repository。有新版本時只檢查並通知，不會自動悄悄安裝。
 - 發布前由 CI 驗證契約，並對 Skills 執行安全掃描。
 
-**適用對象：** 想要可重複、可審查的 AI 輔助開發流程的工程師。本機工具僅支援 Windows（詳見下方）。
+**適用對象：** 想要在 Windows、Linux 或 macOS 使用可重複、可審查 AI 輔助開發流程的工程師；不支援 WSL。
 
 ---
 
 這個 Repository 是個人 Codex／GitHub Copilot Instructions、Skills Catalog 與安裝 runtime 的 canonical source。共用 Agent Skills 只由 Catalog 指向的 external repositories 提供，本 Repository 不保存 Skill source 副本。
 
-本 Repository 與採用其共用 AI-Instructions／Skills runtime 的消費 Repository，其本機 Agent 開發、安裝、執行、驗證、測試、acceptance 與 CI host 僅支援 Windows；Linux、macOS 與 WSL 不支援。此限制不涵蓋下游產品的 target／deployment OS，也不限制核准 connector 背後遠端 SaaS 的服務 OS。
+本 Repository 與採用其共用 AI-Instructions／Skills runtime 的消費 Repository，其本機 Agent 開發、安裝、執行、驗證、測試與 acceptance 支援 Windows、Linux 及 macOS；不支援 WSL。這項 host 範圍不涵蓋下游產品的 target／deployment OS，也不限制核准 connector 背後遠端 SaaS 的服務 OS。Required CI 的目前實作範圍另見測試章節，不以支援範圍推導 required checks。
 
 目前 runtime 採用 branch-independent 的個人本機 artifacts 模型：fan-out 到產品 Repository 的 `AGENTS.md`、`.codex/AI-Rules/**`、GitHub Copilot Instructions 與 manifest 會存在 working tree、套用於所有 branch，但由 `.git/info/exclude` 排除。一般同步不會替產品 Repository stage 或 commit；只有偵測到歷史上已 tracked 的 reserved Agent artifacts 時，會建立一次性的隔離本機 remediation commit。Bootstrap 永遠不會 push 產品 Repository。共用 Catalog Skills 預設只由 USER updater 安裝／更新至 `~/.agents/skills/**`；USER 缺少或不可用也不回退 REPO。只有通過 v3/v5 gate 且 `projections.project` 明確非空時，project-scope durable transaction 才會從同一 immutable Catalog source 寫入 `.agents/skills/**`、`.claude/skills/**` 或 `.github/skills/**`。這個設定是全域 opt-in，會套用到所有未排除的 consumer Repository；專案自有 Skills 永遠保留。若任何選定的 project Skill 與 tracked、staged、unmanaged、drift 或 reparse 內容衝突，bootstrap 會在任何 mutation 前整筆拒絕，Instructions 也不更新；請移除或改名專案自有 Skill，或將該 Skill 從 `projections.project` 移除後重試。「只拒絕 project transaction、Instructions 仍完成」保留為 follow-up，不屬目前發布模型。
 
@@ -136,7 +136,7 @@ Bootstrap 會自動修復：
 
 ## 新電腦安裝
 
-需求：Windows、PowerShell 7 最新穩定版、Git，以及可存取 canonical GitHub Repository 與 Catalog 選中的 external repositories。
+需求：Windows、Linux 或 macOS（不含 WSL）、PowerShell 7 最新穩定版、Git，以及可存取 canonical GitHub Repository 與 Catalog 選中的 external repositories。
 
 ### 已知限制
 
@@ -202,7 +202,7 @@ Move-Item -LiteralPath (Join-Path $HOME '.claude\skills\<skill-id>') `
   -Destination (Join-Path $HOME '.claude\<skill-id>.manual')
 ```
 
-Linux 與 macOS 的 V3V5 projection runtime 尚未支援，會回 `projection-runtime-unavailable`；跨平台支援追蹤於 SYP-508。
+Linux 與 macOS 的 V3V5 USER projection runtime 尚未支援，會回 `projection-runtime-unavailable`；這不影響 installer、bootstrap 與基礎 USER runtime 的三平台支援。WSL 不支援。
 
 安裝會以 transaction 更新：
 
@@ -363,9 +363,9 @@ $codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
 
 JSON 結果固定包含 `outcome` 與 `exitCode`：`0` 表示成功或目前已一致、`1` 表示失敗、`2` 表示 VerifyOnly 偵測到 drift、`3` 表示同一使用者已有更新程序持有 global lock。
 
-## 雲端／Linux setup（SYP-354 過渡期、未列入支援矩陣）
+## Linux／macOS setup
 
-這是 SYP-354 過渡期、給可拋棄雲端環境使用的 setup，**未列入支援矩陣**。上方「本機工具僅支援 Windows」的限制維持不變；這裡不授權一般 Linux／macOS／WSL 本機安裝或使用。P10a 只做到「取得並驗證 canonical pwsh」，S7～S9（runtime 安裝、USER projections、readiness）由 P10b 接線，目前在 receipt 中標為 `not-implemented-until-p10b`。
+這個 setup entry point 支援 Linux 與 macOS（不含 WSL），用於取得並驗證 canonical pwsh。它目前仍只完成 P10a 範圍；S7～S9（runtime 安裝、USER projections、readiness）由 P10b 接線，receipt 會如實標為 `not-implemented-until-p10b`，不應把 setup 的成功誤解為這三個步驟已完成。
 
 取得方式：以 git clone 取得 Repository，checkout 固定的 full commit SHA，並把同一個 SHA 傳給 `--expected-commit`。Setup 會先以自包含 verifier、在停用 Git replace objects 的情況下確認 `HEAD` 等於該值；六個 setup 檔案及 `scripts/platform-runtime.psd1` 宣告的完整 platform runtime closure，逐檔比較 expected commit blob、stage-zero index blob 與 `hash-object --no-filters` 的 raw worktree blob。這條路徑不執行 repository-local filter、textconv、diff driver、hook 或 fsmonitor；完成前不載入 Repository module。
 
@@ -377,9 +377,16 @@ sh scripts/setup-agent-environment.sh --expected-commit <同一個 SHA> --prepar
 sh scripts/setup-agent-environment.sh --expected-commit <同一個 SHA> --offline
 ```
 
+若 clone 建立於 `.gitattributes` 強制 setup／platform runtime 檔案使用 LF 之前，舊的 CRLF working-tree bytes 會造成 hash mismatch。先 commit 或完整備份所有本機變更，確認 working tree／index 可被覆寫後，再依目前 attributes 從 index 重新展開：
+
+```sh
+git add --renormalize .
+git checkout-index --force --all
+```
+
 - `--prepare`：允許網路。依 `scripts/setup-agent-environment.policy.tsv`（由 `setup-agent-environment.policy.json` 衍生）只以 https、TLS 1.2 以上與逾時限制下載官方 PowerShell 7.6.6 release asset。下載、雜湊與解壓只使用本次執行的私有 snapshot；取得 setup lock 後才以 WAL 發布 `0600` shared cache。第一次以 create-only rename 發布不可預測的 canonical pwsh 目錄，durably flush `pwsh/` parent 並 read back 確認結果後，才開始發布 pointer receipt；之後重跑只重驗 receipt 指向的目錄，不重新安裝。結果為 `prepared-runtime-only`。
 - `--offline`：不連網，只讀 cache 並重驗既有 canonical pwsh；cache 必須是目前 uid 擁有、link count 1、`0600` 的一般檔案。Setup 會以 no-follow 方式複製到本次 private temp snapshot，後續 hash、解壓與 PowerShell handoff 只使用該 snapshot。cache 缺少、metadata／hash 不符或尚未 `--prepare` 都會以 typed exit code 失敗，不做任何更新。結果為 `verified-runtime-only`。
-- Setup root 固定為 `$HOME/.local/share/ai-instructions-setup`（不讀 XDG）：`cache/` 放已驗證的 archive，`pwsh/<version>-<rid>-<random>/` 放 immutable canonical pwsh attempt，`receipts/runtime-<version>-<rid>.json` 是唯一 current pointer，另有 `setup-receipt.json`（`0600`）。`tmp/run.<pid>.<random>/` 只屬於單次執行；結束時只會 best-effort 移除本次已知檔案與空目錄，不遞迴刪除、掃描或接管舊 tmp tree。強制終止可能留下私有 tmp 或未被 receipt 指向的 runtime orphan；此過渡 setup 只供一次性可拋棄 cloud HOME 使用，必要時直接丟棄整個環境，不要用自動清理猜測 ownership。重驗失敗時 fail closed，不會自動重裝；同時執行時以 setup lock 序列化，被占用時回 `concurrent`，結束時不持有 lock。
+- Setup root 固定為 `$HOME/.local/share/ai-instructions-setup`（不讀 XDG）：`cache/` 放已驗證的 archive，`pwsh/<version>-<rid>-<random>/` 放 immutable canonical pwsh attempt，`pwsh-tmp/` 是 pwsh hand-off 使用、持久存在且會驗證 owner 與 `0700` mode 的 private `TMPDIR`，`receipts/runtime-<version>-<rid>.json` 是唯一 current pointer，另有 `setup-receipt.json`（`0600`）。`tmp/run.<pid>.<random>/` 只屬於單次執行；結束時只會 best-effort 移除本次已知檔案與空目錄，不遞迴刪除、掃描或接管舊 tmp tree。強制終止可能留下私有 tmp 或未被 receipt 指向的 runtime orphan；不要用自動清理猜測 ownership。重驗失敗時 fail closed，不會自動重裝；同時執行時以 setup lock 序列化，被占用時回 `concurrent`，結束時不持有 lock。
 - Receipt 同時以單行 JSON 輸出到 stdout，欄位含 `schemaVersion`、`result`、`code`、`exitCode`、OS／architecture／RID、`setupCommit`、`runtimeCommit`（P10a 固定為 `null`）、policy hash、pwsh 路徑與 version、.NET version、capability 名稱與狀態，以及 S5～S9 步驟狀態。路徑一律寫成 `~/...`，不含使用者名稱、token 或 site。
 - `CODEX_HOME` 只在 setup 的 process scope 設為 `~/.codex`；外部已設成其他值時回 `codex-home-conflict`。`CODEX_HOME` 或 `$HOME` 下若有中斷的 install／agent-environment transaction，setup 回 `interrupted-install` 並附上 recover 指令，不會自動 recover。Setup 自己在 publication swap 留下的 durable journal 則會在取得 setup lock 後依 recorded state 安全完成或回復；無法證明狀態時同樣 fail closed。
 - Windows 也可直接執行 `pwsh -NoProfile -NonInteractive -File scripts/setup-agent-environment.ps1 -Prepare|-Offline -ExpectedCommit <SHA> -ArchivePath <本機 zip>`。zip 必須是 policy 指定的官方 asset（例如 `PowerShell-7.6.6-win-x64.zip`），由使用者自行從 PowerShell 官方 GitHub release 下載；policy 就是同一個 commit 的 `scripts/setup-agent-environment.policy.json`，setup 會驗證檔名與 SHA-256。
@@ -405,7 +412,7 @@ Durability closure rule：任何 commit marker（`journal.json`、runtime pointe
 - 祖先目錄不得為 symbolic link，且須屬於 root 或目前使用者、不可 group／other 寫入（sticky 例外）。macOS 的 `/var` 等 symlink 祖先，以及 Fedora Atomic 的 `/home` → `/var/home`，會被拒絕。
 - A1：Unix 的保證是 cooperative lock、不跟隨 link 與重驗；同帳號、不遵守 lock 的惡意 writer 不在保證範圍內。
 - P8：所有 projection root 與 USER home 必須在同一個 filesystem；setup 的暫存與 cache 也放在 setup root 底下以便同 filesystem `mv`。
-- Setup native tests 已在 GitHub Actions `ubuntu-26.04`（x64）與 `macos-26-arm64` 的 Unix probe 各通過 59/59。其他 RID（例如 linux-arm64、osx-x64）尚未實跑；D9 的真實雲端 acceptance 屬於 P10b，這些 probe 結果也不是正式支援矩陣。musl 系統回 `unsupported-platform`。canonical pwsh 需要系統已有其執行依賴（例如 ICU）；setup 不安裝系統套件，也不轉傳 `DOTNET_*` 等 loader／runtime 變數。
+- Setup native tests 已在 GitHub Actions `ubuntu-26.04`（x64）與 `macos-26-arm64` 的 Unix probe 各通過 59/59。其他 RID（例如 linux-arm64、osx-x64）尚未實跑；這些 probe 是目前的 CI 證據，不代表 Linux／macOS 已成為 required checks。D9 的真實雲端 acceptance 屬於 P10b。musl 系統回 `unsupported-platform`。canonical pwsh 需要系統已有其執行依賴（例如 ICU）；setup 不安裝系統套件，也不轉傳 `DOTNET_*` 等 loader／runtime 變數。
 
 Typed exit code（shell 與 PowerShell 共用，定義在 `scripts/agent-environment-setup.psm1`）：
 
@@ -433,9 +440,9 @@ Typed exit code（shell 與 PowerShell 共用，定義在 `scripts/agent-environ
 | 27 | `interrupted-install` | `CODEX_HOME` 或 `$HOME` 有中斷的 transaction／legacy residue |
 | 28 | `codex-home-conflict` | `CODEX_HOME` 已設成 `~/.codex` 以外的值 |
 
-## Cloud/Linux setup (SYP-354 transitional, outside the support matrix)
+## Linux/macOS setup
 
-This setup exists only for disposable cloud environments during the SYP-354 transition and is **not part of the support matrix**. The Windows-only local tooling statement above still applies; this section does not authorize general Linux, macOS or WSL local installation or use. P10a stops once a canonical pwsh is acquired and verified; S7-S9 (runtime install, USER projections, readiness) are wired in P10b and are reported as `not-implemented-until-p10b` in the receipt.
+This setup entry point supports Linux and macOS, but not WSL, for acquiring and verifying the canonical pwsh. It still implements only the P10a scope; S7-S9 (runtime install, USER projections and readiness) belong to P10b and are reported accurately as `not-implemented-until-p10b`. A successful setup receipt must not be read as evidence that those three steps ran.
 
 How to obtain it: git clone the repository, check out a fixed full commit SHA, and pass the same SHA to `--expected-commit`. Before importing any repository module, a self-contained verifier disables Git replace objects and checks that `HEAD` equals that commit. For each of the six setup files and every member of the complete platform runtime closure declared by `scripts/platform-runtime.psd1`, it directly compares the expected commit blob, the stage-zero index blob, and the raw worktree blob from `hash-object --no-filters`. This path does not execute repository-local filters, textconv, diff drivers, hooks, or fsmonitor.
 
@@ -447,9 +454,16 @@ sh scripts/setup-agent-environment.sh --expected-commit <same SHA> --prepare
 sh scripts/setup-agent-environment.sh --expected-commit <same SHA> --offline
 ```
 
+Clones created before `.gitattributes` enforced LF for setup and platform-runtime files can retain CRLF working-tree bytes and fail the raw-blob hash check. Commit or fully back up local changes first and make sure the worktree and index may be overwritten, then refresh the checkout under the current attributes:
+
+```sh
+git add --renormalize .
+git checkout-index --force --all
+```
+
 - `--prepare` may use the network. It downloads the official PowerShell 7.6.6 release asset named by `scripts/setup-agent-environment.policy.tsv` (derived from `setup-agent-environment.policy.json`) over https with TLS 1.2+ and timeouts. Downloading, hashing and extraction use only a private per-run snapshot; the `0600` shared cache is published through the WAL only after setup-lock acquisition. The first run uses a create-only rename for an unpredictable canonical pwsh directory, durably flushes the `pwsh/` parent, and reads back the result before pointer-receipt publication can begin. Reruns only re-verify the receipt-named directory and never reinstall. Result: `prepared-runtime-only`.
 - `--offline` never uses the network. The cache must be a regular file owned by the current uid, with link count 1 and mode `0600`. Setup makes a no-follow copy into its private per-run temp snapshot; all subsequent hashing, extraction and PowerShell handoff use only that snapshot. A missing cache, invalid metadata, a hash mismatch or a missing `--prepare` is a typed failure with no update. Result: `verified-runtime-only`.
-- The setup root is fixed at `$HOME/.local/share/ai-instructions-setup` (XDG is not read): `cache/` holds verified archives, `pwsh/<version>-<rid>-<random>/` immutable canonical pwsh attempts, and `receipts/runtime-<version>-<rid>.json` is the only current pointer alongside `setup-receipt.json` (`0600`). `tmp/run.<pid>.<random>/` belongs only to one invocation; the exit trap best-effort removes known files and empty directories from that invocation, but never recursively deletes, scans or adopts an older tmp tree. Forced termination can leave private tmp or a runtime orphan not named by a receipt. This transitional setup is only for a single-use disposable cloud HOME: discard the environment when needed instead of guessing ownership during automated cleanup. A failed re-verification fails closed without reinstalling. Concurrent runs are serialized by the setup lock and a busy lock returns `concurrent`; no lock is held after exit.
+- The setup root is fixed at `$HOME/.local/share/ai-instructions-setup` (XDG is not read): `cache/` holds verified archives, `pwsh/<version>-<rid>-<random>/` immutable canonical pwsh attempts, `pwsh-tmp/` is the persistent private `TMPDIR` for the pwsh hand-off with owner and `0700` mode checks, and `receipts/runtime-<version>-<rid>.json` is the only current pointer alongside `setup-receipt.json` (`0600`). `tmp/run.<pid>.<random>/` belongs only to one invocation; the exit trap best-effort removes known files and empty directories from that invocation, but never recursively deletes, scans or adopts an older tmp tree. Forced termination can leave private tmp or a runtime orphan not named by a receipt; automated cleanup must not guess ownership. A failed re-verification fails closed without reinstalling. Concurrent runs are serialized by the setup lock and a busy lock returns `concurrent`; no lock is held after exit.
 - The receipt is also printed to stdout as one JSON line with `schemaVersion`, `result`, `code`, `exitCode`, OS/architecture/RID, `setupCommit`, `runtimeCommit` (always `null` in P10a), the policy hash, pwsh path and version, .NET version, capability names and statuses, and the S5-S9 step states. Paths are always `~/...`; no user name, token or site is recorded.
 - `CODEX_HOME` is set to `~/.codex` for the setup process scope only; a different pre-set value returns `codex-home-conflict`. An interrupted install or agent-environment transaction under `CODEX_HOME` or `$HOME` returns `interrupted-install` with a recover command; setup never recovers those external transactions automatically. A durable journal left by setup's own publication swap is safely completed or rolled back under the setup lock according to its recorded state; an unprovable state still fails closed.
 - On Windows run `pwsh -NoProfile -NonInteractive -File scripts/setup-agent-environment.ps1 -Prepare|-Offline -ExpectedCommit <SHA> -ArchivePath <local zip>`. The zip must be the official asset named by the policy (for example `PowerShell-7.6.6-win-x64.zip`), downloaded by the user from the official PowerShell GitHub release; the policy is `scripts/setup-agent-environment.policy.json` at the same commit, and setup verifies the file name and SHA-256.
@@ -475,7 +489,7 @@ Known limitations:
 - Ancestor directories must not be symbolic links, must be owned by root or the current user, and must not be group/other writable unless sticky. macOS symlinked ancestors such as `/var` and Fedora Atomic `/home` → `/var/home` are refused.
 - A1: on Unix the guarantee is a cooperative lock, no link following and re-verification; a same-account malicious writer that ignores the lock is out of scope.
 - P8: all projection roots and the USER home must share one filesystem; the setup temp and cache also live under the setup root so `mv` stays on one filesystem.
-- The setup native tests passed 59/59 in Unix probes on GitHub Actions `ubuntu-26.04` (x64) and `macos-26-arm64`. Other RIDs (for example linux-arm64 and osx-x64) have not run; real cloud acceptance under D9 belongs to P10b, and these probe results are not a formal support matrix. musl systems return `unsupported-platform`. The canonical pwsh needs its system runtime dependencies (for example ICU); setup installs no system packages and never forwards loader/runtime variables such as `DOTNET_*`.
+- The setup native tests passed 59/59 in Unix probes on GitHub Actions `ubuntu-26.04` (x64) and `macos-26-arm64`. Other RIDs (for example linux-arm64 and osx-x64) have not run. These probes are current CI evidence; they do not make Linux/macOS required checks. Real cloud acceptance under D9 belongs to P10b. musl systems return `unsupported-platform`. The canonical pwsh needs its system runtime dependencies (for example ICU); setup installs no system packages and never forwards loader/runtime variables such as `DOTNET_*`.
 
 Typed exit codes (shared by the shell and PowerShell entry points, defined in `scripts/agent-environment-setup.psm1`):
 
@@ -568,4 +582,4 @@ Runtime／Instructions／選取的 Skill 會遞送來源版本的授權文件、
 - `scripts/ai-instructions-rollout.psm1`、`scripts/invoke-ai-instructions-rollout.ps1`：fixed-drive Repository discovery、逐 Repo bootstrap、post-scan 與結構化 rollout report。
 - `scripts/cleanup-ai-instructions-pollution.ps1`：舊 runtime 使用的明確授權 tracked pollution 診斷／cleanup。
 - `catalog/`：schemas、examples、Catalog、source pins 與 Lock。
-- `tests/`：Windows PowerShell 7 Pester suites。
+- `tests/`：PowerShell 7 Pester suites；目前 required CI 的實際平台範圍如上所述。

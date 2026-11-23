@@ -529,6 +529,9 @@ Describe 'AI instructions runtime contracts' {
             (Join-Path $runtimeRoot 'bootstrap-ai-instructions.ps1'),
             "Write-Output 'example'`n",
             $utf8NoBom)
+        [System.IO.File]::WriteAllBytes(
+            (Join-Path $runtimeRoot 'bootstrap-section.md'),
+            [System.IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions\common\bootstrap-section.md')))
 
         { Assert-AiInstructionsSyncConfigurationV4 -Configuration $configuration } | Should Not Throw
         { Assert-AiInstructionsRuntimeBundleV2 -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot } |

@@ -48,7 +48,7 @@
 
 Standard v1 適用於由 SyuanTsai 維護、可被 Claude Code / GitHub Copilot / Codex 等 host 安裝或執行的 Agent Skill source repositories。
 
-Tracking: `SYP-352`。本次規範要求支援 Windows、Linux、macOS（WSL 視同 Linux），三 AI 共用 canonical source 與一致的 instructions；環境區隔依 Standard §15.1，平台路徑／鎖／程序安全依 §8.4。文件修訂不表示 runtime／tests／CI 已完成；Consumer 的舊 pin 不追溯變更，升級 pin 時必須同時採用 SYP-353 三平台 matrix 與完整 leg 聚合。本 authority repository 自身 CI 依 Standard §18.1.1 過渡，追蹤 SYP-353／SYP-354；目前兩個 required contexts 都仍只有 Windows 平台，Windows Core context 由多個內部 Windows jobs 彙總，不宣稱已通過三平台驗證。SkillSpector 僅可依 §9.1.1 的實測證據將非 Windows 步驟列為非必要，不得偽報 PASS。
+Tracking: `SYP-352`。本次規範要求支援 Windows、Linux、macOS（不含 WSL），三 AI 共用 canonical source 與一致的 instructions；環境區隔依 Standard §15.1，平台路徑／鎖／程序安全依 §8.4。文件修訂不表示 runtime／tests／CI 已完成；Consumer 的舊 pin 不追溯變更，升級 pin 時必須同時採用 SYP-353 三平台 matrix 與完整 leg 聚合。本 authority repository 自身 CI 依 Standard §18.1.1 過渡，追蹤 SYP-353／SYP-354；目前兩個 required contexts 都仍只有 Windows 平台，Windows Core context 由多個內部 Windows jobs 彙總，不宣稱 Linux／macOS 已成為 required checks。SkillSpector 僅可依 §9.1.1 的實測證據將非 Windows 步驟列為非必要，不得偽報 PASS。
 
 本 authority repository 的目前 CI／支援驗證狀態如下；目標為三平台 Core／Install Smoke matrix，後續更新 **MUST** 反映實際採用與驗證證據：
 

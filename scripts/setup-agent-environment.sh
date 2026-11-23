@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: 2026 SyuanTsai
 # SPDX-License-Identifier: Apache-2.0
 #
-# SYP-354 P10a disposable cloud setup: POSIX shell edge (S1-S4) only.
-# Transitional and outside the support matrix; see README "Cloud/Linux setup".
+# SYP-354 P10a Linux/macOS setup: POSIX shell edge (S1-S4) only.
+# Linux and macOS are supported hosts; WSL is not. See README "Linux/macOS setup".
 #
 #   sh scripts/setup-agent-environment.sh --expected-commit <40-hex> (--prepare | --offline)
 #
