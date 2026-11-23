@@ -4,11 +4,15 @@
   "commit": "89abcdef0123456789abcdef0123456789abcdef",
   "acquisition": "github-codeload",
   "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "inventorySha256": "eeeff805b7cc30cbd14f30635843059c82686f4629688240133b3199a8ba476d",
+  "inventorySha256": "3daafa37c4633654ab488f8209425088037441ff08fbc914b2a5b823a934465a",
   "inventory": [
     {
       "path": "bootstrap-ai-instructions.ps1",
       "sha256": "955cb40149878eb6105db4b6770aa1134abac99d79c17b78d2f1790d4d2c945f"
+    },
+    {
+      "path": "bootstrap-section.md",
+      "sha256": "d021e5c3e30abe71f12924e240c4ec53a5e0361d110c99ea4ff18e56bfd06784"
     }
   ]
 }

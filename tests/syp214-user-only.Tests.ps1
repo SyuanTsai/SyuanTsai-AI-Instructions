@@ -1595,6 +1595,40 @@ function Test-Syp214RawDaclRecordEqual {
         (ConvertFrom-FileDaclJournalRecord $Left),(ConvertFrom-FileDaclJournalRecord $Right))
 }
 
+function Open-Syp214UserCoordinationLock {
+    param([Parameter(Mandatory=$true)][string]$UserHome)
+    $lockPath=Join-Path $UserHome '.agents/update-agent-environment.lock'
+    if($IsWindows){
+        return [pscustomobject]@{Stream=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);Guard=$null}
+    }
+    $runtime=Import-Module (Join-Path $script:RepositoryRoot 'scripts/platform-runtime.psd1') -Force -PassThru
+    $guard=& $runtime.ExportedCommands['Open-PlatformDirectory'] -Root $UserHome -RelativePath '.agents'
+    try{
+        $stream=& $runtime.ExportedCommands['Enter-PlatformLock'] -ParentLease $guard -Leaf 'update-agent-environment.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+        return [pscustomobject]@{Stream=$stream;Guard=$guard}
+    }
+    catch{$guard.Dispose();throw}
+}
+
+function Close-Syp214UserCoordinationLock {
+    param([AllowNull()][object]$Lock)
+    if($null-eq$Lock){return}
+    if($null-ne$Lock.Stream){$Lock.Stream.Dispose()}
+    if($null-ne$Lock.Guard){$Lock.Guard.Dispose()}
+}
+
+function Get-Syp214UnixFileState {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $transactionModule=Import-Module (Join-Path $script:RepositoryRoot 'scripts/ai-instructions-install-transaction.psm1') -Force -PassThru
+    $parent=Open-PlatformDirectory -Root (Split-Path -Parent $Path) -RootOnly
+    try{
+        return & $transactionModule.ExportedCommands['Get-AiInstructionsInstallFileState'] `
+            -ParentLease $parent -Leaf (Split-Path -Leaf $Path) -LiteralPath $Path `
+            -PlatformOs $(if($IsLinux){'linux'}else{'macos'}) -IncludePermissions
+    }
+    finally{$parent.Dispose()}
+}
+
 Describe 'SYP214 generic managed Instructions deletion recovery' {
     BeforeAll {
         $fixtureRoot=Join-Path $TestDrive 'generic-unified';$baselineSource=Join-Path $fixtureRoot 'baseline-source';$changedSource=Join-Path $fixtureRoot 'changed-source'
@@ -1645,11 +1679,33 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
         (&$script:Syp214Recover).exitCode|Should Not Be 0;[Convert]::ToBase64String([IO.File]::ReadAllBytes($targetPath))|Should Be ([Convert]::ToBase64String($originalTarget))
         (Test-Syp214UnifiedStateEqual $before (Get-Syp214FixtureSnapshot $targetRoot $userHome $script:Syp214GenericEntries))|Should Be $true
     }
+    if(-not$IsWindows){
+    # Scenario: A Unix remove-file redo is interrupted before its displaced-after metadata is journaled.
+    # Purpose: Trust only the undo receipt, restore the prepared mode/uid/gid, and remove all transaction residue.
+    It 'InterT15_restores_Unix_remove_file_metadata_without_journaled_displaced_after_metadata' {
+        [IO.File]::SetUnixFileMode($targetPath,[IO.UnixFileMode]416)
+        $beforeState=Get-Syp214UnixFileState $targetPath
+        [string]$beforeState.permissions.mode|Should Be '640'
+        $op=$script:Syp214GenericOperations.remove
+
+        (&$script:Syp214Run "after-operation-$($op.sequence)-before-journal").exitCode|Should Not Be 0
+        $txn=Get-Syp214UnifiedTransactionFixture $targetRoot
+        $journalOperation=@($txn.journal.operations|Where-Object sequence -eq $op.sequence)[0]
+        [string]$journalOperation.state|Should Be 'pending'
+        ($null-eq$journalOperation.displacedAfterMetadata)|Should Be $true
+
+        (&$script:Syp214Recover).exitCode|Should Not Be 0
+        $afterState=Get-Syp214UnixFileState $targetPath
+        foreach($name in @('mode','uid','gid')){[string]$afterState.permissions.$name|Should Be ([string]$beforeState.permissions.$name)}
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($targetPath))|Should Be ([Convert]::ToBase64String($originalTarget))
+        @(Get-ChildItem -Force -Directory -LiteralPath (Get-Syp214RepositoryTransactionRoot $targetRoot) -ErrorAction SilentlyContinue).Count|Should Be 0
+    }
+    }
     # Scenario: A later edit recreates deleted Instructions.
     # Purpose: Fail closed and preserve that edit.
     It 'InterT20_preserves_later_Instructions_edit_after_atomic_delete_interruption' {
         $op=$script:Syp214GenericOperations.remove;(&$script:Syp214Run "after-operation-$($op.sequence)-before-journal").exitCode|Should Not Be 0;Set-TestText $targetPath '# later user Instructions edit';$later=[IO.File]::ReadAllBytes($targetPath)
-        $recovery=&$script:Syp214Recover;$recovery.exitCode|Should Not Be 0;($recovery.output-join[Environment]::NewLine)|Should Match 'third state|ambiguous or changed';[Convert]::ToBase64String([IO.File]::ReadAllBytes($targetPath))|Should Be ([Convert]::ToBase64String($later));(Get-Syp214UnifiedTransactionFixture $targetRoot).journalPath|Should Not BeNullOrEmpty
+        $recovery=&$script:Syp214Recover;$recovery.exitCode|Should Not Be 0;(ConvertTo-TestDiagnosticText -Output $recovery.output)|Should Match 'third state|ambiguous or changed';[Convert]::ToBase64String([IO.File]::ReadAllBytes($targetPath))|Should Be ([Convert]::ToBase64String($later));(Get-Syp214UnifiedTransactionFixture $targetRoot).journalPath|Should Not BeNullOrEmpty
     }
     # Scenario: Target publication dies after atomic publication and before its journal generation.
     # Purpose: Never publish partial target bytes and preserve later unrelated bytes.
@@ -1700,6 +1756,7 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
     }
     # Scenario: Schema-v1 target/exclude recovery faults after flushing a stage prefix, then re-enters.
     # Purpose: Preserve applied state after the first failure and restore exact originals without inventing schema-v2 metadata.
+    if($IsWindows){
     It 'InterT98_recovers_schema_v1_<WriterKind>_<AppliedType>_without_inventing_historic_metadata_after_a_prefix_fault' -TestCases @(
         @{WriterKind='target';AppliedType='file'},@{WriterKind='target';AppliedType='missing'},@{WriterKind='exclude';AppliedType='file'}) {
         param($WriterKind,$AppliedType)
@@ -1848,15 +1905,38 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
             Set-StrictMode -Off
         }
     }
+    }
+    else{
+    # Scenario: A Unix bootstrap is asked to recover the legacy Windows schema-v1 migration journal.
+    # Purpose: Fail before legacy recovery dispatch without changing the journal, repository, or USER state.
+    It 'InterT98_fails_closed_on_Unix_before_schema_v1_recovery_dispatch' {
+        $backupRoot=Join-Path $caseRoot 'legacy-v1/target-backup';$journalPath=Join-Path $backupRoot 'skill-migration.json'
+        New-Item -ItemType Directory -Force $backupRoot|Out-Null
+        [IO.File]::WriteAllText($journalPath,'{"schemaVersion":1}',[Text.UTF8Encoding]::new($false))
+        $journalBefore=[IO.File]::ReadAllBytes($journalPath)
+        $stateBefore=Get-Syp214FixtureSnapshot $targetRoot $userHome $script:Syp214GenericEntries
+        New-TestProvenance -ArchivePath $script:Syp214GenericChangedArchive -Path $provenancePath
+        $output=& $script:TestPowerShellExecutable -NoProfile -NonInteractive -File $script:BootstrapScript `
+            -SourceArchivePath $script:Syp214GenericChangedArchive -TargetRoot $targetRoot -UserHome $userHome `
+            -ConfigurationPath $script:Syp214GenericConfiguration -ProvenancePath $provenancePath `
+            -RecoverSkillMigration $journalPath 2>&1
+        $LASTEXITCODE|Should Not Be 0
+        $exceptionMessages=@($output|Where-Object{$null-ne$_.Exception}|ForEach-Object{$_.Exception.Message})
+        (ConvertTo-TestDiagnosticText -Output $exceptionMessages)|Should Match 'Legacy Skill migration journal recovery is unavailable on Unix; repository recovery uses the unified transaction journal\.'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))|Should Be ([Convert]::ToBase64String($journalBefore))
+        (Test-Syp214UnifiedStateEqual $stateBefore (Get-Syp214FixtureSnapshot $targetRoot $userHome $script:Syp214GenericEntries))|Should Be $true
+    }
+    }
     # Scenario: Applied state is replaced by unrelated bytes or removed.
     # Purpose: Fail closed while preserving third-state bytes, backup, and journal.
     It 'InterT90_rejects_<CompetingState>_without_clobbering_unrelated_or_owned_bytes' -TestCases @(@{CompetingState='unrelated-final'},@{CompetingState='consumed-stage-then-deleted-final'}) {
         param($CompetingState);(&$script:Syp214Run 'before-committed-journal-write').exitCode|Should Not Be 0;$path=Join-Path $targetRoot 'AGENTS.md';if($CompetingState-ceq'unrelated-final'){$third=[Text.UTF8Encoding]::new($false).GetBytes("unrelated final collision`n");[IO.File]::WriteAllBytes($path,$third)}else{Remove-Item $path -Force}
-        $txn=Get-Syp214UnifiedTransactionFixture $targetRoot;$journal=[IO.File]::ReadAllBytes($txn.journalPath);$recovery=&$script:Syp214Recover;$recovery.exitCode|Should Not Be 0;($recovery.output-join[Environment]::NewLine)|Should Match 'third state|ambiguous or changed';[Convert]::ToBase64String([IO.File]::ReadAllBytes($txn.journalPath))|Should Be ([Convert]::ToBase64String($journal))
+        $txn=Get-Syp214UnifiedTransactionFixture $targetRoot;$journal=[IO.File]::ReadAllBytes($txn.journalPath);$recovery=&$script:Syp214Recover;$recovery.exitCode|Should Not Be 0;(ConvertTo-TestDiagnosticText -Output $recovery.output)|Should Match 'third state|ambiguous or changed';[Convert]::ToBase64String([IO.File]::ReadAllBytes($txn.journalPath))|Should Be ([Convert]::ToBase64String($journal))
         if($CompetingState-ceq'unrelated-final'){[Convert]::ToBase64String([IO.File]::ReadAllBytes($path))|Should Be ([Convert]::ToBase64String($third))}else{Test-Path $path|Should Be $false};Test-Path (Join-Path $txn.path ([string]$script:Syp214GenericOperations.write.backupLeaf))|Should Be $true
     }
     # Scenario: Unified target/exclude publication is applied with inherited/protected DACL and read-only final before interruption.
     # Purpose: Exercise real rollback and preserve raw DACL bytes, protection, readonly, and original bytes.
+    if($IsWindows){
     It 'InterT95_preserves_<Protection>_DACL_and_readonly_after_<WriterKind>_staging_prefix_fault' -TestCases @(
         @{Protection='inherited';Protected=$false;WriterKind='target'},@{Protection='protected';Protected=$true;WriterKind='target'},@{Protection='inherited';Protected=$false;WriterKind='exclude'},@{Protection='protected';Protected=$true;WriterKind='exclude'}) {
         param($Protection,$Protected,$WriterKind)
@@ -1896,6 +1976,45 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($path))|Should Be ([Convert]::ToBase64String($bytesBefore))
         (Test-Syp214UnifiedStateEqual $before (Get-Syp214FixtureSnapshot $targetRoot $userHome $script:Syp214GenericEntries))|Should Be $true
         Set-StrictMode -Off
+    }
+    }
+    else{
+    # Scenario: Unified target/exclude publication on Unix is interrupted after rename and before its journal generation.
+    # Purpose: Preserve mode/uid/gid and restore the original device/inode identity through rollback.
+    It 'InterT95_preserves_Unix_permissions_and_identity_after_<WriterKind>_staging_prefix_fault' -TestCases @(
+        @{WriterKind='target'},@{WriterKind='exclude'}) {
+        param($WriterKind)
+        $prefix=New-Syp214BootstrapMutationPrefix
+        . $prefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git' -ProvenancePath $provenancePath
+        $path=if($WriterKind-ceq'target'){Join-Path $targetRoot 'AGENTS.md'}else{$excludePath}
+        $beforeState=Get-Syp214UnixFileState $path
+        [string]$beforeState.permissions.kind|Should Be 'unix-mode'
+        $bytesBefore=[IO.File]::ReadAllBytes($path)
+        $operation=if($WriterKind-ceq'target'){$script:Syp214GenericOperations.write}else{$script:Syp214GenericOperations.exclude}
+
+        (&$script:Syp214Run "after-operation-$($operation.sequence)-before-journal").exitCode|Should Not Be 0
+        $txn=Get-Syp214UnifiedTransactionFixture $targetRoot
+        $journalOperation=@($txn.journal.operations|Where-Object{[int]$_.sequence-eq[int]$operation.sequence})[0]
+        [string]$journalOperation.state|Should Be 'pending'
+        [string]$journalOperation.displacedMetadata.kind|Should Be 'unix-mode'
+        foreach($name in @('mode','uid','gid')){[string]$journalOperation.displacedMetadata.$name|Should Be ([string]$beforeState.permissions.$name)}
+        [string]$journalOperation.before.identity.kind|Should Be 'unix-device-inode'
+        [string]$journalOperation.before.identity.device|Should Be ([string]$beforeState.identity.device)
+        [string]$journalOperation.before.identity.fileId|Should Be ([string]$beforeState.identity.fileId)
+        $appliedState=Get-Syp214UnixFileState $path
+        foreach($name in @('mode','uid','gid')){[string]$appliedState.permissions.$name|Should Be ([string]$beforeState.permissions.$name)}
+        [string]$appliedState.identity.device|Should Be ([string]$beforeState.identity.device)
+        [string]$appliedState.identity.fileId|Should Not Be ([string]$beforeState.identity.fileId)
+
+        (&$script:Syp214Recover).exitCode|Should Not Be 0
+        $afterState=Get-Syp214UnixFileState $path
+        foreach($name in @('mode','uid','gid')){[string]$afterState.permissions.$name|Should Be ([string]$beforeState.permissions.$name)}
+        [string]$afterState.identity.device|Should Be ([string]$beforeState.identity.device)
+        [string]$afterState.identity.fileId|Should Be ([string]$beforeState.identity.fileId)
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($path))|Should Be ([Convert]::ToBase64String($bytesBefore))
+        (Test-Syp214UnifiedStateEqual $before (Get-Syp214FixtureSnapshot $targetRoot $userHome $script:Syp214GenericEntries))|Should Be $true
+        Set-StrictMode -Off
+    }
     }
 }
 
@@ -1945,7 +2064,7 @@ Describe 'SYP214 USER migration serialization' {
         # Given
         $userManifestPath = Join-Path $userHome '.agents/catalog-skills.manifest.json'
         $userManifestHash = (Get-FileHash -LiteralPath $userManifestPath).Hash
-        $heldLock = [IO.File]::Open($userLockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $heldLock = Open-Syp214UserCoordinationLock -UserHome $userHome
         try {
             # When
             $output = @(Invoke-Syp214Bootstrap)
@@ -1959,7 +2078,7 @@ Describe 'SYP214 USER migration serialization' {
             (Get-FileHash -LiteralPath $userManifestPath).Hash | Should Be $userManifestHash
             ($output -join "`n") | Should Match 'USER.*lock'
         }
-        finally { $heldLock.Dispose() }
+        finally { Close-Syp214UserCoordinationLock $heldLock }
         Invoke-Syp214Bootstrap | Out-Null
         foreach ($entry in $entries) { Test-Path -LiteralPath (Join-Path $targetRoot $entry.targetPath) | Should Be $false }
     }
@@ -1980,11 +2099,19 @@ $script:LockProbeResults = @()
 function Assert-Syp214UpdaterLockBlocked {
     param([string]$Checkpoint,[Nullable[int64]]$Sequence=$null)
     $blocked = $false
+    $contender = $null;$contenderGuard = $null
     try {
-        $contender = [IO.File]::Open((Join-Path $UserHome '.agents/update-agent-environment.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-        $contender.Dispose()
+        if($IsWindows){
+            $contender = [IO.File]::Open((Join-Path $UserHome '.agents/update-agent-environment.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        }
+        else{
+            $contenderGuard=& $bootstrapPlatformRuntimeModule.ExportedCommands['Open-PlatformDirectory'] -Root $UserHome -RelativePath '.agents'
+            $contender=& $bootstrapPlatformRuntimeModule.ExportedCommands['Enter-PlatformLock'] -ParentLease $contenderGuard -Leaf 'update-agent-environment.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+        }
     }
+    catch [TimeoutException] { $blocked = $true }
     catch [IO.IOException] { $blocked = $true }
+    finally{if($null-ne$contender){$contender.Dispose()};if($null-ne$contenderGuard){$contenderGuard.Dispose()}}
     $script:LockProbeResults += [pscustomobject]@{checkpoint=$Checkpoint; sequence=$Sequence; blocked=$blocked}
     [IO.File]::WriteAllText(PROBE_PATH, (ConvertTo-Json -InputObject @($script:LockProbeResults)))
     if (-not $blocked) { throw "Competing USER updater acquired the lock at $Checkpoint." }
@@ -2044,14 +2171,14 @@ function Invoke-RepositoryTransactionRollback {
             }
             else {
                 $run.exitCode | Should Not Be 0
-                ($run.output -join "`n") | Should Match 'Injected unified repository rollback'
+                (ConvertTo-TestDiagnosticText -Output $run.output) | Should Match 'Injected unified repository rollback'
                 @($probes | Where-Object { $_.checkpoint -eq 'rollback' }).Count | Should Be 1
                 foreach ($entry in $entries) {
                     (Get-FileHash -LiteralPath (Join-Path $targetRoot $entry.targetPath)).Hash.ToLowerInvariant() | Should Be $entry.sha256
                 }
             }
-            $released = [IO.File]::Open($userLockPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-            $released.Dispose()
+            $released = Open-Syp214UserCoordinationLock -UserHome $userHome
+            Close-Syp214UserCoordinationLock $released
         }
         finally { $script:BootstrapScript = $originalBootstrap }
     }
@@ -2168,7 +2295,7 @@ Describe 'SYP214 USER-only bootstrap boundary' {
             $outputText | Should Not Match 'retire verified ignored/untracked copy'
         }
         else{
-            $outputText | Should Match '(?i)((same|identical|overlapping|aliased).*(root|directory)|(root|directory).*(same|identical|overlap|alias|distinct|separate)|must (be )?distinct|must differ)'
+            (ConvertTo-TestDiagnosticText -Output $run.output) | Should Match '(?i)((same|identical|overlapping|aliased).*(root|directory)|(root|directory).*(same|identical|overlap|alias|distinct|separate)|must (be )?distinct|must differ)'
             $outputText | Should Not Match 'retire verified ignored/untracked copy'
         }
         $after=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome -Entries $entriesForSnapshot
@@ -2465,10 +2592,9 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         $failureExitCode=[int]$failureRun.exitCode
         $failureOutputLines=@($failureRun.output | ForEach-Object { [string]$_ })
         $failureOutputText=$failureOutputLines -join [Environment]::NewLine
-        $failureMessageLines=@($failureOutputLines | Where-Object { $_ -match 'Injected Skill migration failure' })
-        $failureMessageLines.Count | Should BeGreaterThan 0
-        $failureMessage=$failureMessageLines[-1]
-        $failureMessage | Should Match 'Injected Skill migration failure'
+        $failureDiagnostic=ConvertTo-TestDiagnosticText -Output $failureOutputLines
+        $failureDiagnostic | Should Match 'Injected Skill migration failure'
+        $failureMessage=[regex]::Match($failureDiagnostic,'Injected Skill migration failure').Value
         $failureExitCode | Should Not Be 0
         $transactionRoot=Get-Syp214RepositoryTransactionRoot -Repository $targetRoot
         $transactionResidue=@(Get-ChildItem -Force -LiteralPath $transactionRoot -ErrorAction SilentlyContinue)
@@ -2560,7 +2686,8 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         [string]$manifestOperation.kind | Should Be 'write-file'
         [string]$manifestOperation.target.value | Should Be $script:ManifestPath.Replace('\','/')
         [bool]$manifestOperation.before.exists | Should Be $true
-        [string]$manifestOperation.before.identity.kind | Should Be 'windows-file-id'
+        if($IsWindows){[string]$manifestOperation.before.identity.kind | Should Be 'windows-file-id'}
+        else{[string]$manifestOperation.before.identity.kind | Should Be 'unix-device-inode'}
         [string]$manifestOperation.before.sha256 | Should Match '^[0-9a-f]{64}$'
         [string]$manifestOperation.after.sha256 | Should Match '^[0-9a-f]{64}$'
         [long]$manifestOperation.after.length | Should BeGreaterThan 0
@@ -2580,9 +2707,24 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
             Test-Path -LiteralPath $manifestBackupPath -PathType Leaf | Should Be $true
             (Get-FileHash -LiteralPath $manifestBackupPath -Algorithm SHA256).Hash.ToLowerInvariant() | Should Be ([string]$manifestOperation.before.sha256)
         }
-        [string]$manifestOperation.displacedMetadata.kind | Should Be 'windows-sddl'
-        [string]$manifestOperation.displacedMetadata.sddl | Should Be ([string]$manifestOperation.before.permissions.sddl)
-        [bool]$manifestOperation.displacedMetadata.readOnly | Should Be ([bool]$manifestOperation.before.permissions.readOnly)
+        if($IsWindows){
+            [string]$manifestOperation.displacedMetadata.kind | Should Be 'windows-sddl'
+            [string]$manifestOperation.displacedMetadata.sddl | Should Be ([string]$manifestOperation.before.permissions.sddl)
+            [bool]$manifestOperation.displacedMetadata.readOnly | Should Be ([bool]$manifestOperation.before.permissions.readOnly)
+        }
+        else{
+            foreach($name in @('device','fileId')){[string]$manifestOperation.before.identity.$name|Should Not BeNullOrEmpty}
+            $manifestOriginalPath=if($State-ceq'pending-intent'){Join-Path $targetRoot $script:ManifestPath}else{$manifestBackupPath}
+            $manifestOriginalState=Get-Syp214UnixFileState $manifestOriginalPath
+            [string]$manifestOriginalState.identity.kind|Should Be 'unix-device-inode'
+            foreach($name in @('device','fileId')){
+                [string]$manifestOriginalState.identity.$name|Should Be ([string]$manifestOperation.before.identity.$name)
+            }
+            [string]$manifestOperation.displacedMetadata.kind | Should Be 'unix-mode'
+            foreach($name in @('mode','uid','gid')){
+                [string]$manifestOperation.displacedMetadata.$name|Should Be ([string]$manifestOperation.before.permissions.$name)
+            }
+        }
 
         $driftRelativePath=$null
         $corruptBackupName=$null
@@ -2645,7 +2787,7 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
                 (Test-Syp214InventoryEqual -Left $preRecoverySnapshot.repository.stashes -Right $afterSnapshot.repository.stashes)
             $journalExists=Test-Path -LiteralPath $journalPath -PathType Leaf
             $journalPreserved=$journalExists -and [Convert]::ToBase64String($journalBytesBefore) -ceq [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))
-            $expectedRefusal=if($State -ceq 'later-edit'){'Schema-v2 publication state is ambiguous or changed'}else{'Stage hash or length differs|unreadable or invalid'}
+            $expectedRefusal=if($State -ceq 'later-edit'){'Schema-v2 publication state is ambiguous or changed'}elseif($IsWindows){'Stage hash or length differs|unreadable or invalid'}else{"Platform verification for 'publication' failed on '(?:linux|macos)': stage identity, length, or SHA-256 is invalid"}
             $refusalClassified=$recoveryOutputText -match $expectedRefusal
             $refusedThirdState=$treePreserved -and $gitCorePreserved -and $stashPreserved -and $residueAfter.Count -eq 1 -and $journalPreserved -and $refusalClassified
             if(-not$refusedThirdState){throw "Unified refusal mismatch: tree=$treePreserved gitCore=$gitCorePreserved stash=$stashPreserved residue=$($residueAfter.Count) journal=$journalPreserved classified=$refusalClassified output=$recoveryOutputText"}

@@ -661,7 +661,7 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
     # Purpose: H1/F7 prevents either '~/...' or the former fixed runtime path from being treated as an executable path authority.
     It 'UnitT37_documents_receipt_selected_runtime_paths_in_both_languages' {
         $readme = [IO.File]::ReadAllText((Join-Path $script:SetupRepositoryRoot 'README.md'))
-        $englishSection = $readme.IndexOf('## Cloud/Linux setup',[StringComparison]::Ordinal)
+        $englishSection = $readme.IndexOf('## Linux/macOS setup',[StringComparison]::Ordinal)
         $englishSection | Should BeGreaterThan 0
         $readme | Should Match 'Receipt paths are `~/\.\.\.`, not absolute paths'
         $readme | Should Match '必須讀取 `runtime-<version>-<rid>\.json` 的 `executablePath`'

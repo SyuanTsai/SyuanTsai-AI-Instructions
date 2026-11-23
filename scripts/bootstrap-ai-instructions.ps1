@@ -1740,6 +1740,14 @@ function Get-GitInfoExcludePath {
     return [System.IO.Path]::GetFullPath($path)
 }
 
+function Get-GitCommonDirectoryPath {
+    param([Parameter(Mandatory = $true)][string] $Repository)
+
+    $path = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-common-dir')) | Select-Object -First 1).Trim()
+    if (-not [System.IO.Path]::IsPathRooted($path)) { $path = Join-Path $Repository $path }
+    return [System.IO.Path]::GetFullPath($path).TrimEnd([char[]]@('\','/'))
+}
+
 function Assert-GitInfoExcludeMutationPath {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
@@ -1841,6 +1849,19 @@ function Open-UserSkillMigrationLock {
     $homePath = Get-FullPathWithoutTrailingSeparator -Path $UserHome
     if (-not (Test-Path -LiteralPath (Join-Path $homePath '.agents') -PathType Container)) {
         throw 'USER updater lock unavailable because the USER .agents root is missing.'
+    }
+    if (-not $IsWindows) {
+        $guard = & $bootstrapPlatformRuntimeModule.ExportedCommands['Open-PlatformDirectory'] `
+            -Root $homePath -RelativePath '.agents'
+        try {
+            $lock = & $bootstrapPlatformRuntimeModule.ExportedCommands['Enter-PlatformLock'] `
+                -ParentLease $guard -Leaf 'update-agent-environment.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+            return [pscustomobject]@{ Stream=$lock; Guard=$guard }
+        }
+        catch {
+            $guard.Dispose()
+            throw
+        }
     }
     $guard = $null
     $handle = $null
@@ -2268,16 +2289,70 @@ function New-GitInfoExcludeSnapshot {
         ProtectedPaths = @()
         PlatformState = $null
     }
-    if ($UsePlatformRuntime) {
+    if ($UsePlatformRuntime -or -not $IsWindows) {
         Import-Module (Join-Path $PSScriptRoot 'ai-instructions-install-transaction.psm1') -Force
-        $parent=[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($path));$leaf=[IO.Path]::GetFileName($path)
-        $parentLease=Open-PlatformDirectory -Root $parent -RootOnly
-        try{$snapshot.PlatformState=Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf -LiteralPath $path -PlatformOs $(if($IsLinux){'linux'}elseif($IsMacOS){'macos'}else{'windows'}) -IncludePermissions}finally{$parentLease.Dispose()}
-        $snapshot.Existed=[bool]$snapshot.PlatformState.exists
-        if ($snapshot.Existed) {
-            $snapshot.Bytes = [IO.File]::ReadAllBytes($path)
-            if((Get-ByteArraySha256 ([byte[]]$snapshot.Bytes))-cne[string]$snapshot.PlatformState.sha256){throw "Shared Git exclude changed concurrently during platform snapshot: $path"}
+        if ($IsWindows) {
+            $parent=[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($path));$leaf=[IO.Path]::GetFileName($path)
+            $parentLease=Open-PlatformDirectory -Root $parent -RootOnly
+            try{$snapshot.PlatformState=Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf -LiteralPath $path -PlatformOs 'windows' -IncludePermissions}finally{$parentLease.Dispose()}
+            $snapshot.Existed=[bool]$snapshot.PlatformState.exists
+            if ($snapshot.Existed) {
+                $snapshot.Bytes = [IO.File]::ReadAllBytes($path)
+                if((Get-ByteArraySha256 ([byte[]]$snapshot.Bytes))-cne[string]$snapshot.PlatformState.sha256){throw "Shared Git exclude changed concurrently during platform snapshot: $path"}
+            }
+            return $snapshot
         }
+        $commonGitDirectory = Get-GitCommonDirectoryPath -Repository $Repository
+        $parent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($path))
+        $leaf = [IO.Path]::GetFileName($path)
+        $platformOs = if($IsLinux){'linux'}elseif($IsMacOS){'macos'}else{'windows'}
+        $gitLease = Open-PlatformDirectory -Root $commonGitDirectory -RootOnly
+        try {
+            try {
+                $parentState = Get-AiInstructionsInstallDirectoryState -ParentLease $gitLease -Leaf 'info' `
+                    -LiteralPath $parent -IncludePermissions
+            }
+            catch { throw "Shared Git exclude parent directory snapshot failed closed: $parent. $($_.Exception.Message)" }
+            if (-not [bool]$parentState.exists) {
+                $parentReadback = Get-AiInstructionsInstallDirectoryState -ParentLease $gitLease -Leaf 'info' `
+                    -LiteralPath $parent -IncludePermissions
+                if (-not (Test-PlatformMutationDirectoryStateEqual -Actual $parentReadback -Expected $parentState)) {
+                    throw "Shared Git exclude parent directory changed concurrently during platform snapshot: $parent"
+                }
+                $snapshot.PlatformState = [pscustomobject][ordered]@{
+                    exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null
+                }
+                return $snapshot
+            }
+            $parentLease = Open-PlatformDirectory -Root $commonGitDirectory -RelativePath 'info'
+            try {
+                try {
+                    $capture = Get-PlatformMutationFileSnapshot -ParentLease $parentLease -Leaf $leaf `
+                        -LiteralPath $path -PlatformOs $platformOs
+                    $snapshot.PlatformState = $capture.State
+                    $snapshot.Existed = [bool]$snapshot.PlatformState.exists
+                    if ($snapshot.Existed) {
+                        $snapshot.Bytes = [byte[]]$capture.Bytes
+                        $readbackState = Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf `
+                            -LiteralPath $path -PlatformOs $platformOs -IncludePermissions
+                        if (-not (Test-ProjectPublicationStateEqual -Actual $readbackState -Expected $snapshot.PlatformState)) {
+                            throw "Shared Git exclude changed concurrently during platform snapshot: $path"
+                        }
+                    }
+                }
+                catch {
+                    if ($_.Exception.Message -like 'Shared Git exclude changed concurrently during platform snapshot:*') { throw }
+                    throw "Shared Git exclude platform snapshot failed closed: $path. $($_.Exception.Message)"
+                }
+            }
+            finally { $parentLease.Dispose() }
+            $parentReadback = Get-AiInstructionsInstallDirectoryState -ParentLease $gitLease -Leaf 'info' `
+                -LiteralPath $parent -IncludePermissions
+            if (-not (Test-PlatformMutationDirectoryStateEqual -Actual $parentReadback -Expected $parentState)) {
+                throw "Shared Git exclude parent directory changed concurrently during platform snapshot: $parent"
+            }
+        }
+        finally { $gitLease.Dispose() }
         return $snapshot
     }
     $metadataHandle = $null
@@ -2299,6 +2374,31 @@ function New-GitInfoExcludeSnapshot {
         if ($null -ne $metadataHandle) { $metadataHandle.Dispose() }
     }
     return $snapshot
+}
+
+function Get-PlatformMutationFileSnapshot {
+    param(
+        [Parameter(Mandatory = $true)] $ParentLease,
+        [Parameter(Mandatory = $true)][string] $Leaf,
+        [Parameter(Mandatory = $true)][string] $LiteralPath,
+        [Parameter(Mandatory = $true)][ValidateSet('windows','linux','macos')][string] $PlatformOs
+    )
+
+    return Get-AiInstructionsInstallFileState -ParentLease $ParentLease -Leaf $Leaf -LiteralPath $LiteralPath `
+        -PlatformOs $PlatformOs -IncludePermissions -IncludeBytes
+}
+
+function Test-PlatformMutationDirectoryStateEqual {
+    param([Parameter(Mandatory = $true)] $Actual,[Parameter(Mandatory = $true)] $Expected)
+
+    if ([bool]$Actual.exists -ne [bool]$Expected.exists) { return $false }
+    if (-not [bool]$Expected.exists) { return $true }
+    return [string]$Actual.inventorySha256 -ceq [string]$Expected.inventorySha256 -and
+        [int64]$Actual.entryCount -eq [int64]$Expected.entryCount -and
+        [string]$Actual.identity.kind -ceq [string]$Expected.identity.kind -and
+        [string]::Equals([string]$Actual.identity.device,[string]$Expected.identity.device,[StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([string]$Actual.identity.fileId,[string]$Expected.identity.fileId,[StringComparison]::OrdinalIgnoreCase) -and
+        (Test-RepositoryTransactionDisplacedMetadataEqual -Actual $Actual.permissions -Expected $Expected.permissions)
 }
 
 function Test-GitInfoExcludeBytesEqual {
@@ -2512,7 +2612,8 @@ function Set-ManagedGitInfoExclude {
     $sharedManagedPaths=@(Get-SharedManagedExcludePaths -Repository $Repository -CurrentManagedPaths $safeManagedPaths)
     $sharedManagedPaths=@($sharedManagedPaths|Where-Object{if(Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths){Write-Warning "Protected Claude family path skipped at bootstrap shared Git exclude: $_ (project-owned Claude family).";return $false};return $true})
     $lines=@(@($sharedManagedPaths)+@($PreservedProtectedPaths)|Sort-Object -Unique|ForEach-Object{ConvertTo-GitExcludeLiteralPattern -Path $_})
-    [byte[]]$beforeBytes=if([bool]$Snapshot.Existed){[byte[]]$Snapshot.Bytes}else{[byte[]]@()}
+    [byte[]]$beforeBytes=[byte[]]::new(0)
+    if([bool]$Snapshot.Existed){$beforeBytes=[byte[]]$Snapshot.Bytes}
     $content=(ConvertFrom-GitInfoExcludeBytes -Bytes $beforeBytes).Replace("`r`n","`n").Replace("`r","`n")
     $pattern='(?ms)^'+[regex]::Escape($excludeBeginMarker)+'\n.*?^'+[regex]::Escape($excludeEndMarker)+'\n?'
     $beginCount=[regex]::Matches($content,'(?m)^'+[regex]::Escape($excludeBeginMarker)+'$').Count;$endCount=[regex]::Matches($content,'(?m)^'+[regex]::Escape($excludeEndMarker)+'$').Count
@@ -2768,7 +2869,8 @@ function New-TargetMutationSnapshot {
         [Parameter(Mandatory = $true)][string] $TargetRoot,
         [Parameter(Mandatory = $true)][string[]] $RelativePaths,
         [Parameter(Mandatory = $true)][string] $BackupRoot,
-        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @()
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @(),
+        [switch] $UsePlatformRuntime
     )
 
     New-Item -ItemType Directory -Force -Path $BackupRoot | Out-Null
@@ -2810,6 +2912,74 @@ function New-TargetMutationSnapshot {
         $daclRecord = $null
         $readOnly = $false
         $originalIdentity = $null
+        $platformState = $null
+        if ($UsePlatformRuntime -or -not $IsWindows) {
+            Import-Module (Join-Path $PSScriptRoot 'ai-instructions-install-transaction.psm1') -Force
+            $parentPath = [IO.Path]::GetDirectoryName($targetPath)
+            if (Test-Path -LiteralPath $parentPath -PathType Container) {
+                $parentLease = Open-PlatformDirectory -Root $parentPath -RootOnly
+                try {
+                    $leaf = [IO.Path]::GetFileName($targetPath)
+                    $platformOs = if ($IsLinux) { 'linux' } elseif ($IsMacOS) { 'macos' } else { 'windows' }
+                    if ($IsWindows) {
+                        $platformState = Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf `
+                            -LiteralPath $targetPath -PlatformOs $platformOs -IncludePermissions
+                    }
+                    else {
+                        try {
+                            $capture = Get-PlatformMutationFileSnapshot -ParentLease $parentLease -Leaf $leaf `
+                                -LiteralPath $targetPath -PlatformOs $platformOs
+                            $platformState = $capture.State
+                        }
+                        catch { throw "Managed target platform rollback snapshot failed closed: $relativePath. $($_.Exception.Message)" }
+                    }
+                    if ([bool]$platformState.exists) {
+                        [byte[]]$observedBytes = if ($IsWindows) { [IO.File]::ReadAllBytes($targetPath) } else { [byte[]]$capture.Bytes }
+                        try {
+                            $readbackState = Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf `
+                                -LiteralPath $targetPath -PlatformOs $platformOs -IncludePermissions
+                        }
+                        catch { throw "Managed target changed while its platform rollback snapshot was captured: $relativePath. $($_.Exception.Message)" }
+                        if (-not (Test-ProjectPublicationStateEqual -Actual $readbackState -Expected $platformState) -or
+                            (Get-ByteArraySha256 -Bytes $observedBytes) -cne [string]$platformState.sha256) {
+                            throw "Managed target changed while its platform rollback snapshot was captured: $relativePath"
+                        }
+                        $originalType = 'file'
+                        $backupPath = Join-Path $BackupRoot ('{0:D6}.bin' -f $backupIndex)
+                        [IO.File]::WriteAllBytes($backupPath,$observedBytes)
+                        $backupIndex++
+                    }
+                }
+                finally { $parentLease.Dispose() }
+            }
+            else {
+                $platformState = [pscustomobject][ordered]@{
+                    exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null
+                }
+            }
+            if (-not [bool]$platformState.exists -and (Test-Path -LiteralPath $targetPath)) {
+                throw "Managed target path must be a file or missing: $relativePath"
+            }
+            $fileStates.Add([pscustomobject][ordered]@{
+                RelativePath = $relativePath
+                TargetPath = $targetPath
+                OriginalType = $originalType
+                BackupPath = $backupPath
+                OriginalDacl = $null
+                OriginalReadOnly = $false
+                OriginalIdentity = $null
+                PlatformState = $platformState
+                AppliedFileIdentity = $null
+                MutationApplied = $false
+                AppliedType = $null
+                AppliedBytes = $null
+                Publication = $null
+                PublicationDaclRecord = $null
+                PublicationReadOnly = $false
+                LegacyRecovery = $false
+            })
+            continue
+        }
         if (Test-Path -LiteralPath $targetPath -PathType Leaf) {
             $originalType = 'file'
             $backupPath = Join-Path $BackupRoot ('{0:D6}.bin' -f $backupIndex)
@@ -2846,6 +3016,7 @@ function New-TargetMutationSnapshot {
             OriginalDacl = $daclRecord
             OriginalReadOnly = $readOnly
             OriginalIdentity = $originalIdentity
+            PlatformState = $platformState
             AppliedFileIdentity = $null
             MutationApplied = $false
             AppliedType = $null
@@ -3898,10 +4069,17 @@ function Test-ProjectPublicationStateEqual {
     param([Parameter(Mandatory=$true)]$Actual,[Parameter(Mandatory=$true)]$Expected)
     if([bool]$Actual.exists-ne[bool]$Expected.exists){return $false}
     if(-not[bool]$Expected.exists){return $true}
-    return [string]$Actual.sha256-ceq[string]$Expected.sha256 -and [int64]$Actual.length-eq[int64]$Expected.length -and
+    $equal = [string]$Actual.sha256-ceq[string]$Expected.sha256 -and [int64]$Actual.length-eq[int64]$Expected.length -and
         [string]$Actual.identity.kind-ceq[string]$Expected.identity.kind -and
         [string]::Equals([string]$Actual.identity.device,[string]$Expected.identity.device,[StringComparison]::OrdinalIgnoreCase) -and
         [string]::Equals([string]$Actual.identity.fileId,[string]$Expected.identity.fileId,[StringComparison]::OrdinalIgnoreCase)
+    if (-not $equal -or $IsWindows) { return $equal }
+    $actualPermissions = $Actual.PSObject.Properties['permissions']
+    $expectedPermissions = $Expected.PSObject.Properties['permissions']
+    if ($null -eq $actualPermissions -or $null -eq $expectedPermissions) {
+        return $null -eq $actualPermissions -and $null -eq $expectedPermissions
+    }
+    return Test-RepositoryTransactionDisplacedMetadataEqual -Actual $Actual.permissions -Expected $Expected.permissions
 }
 
 function Assert-ProjectSkillManifestFilesCurrent {
@@ -5190,16 +5368,17 @@ function Get-RepositoryTransactionObservedAfterFromLease {
 function Restore-RepositoryTransactionDisplacedMetadata {
     # Three-state metadata CAS for an original file that undo has placed back at its target.
     # Callers invoke this unconditionally; only this function decides whether metadata may be applied:
-    #   never displaced (no journaled displaced-after value) -> no mutation
+    #   never displaced (no journaled displaced-after or undo receipt) -> no mutation
     #   live == prepared original metadata                   -> no-op
     #   live == journaled displaced-after metadata           -> apply the original and read it back
+    #   live == this undo publication's verified metadata    -> apply the original and read it back
     #   live == journaled published observedAfter metadata   -> apply only after this undo moved the original back
     #   anything else                                        -> third state, no mutation
     # The target handle is bound to the prepared original identity before any metadata is read or applied.
-    param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation)
+    param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation,[AllowNull()][object]$UndoPublicationMetadata)
     if([string]$Operation.kind-cnotin@('write-file','remove-file')-or$null-eq$Operation.displacedMetadata){return}
     $displacedAfter=if($null-ne$Operation.PSObject.Properties['displacedAfterMetadata']){$Operation.displacedAfterMetadata}else{$null}
-    if($null-eq$displacedAfter){return}
+    if($null-eq$displacedAfter-and$null-eq$UndoPublicationMetadata){return}
     $thirdState="Repository transaction sequence $($Operation.sequence) role $($Operation.role) target $($Operation.target.value) is in a third state; evidence was retained for manual inspection and cleanup."
     $path=if([string]$Operation.target.kind-ceq'git-shared-exclude'){[string]$Operation.target.value}else{Join-Path ([string]$Journal.scope.repositoryRoot) ([string]$Operation.target.value).Replace('/',[IO.Path]::DirectorySeparatorChar)}
     $parent=[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($path));$leaf=[IO.Path]::GetFileName($path)
@@ -5210,7 +5389,8 @@ function Restore-RepositoryTransactionDisplacedMetadata {
             if(-not(Test-RepositoryTransactionIdentityEqual -Actual (ConvertTo-ProjectPublicationIdentity $lease.Observation) -Expected $Operation.before.identity)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message $thirdState)}
             $live=ConvertTo-RepositoryTransactionMetadataSnapshot -Permissions (Get-PlatformPermissions -Lease $lease)
             if(Test-RepositoryTransactionDisplacedMetadataEqual -Actual $live -Expected $Operation.displacedMetadata){return}
-            $matchesDisplacedAfter=Test-RepositoryTransactionDisplacedMetadataEqual -Actual $live -Expected $displacedAfter
+            $matchesDisplacedAfter=$null-ne$displacedAfter-and(Test-RepositoryTransactionDisplacedMetadataEqual -Actual $live -Expected $displacedAfter)
+            $matchesUndoPublication=$null-ne$UndoPublicationMetadata-and(Test-RepositoryTransactionDisplacedMetadataEqual -Actual $live -Expected $UndoPublicationMetadata)
             # Publish-PlatformFile's undo path deliberately transfers the live published
             # target metadata to the original backup before moving that identity back.  On
             # Windows, parent inheritance can therefore make the restored target match the
@@ -5218,11 +5398,11 @@ function Restore-RepositoryTransactionDisplacedMetadata {
             # Accept only that already-journaled transaction state; arbitrary metadata still
             # remains a third state and is never overwritten.
             $matchesPublishedAfter=$false
-            if(-not$matchesDisplacedAfter-and$null-ne$Operation.observedAfter){
+            if($null-ne$displacedAfter-and-not$matchesDisplacedAfter-and$null-ne$Operation.observedAfter){
                 $liveObservedAfter=Get-RepositoryTransactionObservedAfterFromLease -Lease $lease
                 $matchesPublishedAfter=Test-RepositoryTransactionObservedAfterEqual -Actual $liveObservedAfter -Expected $Operation.observedAfter
             }
-            if(-not$matchesDisplacedAfter-and-not$matchesPublishedAfter){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message $thirdState)}
+            if(-not$matchesDisplacedAfter-and-not$matchesPublishedAfter-and-not$matchesUndoPublication){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message $thirdState)}
             Set-PlatformPermissions -Lease $lease -Snapshot $Operation.displacedMetadata|Out-Null
             $readback=Get-PlatformPermissions -Lease $lease
             if(-not(Test-RepositoryTransactionDisplacedMetadataEqual -Actual $readback -Expected $Operation.displacedMetadata)){
@@ -5243,7 +5423,11 @@ function Test-RepositoryTransactionObservedAfterEqual {
 
 function Get-RepositoryTransactionDirectoryAnchorState {
     param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation)
-    $path=Join-Path ([string]$Journal.scope.repositoryRoot) ([string]$Operation.target.value).Replace('/',[IO.Path]::DirectorySeparatorChar)
+    $path=if([string]$Operation.target.kind-ceq'git-shared-exclude-directory'){
+        [string]$Operation.target.value
+    }else{
+        Join-Path ([string]$Journal.scope.repositoryRoot) ([string]$Operation.target.value).Replace('/',[IO.Path]::DirectorySeparatorChar)
+    }
     if(-not(Test-Path -LiteralPath $path)){return [pscustomobject][ordered]@{exists=$false;identity=$null;permissions=$null}}
     $item=Get-Item -Force -LiteralPath $path
     if(-not$item.PSIsContainer-or($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){throw "Repository transaction directory anchor is not a physical directory: $path"}
@@ -5479,7 +5663,13 @@ function Test-RepositoryTransactionStateEqual {
         'update-git-ref'{return [bool]$Actual.exists-eq[bool]$Expected.exists-and(-not$Expected.exists-or[string]$Actual.objectId-ceq[string]$Expected.objectId)}
         'store-git-stash-evidence'{return [bool]$Actual.exists-eq[bool]$Expected.exists-and[string]$Actual.objectId-ceq[string]$Expected.objectId}
         'update-git-head'{return [string]$Actual.mode-ceq[string]$Expected.mode-and[string]$Actual.reference-ceq[string]$Expected.reference-and[string]$Actual.objectId-ceq[string]$Expected.objectId-and[string]$Actual.rawSha256-ceq[string]$Expected.rawSha256}
-        'ensure-directory-anchor'{if([bool]$Actual.exists-ne[bool]$Expected.exists){return $false};if(-not$Expected.exists){return $true};return [string]$Actual.identity.kind-ceq[string]$Expected.identity.kind-and[string]::Equals([string]$Actual.identity.device,[string]$Expected.identity.device,[StringComparison]::OrdinalIgnoreCase)-and[string]::Equals([string]$Actual.identity.fileId,[string]$Expected.identity.fileId,[StringComparison]::OrdinalIgnoreCase)}
+        'ensure-directory-anchor'{
+            if([bool]$Actual.exists-ne[bool]$Expected.exists){return $false}
+            if(-not$Expected.exists){return $true}
+            $identityEqual=[string]$Actual.identity.kind-ceq[string]$Expected.identity.kind-and[string]::Equals([string]$Actual.identity.device,[string]$Expected.identity.device,[StringComparison]::OrdinalIgnoreCase)-and[string]::Equals([string]$Actual.identity.fileId,[string]$Expected.identity.fileId,[StringComparison]::OrdinalIgnoreCase)
+            if(-not$identityEqual-or$IsWindows){return $identityEqual}
+            return Test-RepositoryTransactionDisplacedMetadataEqual -Actual $Actual.permissions -Expected $Expected.permissions
+        }
         'replace-git-index'{return Test-RepositoryTransactionIndexStateEqual $Actual $Expected}
         default{return Test-ProjectPublicationStateEqual $Actual $Expected}
     }
@@ -5542,16 +5732,24 @@ function Invoke-RepositoryTransactionOperation {
                     else{$stageLease=Open-PlatformFile -ParentLease $Context.Lease -Leaf ([string]$Operation.stageLeaf) -Access ReadWrite -CreateMode OpenExisting;try{$p=@{ParentLease=$parentLease;Leaf=$leaf;TransactionLease=$Context.Lease;StageLease=$stageLease;ExpectedState=$Operation.before;ExpectedStage=$Operation.after};if([string]$Operation.kind-ceq'create-file'){$p.NoReplace=$true}else{$p.DisplacedLeaf=[string]$Operation.backupLeaf};Publish-PlatformFile @p|Out-Null}finally{$stageLease.Dispose()}}
                 }else{
                     if([string]$Operation.kind-ceq'create-file'){Remove-PlatformOwnedFile -ParentLease $parentLease -Leaf $leaf -ExpectedState $Operation.after -TransactionLease $Context.Lease -TombstoneLeaf ([string]$Operation.stageLeaf)|Out-Null}
-                    else{$backupLease=Open-PlatformFile -ParentLease $Context.Lease -Leaf ([string]$Operation.backupLeaf) -Access Read -CreateMode OpenExisting;try{$p=@{ParentLease=$parentLease;Leaf=$leaf;TransactionLease=$Context.Lease;StageLease=$backupLease;ExpectedState=$Operation.after;ExpectedStage=$Operation.before};if([string]$Operation.kind-ceq'remove-file'){$p.NoReplace=$true}else{$p.DisplacedLeaf=[string]$Operation.stageLeaf};Publish-PlatformFile @p|Out-Null}finally{$backupLease.Dispose()};Restore-RepositoryTransactionDisplacedMetadata -Journal $Journal -Operation $Operation}
+                    else{$backupLease=Open-PlatformFile -ParentLease $Context.Lease -Leaf ([string]$Operation.backupLeaf) -Access Read -CreateMode OpenExisting;try{$p=@{ParentLease=$parentLease;Leaf=$leaf;TransactionLease=$Context.Lease;StageLease=$backupLease;ExpectedState=$Operation.after;ExpectedStage=$Operation.before};if([string]$Operation.kind-ceq'remove-file'){$p.NoReplace=$true}else{$p.DisplacedLeaf=[string]$Operation.stageLeaf};$undoPublication=Publish-PlatformFile @p}finally{$backupLease.Dispose()};$restoreParameters=@{Journal=$Journal;Operation=$Operation};if(-not$IsWindows-and[string]$Operation.kind-ceq'remove-file'){$restoreParameters.UndoPublicationMetadata=$undoPublication.permissions};Restore-RepositoryTransactionDisplacedMetadata @restoreParameters}
                 }
             }finally{$parentLease.Dispose()}
         }
         'ensure-directory-anchor' {
-            $relative=[string]$Operation.target.value;$parentRelative=(Split-Path -Parent $relative).Replace('\','/');$leaf=Split-Path -Leaf $relative;$parentLease=if([string]::IsNullOrWhiteSpace($parentRelative)){Open-PlatformDirectory -Root $repository -RootOnly}else{Open-PlatformDirectory -Root $repository -RelativePath $parentRelative}
+            $external=[string]$Operation.target.kind-ceq'git-shared-exclude-directory'
+            $relative=[string]$Operation.target.value
+            if($external){
+                $anchorPath=[IO.Path]::GetFullPath($relative);$parentPath=[IO.Path]::GetDirectoryName($anchorPath);$leaf=[IO.Path]::GetFileName($anchorPath)
+                $parentLease=Open-PlatformDirectory -Root $parentPath -RootOnly
+            }else{
+                $parentRelative=(Split-Path -Parent $relative).Replace('\','/');$leaf=Split-Path -Leaf $relative
+                $parentLease=if([string]::IsNullOrWhiteSpace($parentRelative)){Open-PlatformDirectory -Root $repository -RootOnly}else{Open-PlatformDirectory -Root $repository -RelativePath $parentRelative}
+                $anchorPath=Join-Path $repository $relative.Replace('/',[IO.Path]::DirectorySeparatorChar)
+            }
             try{
                 if($Direction-ceq'redo'){Move-PlatformOwnedDirectory -ParentLease $parentLease -Leaf ([string]$Operation.stageLeaf) -TransactionLease $Context.Lease -DestinationLeaf $leaf -ExpectedIdentity $Operation.after.identity -Direction FromTransaction|Out-Null}
                 else{
-                    $anchorPath=Join-Path $repository $relative.Replace('/',[IO.Path]::DirectorySeparatorChar)
                     if(@(Get-ChildItem -Force -LiteralPath $anchorPath).Count-gt0){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction directory anchor '$relative' is not empty after descendant rollback; unknown content was preserved.")}
                     Move-PlatformOwnedDirectory -ParentLease $parentLease -Leaf $leaf -TransactionLease $Context.Lease -DestinationLeaf ([string]$Operation.stageLeaf) -ExpectedIdentity $Operation.after.identity -Direction ToTransaction|Out-Null
                 }
@@ -5701,18 +5899,31 @@ function New-RepositoryInstallOperations {
         }
     }
     $missing=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
-    foreach($intent in $Context.Intents.Values){if([string]$intent.TargetKind-cne'repository'){continue};$parent=(Split-Path -Parent ([string]$intent.RelativePath)).Replace('\','/');if([string]::IsNullOrWhiteSpace($parent)){continue};$segments=$parent.Split('/');for($i=1;$i-le$segments.Count;$i++){$relative=[string]::Join('/',[string[]]$segments[0..($i-1)]);if(-not(Test-Path -LiteralPath (Join-Path $Context.Repository $relative.Replace('/',[IO.Path]::DirectorySeparatorChar)))){[void]$missing.Add($relative)}}}
+    $missingExcludeDirectories=New-Object 'System.Collections.Generic.HashSet[string]' ($(if($IsWindows){[StringComparer]::OrdinalIgnoreCase}else{[StringComparer]::Ordinal}))
+    foreach($intent in $Context.Intents.Values){
+        if([string]$intent.TargetKind-ceq'repository'){
+            $parent=(Split-Path -Parent ([string]$intent.RelativePath)).Replace('\','/');if([string]::IsNullOrWhiteSpace($parent)){continue};$segments=$parent.Split('/');for($i=1;$i-le$segments.Count;$i++){$relative=[string]::Join('/',[string[]]$segments[0..($i-1)]);if(-not(Test-Path -LiteralPath (Join-Path $Context.Repository $relative.Replace('/',[IO.Path]::DirectorySeparatorChar)))){[void]$missing.Add($relative)}}
+        }
+        elseif([string]$intent.TargetKind-ceq'git-exclude'-and-not(Test-Path -LiteralPath ([string]$intent.TargetRoot))){
+            [void]$missingExcludeDirectories.Add([IO.Path]::GetFullPath([string]$intent.TargetRoot))
+        }
+    }
     foreach($relative in @($missing|Sort-Object @{Expression={($_.Split('/')).Count}},@{Expression={$_}})){
         $sequence=$operations.Count+1;$stageLeaf=('op-{0:D6}.directory'-f$sequence);$stageLease=Open-PlatformDirectory -Root $transactionPath -RelativePath $stageLeaf -CreatePrivate
         try{$after=[pscustomobject][ordered]@{exists=$true;identity=(ConvertTo-ProjectPublicationIdentity $stageLease.Observation);permissions=(Get-PlatformPermissions -Lease $stageLease)}}finally{$stageLease.Dispose()}
         $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='ensure-directory-anchor';role='directory-anchor';method='directory-rename';target=[pscustomobject][ordered]@{kind='repository-relative';value=$relative};before=[pscustomobject][ordered]@{exists=$false;identity=$null;permissions=$null};after=$after;observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$stageLeaf;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+    }
+    foreach($directory in @($missingExcludeDirectories|Sort-Object)){
+        $sequence=$operations.Count+1;$stageLeaf=('op-{0:D6}.directory'-f$sequence);$stageLease=Open-PlatformDirectory -Root $transactionPath -RelativePath $stageLeaf -CreatePrivate
+        try{$after=[pscustomobject][ordered]@{exists=$true;identity=(ConvertTo-ProjectPublicationIdentity $stageLease.Observation);permissions=(Get-PlatformPermissions -Lease $stageLease)}}finally{$stageLease.Dispose()}
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='ensure-directory-anchor';role='shared-exclude-directory-anchor';method='directory-rename';target=[pscustomobject][ordered]@{kind='git-shared-exclude-directory';value=$directory};before=[pscustomobject][ordered]@{exists=$false;identity=$null;permissions=$null};after=$after;observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$stageLeaf;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
     }
     $priority=@{'instruction'=10;'project-skill'=20;'license'=30;'remediation-file'=40;'remediation-and-instruction'=40;'manifest'=90;'shared-exclude'=100}
     foreach($intent in @($Context.Intents.Values|Sort-Object @{Expression={$priority[[string]$_.Role]}},@{Expression={[string]$_.RelativePath}})){
         if($intent.Remove-and-not[bool]$intent.Before.exists){continue}
         if(-not$intent.Remove-and[bool]$intent.Before.exists-and(Get-ByteArraySha256 ([byte[]]$intent.Bytes))-ceq[string]$intent.Before.sha256){continue}
         $sequence=$operations.Count+1;$kind=if($intent.Remove){'remove-file'}elseif($intent.Before.exists){'write-file'}else{'create-file'};$stageLeaf=$null;$backupLeaf=if($kind-ceq'create-file'){$null}else{('op-{0:D6}.backup'-f$sequence)}
-        $after=if($intent.Remove){[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null}}else{$stageLeaf=('op-{0:D6}.stage'-f$sequence);$stage=New-AiInstructionsInstallStageFile -TransactionLease $Context.Lease -Leaf $stageLeaf -Bytes ([byte[]]$intent.Bytes) -PlatformOs $platform;$stageState=Get-AiInstructionsInstallFileState -ParentLease $Context.Lease -Leaf $stageLeaf -LiteralPath (Join-Path $transactionPath $stageLeaf) -PlatformOs $platform -IncludePermissions;[pscustomobject][ordered]@{exists=$true;sha256=$stage.sha256;length=$stage.length;identity=$stage.identity;permissions=$stageState.permissions}}
+        $after=if($intent.Remove){[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null}}else{$stageLeaf=('op-{0:D6}.stage'-f$sequence);$stage=New-AiInstructionsInstallStageFile -TransactionLease $Context.Lease -Leaf $stageLeaf -Bytes ([byte[]]$intent.Bytes) -PlatformOs $platform;$stageState=Get-AiInstructionsInstallFileState -ParentLease $Context.Lease -Leaf $stageLeaf -LiteralPath (Join-Path $transactionPath $stageLeaf) -PlatformOs $platform -IncludePermissions;$destinationPermissions=if(-not$IsWindows-and$kind-ceq'write-file'){$intent.Before.permissions}else{$stageState.permissions};[pscustomobject][ordered]@{exists=$true;sha256=$stage.sha256;length=$stage.length;identity=$stage.identity;permissions=$destinationPermissions}}
         $targetKind=if([string]$intent.TargetKind-ceq'git-exclude'){'git-shared-exclude'}else{'repository-relative'};$targetValue=if($targetKind-ceq'git-shared-exclude'){Join-Path ([string]$intent.TargetRoot) ([string]$intent.RelativePath)}else{[string]$intent.RelativePath}
         $displacedMetadata=New-RepositoryTransactionDisplacedMetadataSnapshot -Before $intent.Before -Kind $kind
         $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind=$kind;role=[string]$intent.Role;method=$(if($kind-ceq'remove-file'){'tombstone-rename'}else{'stage-rename'});target=[pscustomobject][ordered]@{kind=$targetKind;value=$targetValue};before=$intent.Before;after=$after;observedAfter=$null;displacedMetadata=$displacedMetadata;displacedAfterMetadata=$null;stageLeaf=$stageLeaf;backupLeaf=$backupLeaf;quarantineLeaf=$null;state='pending'})
@@ -6058,6 +6269,9 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
 }
 
 if (-not [string]::IsNullOrWhiteSpace($RecoverSkillMigration)) {
+    if (-not $IsWindows) {
+        throw 'Legacy Skill migration journal recovery is unavailable on Unix; repository recovery uses the unified transaction journal.'
+    }
     $recoveryLock = Open-RepositoryOperationLock $targetRootPath
     $recoveryIndexLock = $null
     try {
@@ -6764,8 +6978,8 @@ try {
         -not ($projectMutationPaths.Count -gt 0 -and [string]$_ -ceq $manifestRelativePath)
     })
     $mutationBackupRoot = Join-Path $workingPath 'target-backup'
-    $mutationSnapshot = New-TargetMutationSnapshot -TargetRoot $targetRootPath -RelativePaths $snapshotMutationPaths -BackupRoot $mutationBackupRoot -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths
-    $excludeSnapshot = New-GitInfoExcludeSnapshot -Repository $targetRootPath -UsePlatformRuntime:($projectMutationPaths.Count -gt 0)
+    $mutationSnapshot = New-TargetMutationSnapshot -TargetRoot $targetRootPath -RelativePaths $snapshotMutationPaths -BackupRoot $mutationBackupRoot -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths -UsePlatformRuntime:(-not $IsWindows)
+    $excludeSnapshot = New-GitInfoExcludeSnapshot -Repository $targetRootPath -UsePlatformRuntime:((-not $IsWindows) -or $projectMutationPaths.Count -gt 0)
     $migrationJournalPath = Join-Path $mutationBackupRoot 'skill-migration.json'
     $migrationGitState = $null
     if (@($skillMigration | Where-Object removable).Count -gt 0) {
