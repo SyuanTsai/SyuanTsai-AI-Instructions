@@ -1692,7 +1692,7 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
         $txn=Get-Syp214UnifiedTransactionFixture $targetRoot
         $journalOperation=@($txn.journal.operations|Where-Object sequence -eq $op.sequence)[0]
         [string]$journalOperation.state|Should Be 'pending'
-        $journalOperation.PSObject.Properties['displacedAfterMetadata']|Should BeNullOrEmpty
+        ($null-eq$journalOperation.displacedAfterMetadata)|Should Be $true
 
         (&$script:Syp214Recover).exitCode|Should Not Be 0
         $afterState=Get-Syp214UnixFileState $targetPath
@@ -1705,7 +1705,7 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
     # Purpose: Fail closed and preserve that edit.
     It 'InterT20_preserves_later_Instructions_edit_after_atomic_delete_interruption' {
         $op=$script:Syp214GenericOperations.remove;(&$script:Syp214Run "after-operation-$($op.sequence)-before-journal").exitCode|Should Not Be 0;Set-TestText $targetPath '# later user Instructions edit';$later=[IO.File]::ReadAllBytes($targetPath)
-        $recovery=&$script:Syp214Recover;$recovery.exitCode|Should Not Be 0;($recovery.output-join[Environment]::NewLine)|Should Match 'third state|ambiguous or changed';[Convert]::ToBase64String([IO.File]::ReadAllBytes($targetPath))|Should Be ([Convert]::ToBase64String($later));(Get-Syp214UnifiedTransactionFixture $targetRoot).journalPath|Should Not BeNullOrEmpty
+        $recovery=&$script:Syp214Recover;$recovery.exitCode|Should Not Be 0;(ConvertTo-TestDiagnosticText -Output $recovery.output)|Should Match 'third state|ambiguous or changed';[Convert]::ToBase64String([IO.File]::ReadAllBytes($targetPath))|Should Be ([Convert]::ToBase64String($later));(Get-Syp214UnifiedTransactionFixture $targetRoot).journalPath|Should Not BeNullOrEmpty
     }
     # Scenario: Target publication dies after atomic publication and before its journal generation.
     # Purpose: Never publish partial target bytes and preserve later unrelated bytes.
@@ -1931,7 +1931,7 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
     # Purpose: Fail closed while preserving third-state bytes, backup, and journal.
     It 'InterT90_rejects_<CompetingState>_without_clobbering_unrelated_or_owned_bytes' -TestCases @(@{CompetingState='unrelated-final'},@{CompetingState='consumed-stage-then-deleted-final'}) {
         param($CompetingState);(&$script:Syp214Run 'before-committed-journal-write').exitCode|Should Not Be 0;$path=Join-Path $targetRoot 'AGENTS.md';if($CompetingState-ceq'unrelated-final'){$third=[Text.UTF8Encoding]::new($false).GetBytes("unrelated final collision`n");[IO.File]::WriteAllBytes($path,$third)}else{Remove-Item $path -Force}
-        $txn=Get-Syp214UnifiedTransactionFixture $targetRoot;$journal=[IO.File]::ReadAllBytes($txn.journalPath);$recovery=&$script:Syp214Recover;$recovery.exitCode|Should Not Be 0;($recovery.output-join[Environment]::NewLine)|Should Match 'third state|ambiguous or changed';[Convert]::ToBase64String([IO.File]::ReadAllBytes($txn.journalPath))|Should Be ([Convert]::ToBase64String($journal))
+        $txn=Get-Syp214UnifiedTransactionFixture $targetRoot;$journal=[IO.File]::ReadAllBytes($txn.journalPath);$recovery=&$script:Syp214Recover;$recovery.exitCode|Should Not Be 0;(ConvertTo-TestDiagnosticText -Output $recovery.output)|Should Match 'third state|ambiguous or changed';[Convert]::ToBase64String([IO.File]::ReadAllBytes($txn.journalPath))|Should Be ([Convert]::ToBase64String($journal))
         if($CompetingState-ceq'unrelated-final'){[Convert]::ToBase64String([IO.File]::ReadAllBytes($path))|Should Be ([Convert]::ToBase64String($third))}else{Test-Path $path|Should Be $false};Test-Path (Join-Path $txn.path ([string]$script:Syp214GenericOperations.write.backupLeaf))|Should Be $true
     }
     # Scenario: Unified target/exclude publication is applied with inherited/protected DACL and read-only final before interruption.
@@ -2171,7 +2171,7 @@ function Invoke-RepositoryTransactionRollback {
             }
             else {
                 $run.exitCode | Should Not Be 0
-                ($run.output -join "`n") | Should Match 'Injected unified repository rollback'
+                (ConvertTo-TestDiagnosticText -Output $run.output) | Should Match 'Injected unified repository rollback'
                 @($probes | Where-Object { $_.checkpoint -eq 'rollback' }).Count | Should Be 1
                 foreach ($entry in $entries) {
                     (Get-FileHash -LiteralPath (Join-Path $targetRoot $entry.targetPath)).Hash.ToLowerInvariant() | Should Be $entry.sha256
@@ -2295,7 +2295,7 @@ Describe 'SYP214 USER-only bootstrap boundary' {
             $outputText | Should Not Match 'retire verified ignored/untracked copy'
         }
         else{
-            $outputText | Should Match '(?i)((same|identical|overlapping|aliased).*(root|directory)|(root|directory).*(same|identical|overlap|alias|distinct|separate)|must (be )?distinct|must differ)'
+            (ConvertTo-TestDiagnosticText -Output $run.output) | Should Match '(?i)((same|identical|overlapping|aliased).*(root|directory)|(root|directory).*(same|identical|overlap|alias|distinct|separate)|must (be )?distinct|must differ)'
             $outputText | Should Not Match 'retire verified ignored/untracked copy'
         }
         $after=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome -Entries $entriesForSnapshot
@@ -2592,10 +2592,9 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         $failureExitCode=[int]$failureRun.exitCode
         $failureOutputLines=@($failureRun.output | ForEach-Object { [string]$_ })
         $failureOutputText=$failureOutputLines -join [Environment]::NewLine
-        $failureMessageLines=@($failureOutputLines | Where-Object { $_ -match 'Injected Skill migration failure' })
-        $failureMessageLines.Count | Should BeGreaterThan 0
-        $failureMessage=$failureMessageLines[-1]
-        $failureMessage | Should Match 'Injected Skill migration failure'
+        $failureDiagnostic=ConvertTo-TestDiagnosticText -Output $failureOutputLines
+        $failureDiagnostic | Should Match 'Injected Skill migration failure'
+        $failureMessage=[regex]::Match($failureDiagnostic,'Injected Skill migration failure').Value
         $failureExitCode | Should Not Be 0
         $transactionRoot=Get-Syp214RepositoryTransactionRoot -Repository $targetRoot
         $transactionResidue=@(Get-ChildItem -Force -LiteralPath $transactionRoot -ErrorAction SilentlyContinue)
