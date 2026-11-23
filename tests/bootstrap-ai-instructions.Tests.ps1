@@ -3941,6 +3941,19 @@ Describe 'bootstrap Unix snapshot routing contract' {
             $bootstrapRootLiteral = "'" + $bootstrapRoot.Replace("'","''") + "'"
             $prefixText = $bootstrapText.Substring(0,$prefixEnd).Replace('$PSScriptRoot',$bootstrapRootLiteral)
             . ([scriptblock]::Create($prefixText)) -TargetRoot $TestDrive -UserHome $TestDrive -GitExecutable 'git'
+            $tokens = $null
+            $parseErrors = $null
+            $bootstrapAst = [Management.Automation.Language.Parser]::ParseFile(
+                $script:BootstrapScript,[ref]$tokens,[ref]$parseErrors)
+            if (@($parseErrors).Count -ne 0) { throw 'Bootstrap script did not parse.' }
+            $postBoundaryFunctions = @($bootstrapAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Extent.StartOffset -gt $prefixEnd
+            },$false) | Sort-Object { $_.Extent.StartOffset })
+            foreach ($definition in $postBoundaryFunctions) {
+                . ([scriptblock]::Create($definition.Extent.Text))
+            }
         }
 
         BeforeEach {
@@ -3967,7 +3980,7 @@ Describe 'bootstrap Unix snapshot routing contract' {
             [Convert]::ToBase64String([byte[]]$exclude.Bytes) | Should Be ([Convert]::ToBase64String($excludeBytes))
             [string]$exclude.PlatformState.identity.kind | Should Be 'unix-device-inode'
             [string]$exclude.PlatformState.permissions.kind | Should Be 'unix-mode'
-            [string]$exclude.PlatformState.permissions.mode | Should Match '^[0-7]{4}$'
+            [string]$exclude.PlatformState.permissions.mode | Should Match '^[0-7]{3}$'
             $exclude.PlatformState.permissions.uid | Should Not BeNullOrEmpty
             $exclude.PlatformState.permissions.gid | Should Not BeNullOrEmpty
             [Convert]::ToBase64String([IO.File]::ReadAllBytes([string]$target.FileStates[0].BackupPath)) |
@@ -4143,12 +4156,12 @@ Describe 'bootstrap Unix snapshot routing contract' {
             $path = if ($SnapshotKind -ceq 'exclude') { Join-Path $unixRepository '.git/info/exclude' } else { Join-Path $unixRepository 'AGENTS.md' }
             [byte[]]$bytes = [Text.UTF8Encoding]::new($false).GetBytes("stable bytes`n")
             [IO.File]::WriteAllBytes($path,$bytes)
-            & chmod 0644 -- $path
+            & chmod 0644 $path
             if ($LASTEXITCODE -ne 0) { throw "chmod fixture setup failed for $path" }
             $realCapture = (Get-Command Get-PlatformMutationFileSnapshot -CommandType Function).ScriptBlock
             $mutation = {
                 if ($Drift -ceq 'mode') {
-                    & chmod 0600 -- $path
+                    & chmod 0600 $path
                     if ($LASTEXITCODE -ne 0) { throw "chmod drift injection failed for $path" }
                 }
                 elseif ($Drift -ceq 'content') {
@@ -4193,7 +4206,12 @@ Describe 'bootstrap Unix snapshot routing contract' {
             finally { Set-Item -LiteralPath Function:\Get-PlatformMutationFileSnapshot -Value $realCapture }
 
             if ($SnapshotKind -ceq 'exclude') {
-                $message | Should Match 'Shared Git exclude changed concurrently during platform snapshot:'
+                if ($Drift -ceq 'symlink') {
+                    $message | Should Match 'Shared Git exclude platform snapshot failed closed:.*Install recovery observed an external change'
+                }
+                else {
+                    $message | Should Match 'Shared Git exclude changed concurrently during platform snapshot:'
+                }
             }
             else {
                 $message | Should Match 'Managed target changed while its platform rollback snapshot was captured:'
@@ -4251,7 +4269,7 @@ Describe 'bootstrap Unix snapshot routing contract' {
                 [IO.File]::WriteAllText($targetPath,"# original target`n",[Text.UTF8Encoding]::new($false))
                 [IO.File]::WriteAllText($excludePath,"# original exclude`n",[Text.UTF8Encoding]::new($false))
                 foreach ($path in @($targetPath,$excludePath)) {
-                    & chmod 0640 -- $path
+                    & chmod 0640 $path
                     if ($LASTEXITCODE -ne 0) { throw "chmod fixture setup failed for $path" }
                     $parentLease = Open-PlatformDirectory -Root (Split-Path -Parent $path) -RootOnly
                     try {
@@ -4279,7 +4297,7 @@ Describe 'bootstrap Unix snapshot routing contract' {
                 finally { $parentLease.Dispose() }
                 [string]$afterState.permissions.kind | Should Be 'unix-mode'
                 if ($PublicationKind -ceq 'new') {
-                    [string]$afterState.permissions.mode | Should Be '0600'
+                    [Convert]::ToInt32([string]$afterState.permissions.mode,8) | Should Be 384
                 }
                 else {
                     foreach ($name in @('mode','uid','gid')) {
@@ -4295,7 +4313,7 @@ Describe 'bootstrap Unix snapshot routing contract' {
             $path = Join-Path $unixRepository 'AGENTS.md'
             [byte[]]$originalBytes = [Text.UTF8Encoding]::new($false).GetBytes("# stable target`n")
             [IO.File]::WriteAllBytes($path,$originalBytes)
-            & chmod 0644 -- $path
+            & chmod 0644 $path
             if ($LASTEXITCODE -ne 0) { throw "chmod fixture setup failed for $path" }
             $context = New-ProjectPublicationContext -Repository $unixRepository
             $script:ProjectPublicationContext = $context
@@ -4303,7 +4321,7 @@ Describe 'bootstrap Unix snapshot routing contract' {
             try {
                 Set-ProjectPublicationFileBytes -RelativePath 'AGENTS.md' `
                     -Bytes ([Text.UTF8Encoding]::new($false).GetBytes("# changed target`n"))
-                & chmod 0600 -- $path
+                & chmod 0600 $path
                 if ($LASTEXITCODE -ne 0) { throw "chmod drift injection failed for $path" }
                 $context.RepositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $unixRepository
                 Invoke-RepositoryInstallTransaction -Context $context
@@ -4338,7 +4356,7 @@ Describe 'bootstrap Unix snapshot routing contract' {
                 if (-not $driftInjected -and $Name -cmatch '^after-operation-[1-9][0-9]*-before-journal$' -and
                     (Test-Path -LiteralPath $infoPath -PathType Container) -and
                     -not (Test-Path -LiteralPath $excludePath)) {
-                    & chmod 0777 -- $infoPath
+                    & chmod 0777 $infoPath
                     if ($LASTEXITCODE -ne 0) { throw "chmod anchor drift injection failed for $infoPath" }
                     $driftInjected = $true
                 }

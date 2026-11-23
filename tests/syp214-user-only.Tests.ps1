@@ -1619,9 +1619,11 @@ function Close-Syp214UserCoordinationLock {
 
 function Get-Syp214UnixFileState {
     param([Parameter(Mandatory=$true)][string]$Path)
+    $transactionModule=Import-Module (Join-Path $script:RepositoryRoot 'scripts/ai-instructions-install-transaction.psm1') -Force -PassThru
     $parent=Open-PlatformDirectory -Root (Split-Path -Parent $Path) -RootOnly
     try{
-        return Get-AiInstructionsInstallFileState -ParentLease $parent -Leaf (Split-Path -Leaf $Path) -LiteralPath $Path `
+        return & $transactionModule.ExportedCommands['Get-AiInstructionsInstallFileState'] `
+            -ParentLease $parent -Leaf (Split-Path -Leaf $Path) -LiteralPath $Path `
             -PlatformOs $(if($IsLinux){'linux'}else{'macos'}) -IncludePermissions
     }
     finally{$parent.Dispose()}
@@ -1897,7 +1899,8 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
             -ConfigurationPath $script:Syp214GenericConfiguration -ProvenancePath $provenancePath `
             -RecoverSkillMigration $journalPath 2>&1
         $LASTEXITCODE|Should Not Be 0
-        ($output-join[Environment]::NewLine)|Should Match 'Legacy Skill migration journal recovery is unavailable on Unix; repository recovery uses the unified transaction journal\.'
+        $exceptionMessages=@($output|Where-Object{$null-ne$_.Exception}|ForEach-Object{$_.Exception.Message})
+        ($exceptionMessages-join[Environment]::NewLine)|Should Match 'Legacy Skill migration journal recovery is unavailable on Unix; repository recovery uses the unified transaction journal\.'
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))|Should Be ([Convert]::ToBase64String($journalBefore))
         (Test-Syp214UnifiedStateEqual $stateBefore (Get-Syp214FixtureSnapshot $targetRoot $userHome $script:Syp214GenericEntries))|Should Be $true
     }
@@ -2662,7 +2665,8 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         [string]$manifestOperation.kind | Should Be 'write-file'
         [string]$manifestOperation.target.value | Should Be $script:ManifestPath.Replace('\','/')
         [bool]$manifestOperation.before.exists | Should Be $true
-        [string]$manifestOperation.before.identity.kind | Should Be 'windows-file-id'
+        if($IsWindows){[string]$manifestOperation.before.identity.kind | Should Be 'windows-file-id'}
+        else{[string]$manifestOperation.before.identity.kind | Should Be 'unix-device-inode'}
         [string]$manifestOperation.before.sha256 | Should Match '^[0-9a-f]{64}$'
         [string]$manifestOperation.after.sha256 | Should Match '^[0-9a-f]{64}$'
         [long]$manifestOperation.after.length | Should BeGreaterThan 0
@@ -2682,9 +2686,24 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
             Test-Path -LiteralPath $manifestBackupPath -PathType Leaf | Should Be $true
             (Get-FileHash -LiteralPath $manifestBackupPath -Algorithm SHA256).Hash.ToLowerInvariant() | Should Be ([string]$manifestOperation.before.sha256)
         }
-        [string]$manifestOperation.displacedMetadata.kind | Should Be 'windows-sddl'
-        [string]$manifestOperation.displacedMetadata.sddl | Should Be ([string]$manifestOperation.before.permissions.sddl)
-        [bool]$manifestOperation.displacedMetadata.readOnly | Should Be ([bool]$manifestOperation.before.permissions.readOnly)
+        if($IsWindows){
+            [string]$manifestOperation.displacedMetadata.kind | Should Be 'windows-sddl'
+            [string]$manifestOperation.displacedMetadata.sddl | Should Be ([string]$manifestOperation.before.permissions.sddl)
+            [bool]$manifestOperation.displacedMetadata.readOnly | Should Be ([bool]$manifestOperation.before.permissions.readOnly)
+        }
+        else{
+            foreach($name in @('device','fileId')){[string]$manifestOperation.before.identity.$name|Should Not BeNullOrEmpty}
+            $manifestOriginalPath=if($State-ceq'pending-intent'){Join-Path $targetRoot $script:ManifestPath}else{$manifestBackupPath}
+            $manifestOriginalState=Get-Syp214UnixFileState $manifestOriginalPath
+            [string]$manifestOriginalState.identity.kind|Should Be 'unix-device-inode'
+            foreach($name in @('device','fileId')){
+                [string]$manifestOriginalState.identity.$name|Should Be ([string]$manifestOperation.before.identity.$name)
+            }
+            [string]$manifestOperation.displacedMetadata.kind | Should Be 'unix-mode'
+            foreach($name in @('mode','uid','gid')){
+                [string]$manifestOperation.displacedMetadata.$name|Should Be ([string]$manifestOperation.before.permissions.$name)
+            }
+        }
 
         $driftRelativePath=$null
         $corruptBackupName=$null
