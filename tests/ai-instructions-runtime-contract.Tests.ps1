@@ -3900,6 +3900,19 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $absent|Out-Null})|Should Match 'PersonalAgent evidence CAS'
     }
 
+    # Scenario: Consumer bootstrap coordinates legacy USER Skill retirement on Windows and Unix.
+    # Purpose: Keep the Windows handle path unchanged while routing Unix through the verified platform flock primitive.
+    It 'UnitT226a_routes_the_USER_migration_lock_through_the_platform_runtime_only_on_Unix' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $definition=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Open-UserSkillMigrationLock'},$true))[0].Extent.Text
+        $definition|Should Match 'if\s*\(\s*-not\s+\$IsWindows\s*\)'
+        $definition|Should Match "(?s)ExportedCommands\['Open-PlatformDirectory'\].*RelativePath\s+'\.agents'"
+        $definition|Should Match "(?s)ExportedCommands\['Enter-PlatformLock'\].*update-agent-environment\.lock.*Mode\s+Exclusive.*TimeSpan\]::Zero"
+        $definition|Should Match 'NativeFileMutation\]::OpenExclusiveUserUpdateLock'
+        $definition.IndexOf("ExportedCommands['Enter-PlatformLock']",[StringComparison]::Ordinal)|Should BeLessThan $definition.IndexOf('NativeFileMutation]::OpenExclusiveUserUpdateLock',[StringComparison]::Ordinal)
+    }
+
     # Scenario: Detached HEAD publication runs with a simulated pre-2.46 Git, then with HEAD changed to a different symbolic ref after the old detached OID was observed.
     # Purpose: Add the version seam and prove the atomic symref CAS preserves an external HEAD change while returning the required typed refusals.
     It 'UnitT227_requires_Git_2_46_and_preserves_HEAD_when_detached_to_symbolic_CAS_loses' {

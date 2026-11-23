@@ -1850,6 +1850,19 @@ function Open-UserSkillMigrationLock {
     if (-not (Test-Path -LiteralPath (Join-Path $homePath '.agents') -PathType Container)) {
         throw 'USER updater lock unavailable because the USER .agents root is missing.'
     }
+    if (-not $IsWindows) {
+        $guard = & $bootstrapPlatformRuntimeModule.ExportedCommands['Open-PlatformDirectory'] `
+            -Root $homePath -RelativePath '.agents'
+        try {
+            $lock = & $bootstrapPlatformRuntimeModule.ExportedCommands['Enter-PlatformLock'] `
+                -ParentLease $guard -Leaf 'update-agent-environment.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+            return [pscustomobject]@{ Stream=$lock; Guard=$guard }
+        }
+        catch {
+            $guard.Dispose()
+            throw
+        }
+    }
     $guard = $null
     $handle = $null
     try {
