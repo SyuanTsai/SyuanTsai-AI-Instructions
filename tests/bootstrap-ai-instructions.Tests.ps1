@@ -4350,15 +4350,15 @@ Describe 'bootstrap Unix snapshot routing contract' {
             $script:ProjectPublicationContext = $context
             Set-ManagedGitInfoExclude -Repository $unixRepository -ManagedPaths @('AGENTS.md') -Snapshot $snapshot
             $realFailpoint = (Get-Command Invoke-AiInstructionsInstallFailpoint -CommandType Function).ScriptBlock
-            $driftInjected = $false
+            $hookState = [pscustomobject]@{ DriftInjected = $false }
             $failpointHook = {
                 param([Parameter(Mandatory = $true)][string] $Name)
-                if (-not $driftInjected -and $Name -cmatch '^after-operation-[1-9][0-9]*-before-journal$' -and
+                if (-not $hookState.DriftInjected -and $Name -cmatch '^after-operation-[1-9][0-9]*-before-journal$' -and
                     (Test-Path -LiteralPath $infoPath -PathType Container) -and
                     -not (Test-Path -LiteralPath $excludePath)) {
                     & chmod 0777 $infoPath
                     if ($LASTEXITCODE -ne 0) { throw "chmod anchor drift injection failed for $infoPath" }
-                    $driftInjected = $true
+                    $hookState.DriftInjected = $true
                 }
                 & $realFailpoint -Name $Name
             }.GetNewClosure()
@@ -4377,7 +4377,7 @@ Describe 'bootstrap Unix snapshot routing contract' {
                 $script:ProjectPublicationContext = $null
             }
 
-            $driftInjected | Should Be $true
+            $hookState.DriftInjected | Should Be $true
             $message | Should Match 'Repository transaction terminal verification failed for sequence [1-9][0-9]*\.'
             Test-Path -LiteralPath $excludePath -PathType Leaf | Should Be $true
         }

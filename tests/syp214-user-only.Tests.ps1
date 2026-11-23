@@ -1900,7 +1900,7 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
             -RecoverSkillMigration $journalPath 2>&1
         $LASTEXITCODE|Should Not Be 0
         $exceptionMessages=@($output|Where-Object{$null-ne$_.Exception}|ForEach-Object{$_.Exception.Message})
-        ($exceptionMessages-join[Environment]::NewLine)|Should Match 'Legacy Skill migration journal recovery is unavailable on Unix; repository recovery uses the unified transaction journal\.'
+        (ConvertTo-TestDiagnosticText -Output $exceptionMessages)|Should Match 'Legacy Skill migration journal recovery is unavailable on Unix; repository recovery uses the unified transaction journal\.'
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))|Should Be ([Convert]::ToBase64String($journalBefore))
         (Test-Syp214UnifiedStateEqual $stateBefore (Get-Syp214FixtureSnapshot $targetRoot $userHome $script:Syp214GenericEntries))|Should Be $true
     }
@@ -1976,9 +1976,9 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
         [string]$journalOperation.state|Should Be 'pending'
         [string]$journalOperation.displacedMetadata.kind|Should Be 'unix-mode'
         foreach($name in @('mode','uid','gid')){[string]$journalOperation.displacedMetadata.$name|Should Be ([string]$beforeState.permissions.$name)}
-        [string]$journalOperation.backupIdentity.kind|Should Be 'unix-device-inode'
-        [string]$journalOperation.backupIdentity.device|Should Be ([string]$beforeState.identity.device)
-        [string]$journalOperation.backupIdentity.fileId|Should Be ([string]$beforeState.identity.fileId)
+        [string]$journalOperation.before.identity.kind|Should Be 'unix-device-inode'
+        [string]$journalOperation.before.identity.device|Should Be ([string]$beforeState.identity.device)
+        [string]$journalOperation.before.identity.fileId|Should Be ([string]$beforeState.identity.fileId)
         $appliedState=Get-Syp214UnixFileState $path
         foreach($name in @('mode','uid','gid')){[string]$appliedState.permissions.$name|Should Be ([string]$beforeState.permissions.$name)}
         [string]$appliedState.identity.device|Should Be ([string]$beforeState.identity.device)
@@ -2766,7 +2766,7 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
                 (Test-Syp214InventoryEqual -Left $preRecoverySnapshot.repository.stashes -Right $afterSnapshot.repository.stashes)
             $journalExists=Test-Path -LiteralPath $journalPath -PathType Leaf
             $journalPreserved=$journalExists -and [Convert]::ToBase64String($journalBytesBefore) -ceq [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))
-            $expectedRefusal=if($State -ceq 'later-edit'){'Schema-v2 publication state is ambiguous or changed'}else{'Stage hash or length differs|unreadable or invalid'}
+            $expectedRefusal=if($State -ceq 'later-edit'){'Schema-v2 publication state is ambiguous or changed'}elseif($IsWindows){'Stage hash or length differs|unreadable or invalid'}else{"Platform verification for 'publication' failed on '(?:linux|macos)': stage identity, length, or SHA-256 is invalid"}
             $refusalClassified=$recoveryOutputText -match $expectedRefusal
             $refusedThirdState=$treePreserved -and $gitCorePreserved -and $stashPreserved -and $residueAfter.Count -eq 1 -and $journalPreserved -and $refusalClassified
             if(-not$refusedThirdState){throw "Unified refusal mismatch: tree=$treePreserved gitCore=$gitCorePreserved stash=$stashPreserved residue=$($residueAfter.Count) journal=$journalPreserved classified=$refusalClassified output=$recoveryOutputText"}
