@@ -3628,6 +3628,34 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 -Journal $journal|Out-Null})|Should Match 'unsupported property'
     }
 
+    # Scenario: The common Git info directory is absent and the repository transaction must create it before info/exclude.
+    # Purpose: Bind the external directory anchor to the exact common-dir info path while keeping the exclude file a distinct target.
+    It 'UnitT219a_accepts_only_the_bound_shared_exclude_directory_anchor' {
+        $journal=Get-TestInstallJournalV2
+        $identity=$journal.scope.repositoryRootIdentity
+        $permissions=$journal.operations[0].after.permissions
+        $journal.operations=@(
+            [pscustomobject][ordered]@{
+                sequence=1;kind='ensure-directory-anchor';role='shared-exclude-directory-anchor';method='directory-rename'
+                target=[pscustomobject][ordered]@{kind='git-shared-exclude-directory';value=(Join-Path $journal.scope.commonGitDirectory 'info')}
+                before=[pscustomobject][ordered]@{exists=$false;identity=$null;permissions=$null}
+                after=[pscustomobject][ordered]@{exists=$true;identity=$identity;permissions=$permissions}
+                observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf='operation-1.directory';backupLeaf=$null;quarantineLeaf=$null;state='pending'
+            },
+            [pscustomobject][ordered]@{
+                sequence=2;kind='create-file';role='shared-exclude';method='stage-rename'
+                target=[pscustomobject][ordered]@{kind='git-shared-exclude';value=(Join-Path $journal.scope.commonGitDirectory 'info/exclude')}
+                before=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null}
+                after=$journal.operations[0].after;observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf='operation-2.stage';backupLeaf=$null;quarantineLeaf=$null;state='pending'
+            }
+        )
+
+        {Assert-AiInstructionsInstallJournalV2 -Journal $journal|Out-Null}|Should Not Throw
+        $journal.operations[0].target.value=Join-Path $journal.scope.commonGitDirectory 'objects'
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 -Journal $journal|Out-Null}) |
+            Should Match 'not the scope shared exclude directory'
+    }
+
     # Scenario: Every known install-journal owner is paired with the wrong schema version or reader component.
     # Purpose: Fail closed on cross-family owner/version combinations, including old readers encountering repository v2 evidence.
     It 'UnitT220_refuses_all_install_journal_owner_version_cross_pairings' {

@@ -329,6 +329,20 @@ Describe 'bootstrap-ai-instructions' {
         New-TestProvenance -ArchivePath $sourceArchive -Path $provenancePath
     }
 
+    # Scenario: A valid repository has no common Git info directory before its first synchronization.
+    # Purpose: Publish info/exclude through the journaled directory anchor on every supported host.
+    It 'InterT03a_creates_a_missing_common_Git_info_directory_before_exclude_publication' {
+        $commonGitDirectory = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-common-dir') | Select-Object -First 1).Trim()
+        if (-not [IO.Path]::IsPathRooted($commonGitDirectory)) { $commonGitDirectory = Join-Path $targetRoot $commonGitDirectory }
+        $infoPath = Join-Path $commonGitDirectory 'info'
+        Remove-Item -LiteralPath $infoPath -Recurse -Force
+
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+
+        Test-Path -LiteralPath (Join-Path $infoPath 'exclude') -PathType Leaf | Should Be $true
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $commonGitDirectory '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count | Should Be 0
+    }
+
     # Register only on the native Windows host because this regression exercises the Windows PowerShell 5.1 process.
     if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows) -and
         $null -ne (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
@@ -3915,6 +3929,247 @@ Describe 'bootstrap Unix snapshot routing contract' {
             }, $true))
             $productionCalls.Count | Should Be 1
             [string]$productionCalls[0].Extent.Text | Should Match '-UsePlatformRuntime:\s*\(\s*(?:\(\s*)?-not\s+\$IsWindows\s*\)'
+        }
+    }
+
+    if (-not $script:IsWindowsHost) {
+        BeforeAll {
+            $bootstrapText = [IO.File]::ReadAllText($script:BootstrapScript)
+            $prefixEnd = $bootstrapText.IndexOf('$syncStartPath = ',[StringComparison]::Ordinal)
+            if ($prefixEnd -lt 0) { throw 'Could not find the bootstrap definition prefix boundary.' }
+            $bootstrapRoot = Split-Path -Parent $script:BootstrapScript
+            $bootstrapRootLiteral = "'" + $bootstrapRoot.Replace("'","''") + "'"
+            $prefixText = $bootstrapText.Substring(0,$prefixEnd).Replace('$PSScriptRoot',$bootstrapRootLiteral)
+            . ([scriptblock]::Create($prefixText)) -TargetRoot $TestDrive -UserHome $TestDrive -GitExecutable 'git'
+        }
+
+        BeforeEach {
+            $unixRepository = Join-Path $TestDrive 'unix-repository'
+            $unixBackupRoot = Join-Path $TestDrive 'unix-backup'
+            New-TestRepository -Path $unixRepository
+        }
+
+        # Scenario: A regular shared exclude and managed target are captured on a Unix host.
+        # Purpose: Retain exact bytes together with Unix identity and mode/uid/gid authority.
+        It 'InterT130_captures_regular_Unix_snapshot_bytes_identity_and_permissions' {
+            $excludePath = Join-Path $unixRepository '.git/info/exclude'
+            [byte[]]$excludeBytes = [Text.UTF8Encoding]::new($false).GetBytes("# unix exclude`n")
+            [IO.File]::WriteAllBytes($excludePath,$excludeBytes)
+            $targetPath = Join-Path $unixRepository 'AGENTS.md'
+            [byte[]]$targetBytes = [Text.UTF8Encoding]::new($false).GetBytes("# unix target`n")
+            [IO.File]::WriteAllBytes($targetPath,$targetBytes)
+
+            $exclude = New-GitInfoExcludeSnapshot -Repository $unixRepository -UsePlatformRuntime
+            $target = New-TargetMutationSnapshot -TargetRoot $unixRepository -RelativePaths @('AGENTS.md') `
+                -BackupRoot $unixBackupRoot -UsePlatformRuntime
+
+            [Convert]::ToBase64String([byte[]]$exclude.Bytes) | Should Be ([Convert]::ToBase64String($excludeBytes))
+            [string]$exclude.PlatformState.identity.kind | Should Be 'unix-device-inode'
+            [string]$exclude.PlatformState.permissions.kind | Should Be 'unix-mode'
+            [string]$exclude.PlatformState.permissions.mode | Should Match '^[0-7]{4}$'
+            $exclude.PlatformState.permissions.uid | Should Not BeNullOrEmpty
+            $exclude.PlatformState.permissions.gid | Should Not BeNullOrEmpty
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes([string]$target.FileStates[0].BackupPath)) |
+                Should Be ([Convert]::ToBase64String($targetBytes))
+            [string]$target.FileStates[0].PlatformState.identity.kind | Should Be 'unix-device-inode'
+            [string]$target.FileStates[0].PlatformState.permissions.kind | Should Be 'unix-mode'
+        }
+
+        # Scenario: A valid repository has no common Git info directory.
+        # Purpose: Treat the missing exclude as absent without opening a nonexistent parent directory.
+        It 'InterT140_returns_an_absent_snapshot_when_the_common_Git_info_directory_is_missing' {
+            Remove-Item -LiteralPath (Join-Path $unixRepository '.git/info') -Recurse -Force
+
+            $snapshot = New-GitInfoExcludeSnapshot -Repository $unixRepository -UsePlatformRuntime
+
+            [bool]$snapshot.Existed | Should Be $false
+            $snapshot.Bytes | Should BeNullOrEmpty
+            [bool]$snapshot.PlatformState.exists | Should Be $false
+        }
+
+        # Scenario: A normal Unix bootstrap starts from a repository whose common Git info directory is absent.
+        # Purpose: Create info/exclude through the unified transaction and never emit a legacy migration journal.
+        It 'InterT150_creates_a_missing_common_Git_info_directory_through_the_unified_transaction' {
+            $archiveRoot = Join-Path $TestDrive 'unix-archive'
+            $sourceRoot = Join-Path $archiveRoot 'example-ai-instructions-main'
+            $sourceArchive = Join-Path $TestDrive 'unix-source.zip'
+            $configurationPath = Join-Path $TestDrive 'unix-sync-config.json'
+            $provenancePath = Join-Path $TestDrive 'unix-provenance.json'
+            New-TestSource -Path $sourceRoot
+            Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+            New-TestConfiguration -Path $configurationPath
+            New-TestProvenance -ArchivePath $sourceArchive -Path $provenancePath
+            Remove-Item -LiteralPath (Join-Path $unixRepository '.git/info') -Recurse -Force
+
+            $output = & $script:TestPowerShellExecutable -NoProfile -NonInteractive -File $script:BootstrapScript `
+                -SourceArchivePath $sourceArchive -TargetRoot $unixRepository -ConfigurationPath $configurationPath `
+                -ProvenancePath $provenancePath 2>&1
+
+            $LASTEXITCODE | Should Be 0
+            Test-Path -LiteralPath (Join-Path $unixRepository '.git/info/exclude') -PathType Leaf | Should Be $true
+            @(Get-ChildItem -LiteralPath $TestDrive -Filter 'skill-migration.json' -File -Recurse -Force).Count | Should Be 0
+            (ConvertTo-TestDiagnosticText -Output @($output)) | Should Not Match 'skill-migration\.json'
+        }
+
+        # Scenario: A linked worktree resolves info/exclude through its common Git directory.
+        # Purpose: Keep snapshot authority bound to the shared common-dir exclude rather than the worktree .git file.
+        It 'InterT160_resolves_a_linked_worktree_snapshot_to_the_common_Git_directory' {
+            $linkedRoot = Join-Path $TestDrive 'unix-linked-worktree'
+            Invoke-TestGit -Repository $unixRepository -Arguments @('worktree','add','--quiet','-b','unix-linked-fixture',$linkedRoot) | Out-Null
+            try {
+                $snapshot = New-GitInfoExcludeSnapshot -Repository $linkedRoot -UsePlatformRuntime
+                $commonDir = (Invoke-TestGit -Repository $linkedRoot -Arguments @('rev-parse','--git-common-dir') | Select-Object -First 1).Trim()
+                if (-not [IO.Path]::IsPathRooted($commonDir)) { $commonDir = Join-Path $linkedRoot $commonDir }
+                [IO.Path]::GetFullPath([string]$snapshot.Path) |
+                    Should Be ([IO.Path]::GetFullPath((Join-Path $commonDir 'info/exclude')))
+            }
+            finally { Invoke-TestGit -Repository $unixRepository -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null }
+        }
+
+        # Scenario: The exclude leaf is a symlink to a file or is a dangling symlink.
+        # Purpose: Refuse both shapes before any symlink target can supply snapshot bytes.
+        It 'InterT170_fails_closed_for_a_<LinkKind>_shared_exclude_symlink' -TestCases @(
+            @{LinkKind='file'},
+            @{LinkKind='dangling'}
+        ) {
+            param($LinkKind)
+            $excludePath = Join-Path $unixRepository '.git/info/exclude'
+            $outside = Join-Path $TestDrive 'outside-exclude'
+            Remove-Item -LiteralPath $excludePath -Force
+            if ($LinkKind -ceq 'file') { [IO.File]::WriteAllText($outside,"outside`n") }
+            New-Item -ItemType SymbolicLink -Path $excludePath -Target $outside | Out-Null
+            $message = $null
+
+            try { New-GitInfoExcludeSnapshot -Repository $unixRepository -UsePlatformRuntime | Out-Null }
+            catch { $message = $_.Exception.Message }
+
+            $message | Should Match '(?:Shared Git exclude platform snapshot failed closed:|Unsafe shared Git exclude mutation path)'
+            $message | Should Match '(?:reparse|non-reparse)'
+        }
+
+        # Scenario: The common Git info component is a symlink.
+        # Purpose: Refuse parent traversal even when the symlink target is a physical directory.
+        It 'InterT180_fails_closed_when_the_common_Git_info_directory_is_a_symlink' {
+            $infoPath = Join-Path $unixRepository '.git/info'
+            $outsideInfo = Join-Path $TestDrive 'outside-info'
+            Remove-Item -LiteralPath $infoPath -Recurse -Force
+            New-Item -ItemType Directory -Path $outsideInfo | Out-Null
+            New-Item -ItemType SymbolicLink -Path $infoPath -Target $outsideInfo | Out-Null
+            $message = $null
+
+            try { New-GitInfoExcludeSnapshot -Repository $unixRepository -UsePlatformRuntime | Out-Null }
+            catch { $message = $_.Exception.Message }
+
+            $message | Should Match '(?:Shared Git exclude parent directory snapshot failed closed:|Unsafe shared Git exclude mutation path)'
+            $message | Should Match '(?:reparse|non-reparse)'
+        }
+
+        # Scenario: A managed target leaf is a symlink to a file or is dangling.
+        # Purpose: Refuse target snapshot capture before following either symlink shape.
+        It 'InterT190_fails_closed_for_a_<LinkKind>_managed_target_symlink' -TestCases @(
+            @{LinkKind='file'},
+            @{LinkKind='dangling'}
+        ) {
+            param($LinkKind)
+            $targetPath = Join-Path $unixRepository 'AGENTS.md'
+            $outside = Join-Path $TestDrive 'outside-target'
+            if ($LinkKind -ceq 'file') { [IO.File]::WriteAllText($outside,"outside`n") }
+            New-Item -ItemType SymbolicLink -Path $targetPath -Target $outside | Out-Null
+            $message = $null
+
+            try {
+                New-TargetMutationSnapshot -TargetRoot $unixRepository -RelativePaths @('AGENTS.md') `
+                    -BackupRoot $unixBackupRoot -UsePlatformRuntime | Out-Null
+            }
+            catch { $message = $_.Exception.Message }
+
+            $message | Should Match 'Managed target (?:path crosses a reparse point|platform rollback snapshot failed closed):'
+        }
+
+        # Scenario: Mode drift, same-byte inode replacement, or a symlink swap occurs after the no-follow read.
+        # Purpose: Re-observation must reject every drift class for both exclude and target snapshots.
+        It 'InterT200_fails_closed_for_<Drift>_drift_during_a_<SnapshotKind>_snapshot' -TestCases @(
+            @{SnapshotKind='exclude';Drift='mode'},
+            @{SnapshotKind='exclude';Drift='inode'},
+            @{SnapshotKind='exclude';Drift='symlink'},
+            @{SnapshotKind='target';Drift='mode'},
+            @{SnapshotKind='target';Drift='inode'},
+            @{SnapshotKind='target';Drift='symlink'}
+        ) {
+            param($SnapshotKind,$Drift)
+            $path = if ($SnapshotKind -ceq 'exclude') { Join-Path $unixRepository '.git/info/exclude' } else { Join-Path $unixRepository 'AGENTS.md' }
+            [byte[]]$bytes = [Text.UTF8Encoding]::new($false).GetBytes("stable bytes`n")
+            [IO.File]::WriteAllBytes($path,$bytes)
+            & chmod 0644 -- $path
+            if ($LASTEXITCODE -ne 0) { throw "chmod fixture setup failed for $path" }
+            $realCapture = (Get-Command Get-PlatformMutationFileSnapshot -CommandType Function).ScriptBlock
+            $mutation = {
+                if ($Drift -ceq 'mode') {
+                    & chmod 0600 -- $path
+                    if ($LASTEXITCODE -ne 0) { throw "chmod drift injection failed for $path" }
+                }
+                elseif ($Drift -ceq 'inode') {
+                    $replacement = $path + '.replacement'
+                    [IO.File]::WriteAllBytes($replacement,$bytes)
+                    & mv -f -- $replacement $path
+                    if ($LASTEXITCODE -ne 0) { throw "inode drift injection failed for $path" }
+                }
+                else {
+                    $outside = $path + '.outside'
+                    [IO.File]::WriteAllBytes($outside,$bytes)
+                    Remove-Item -LiteralPath $path -Force
+                    New-Item -ItemType SymbolicLink -Path $path -Target $outside | Out-Null
+                }
+            }.GetNewClosure()
+            $hook = {
+                param($ParentLease,$Leaf,$LiteralPath,$PlatformOs)
+                $capture = & $realCapture -ParentLease $ParentLease -Leaf $Leaf -LiteralPath $LiteralPath -PlatformOs $PlatformOs
+                & $mutation
+                return $capture
+            }.GetNewClosure()
+            Set-Item -LiteralPath Function:\Get-PlatformMutationFileSnapshot -Value $hook
+            $message = $null
+            try {
+                if ($SnapshotKind -ceq 'exclude') {
+                    New-GitInfoExcludeSnapshot -Repository $unixRepository -UsePlatformRuntime | Out-Null
+                }
+                else {
+                    New-TargetMutationSnapshot -TargetRoot $unixRepository -RelativePaths @('AGENTS.md') `
+                        -BackupRoot $unixBackupRoot -UsePlatformRuntime | Out-Null
+                }
+            }
+            catch { $message = $_.Exception.Message }
+            finally { Set-Item -LiteralPath Function:\Get-PlatformMutationFileSnapshot -Value $realCapture }
+
+            if ($SnapshotKind -ceq 'exclude') {
+                $message | Should Match 'Shared Git exclude changed concurrently during platform snapshot:'
+            }
+            else {
+                $message | Should Match 'Managed target changed while its platform rollback snapshot was captured:'
+            }
+        }
+
+        # Scenario: A caller explicitly requests the obsolete skill-migration journal on Unix.
+        # Purpose: Refuse with a platform-specific message before Windows-only journal parsing or mutation APIs run.
+        It 'InterT210_refuses_legacy_skill_migration_recovery_on_Unix' {
+            $archiveRoot = Join-Path $TestDrive 'recover-archive'
+            $sourceRoot = Join-Path $archiveRoot 'example-ai-instructions-main'
+            $sourceArchive = Join-Path $TestDrive 'recover-source.zip'
+            $configurationPath = Join-Path $TestDrive 'recover-sync-config.json'
+            $provenancePath = Join-Path $TestDrive 'recover-provenance.json'
+            New-TestSource -Path $sourceRoot
+            Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+            New-TestConfiguration -Path $configurationPath
+            New-TestProvenance -ArchivePath $sourceArchive -Path $provenancePath
+            $journalPath = Join-Path $TestDrive 'target-backup/skill-migration.json'
+
+            $output = & $script:TestPowerShellExecutable -NoProfile -NonInteractive -File $script:BootstrapScript `
+                -SourceArchivePath $sourceArchive -TargetRoot $unixRepository -ConfigurationPath $configurationPath `
+                -ProvenancePath $provenancePath -RecoverSkillMigration $journalPath 2>&1
+
+            $LASTEXITCODE | Should Not Be 0
+            (ConvertTo-TestDiagnosticText -Output @($output)) |
+                Should Match 'Legacy Skill migration journal recovery is unavailable on Unix; repository recovery uses the unified transaction journal\.'
         }
     }
 }

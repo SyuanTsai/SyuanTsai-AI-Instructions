@@ -116,6 +116,20 @@ function Test-InstallTransactionFileStateEqual {
         (Test-InstallTransactionIdentityEqual $Actual.identity $Expected.identity)
 }
 
+function Test-InstallTransactionPermissionsEqual {
+    param([AllowNull()] $Actual,[AllowNull()] $Expected)
+    if ($null -eq $Actual -or $null -eq $Expected) { return $null -eq $Actual -and $null -eq $Expected }
+    if ([string]$Expected.kind -ceq 'windows-sddl') {
+        return [string]$Actual.kind -ceq 'windows-sddl' -and
+            [string]$Actual.sddl -ceq [string]$Expected.sddl -and
+            [bool]$Actual.readOnly -eq [bool]$Expected.readOnly
+    }
+    return [string]$Actual.kind -ceq 'unix-mode' -and
+        [string]$Actual.mode -ceq [string]$Expected.mode -and
+        [uint64]$Actual.uid -eq [uint64]$Expected.uid -and
+        [uint64]$Actual.gid -eq [uint64]$Expected.gid
+}
+
 function Test-InstallTransactionDirectoryStateEqual {
     param([Parameter(Mandatory = $true)] $Actual,[Parameter(Mandatory = $true)] $Expected)
     if ([bool]$Actual.exists -ne [bool]$Expected.exists) { return $false }
@@ -146,25 +160,48 @@ function Get-AiInstructionsInstallFileState {
         [Parameter(Mandatory = $true)][string] $Leaf,
         [Parameter(Mandatory = $true)][string] $LiteralPath,
         [Parameter(Mandatory = $true)][ValidateSet('windows','linux','macos')][string] $PlatformOs,
-        [switch] $IncludePermissions
+        [switch] $IncludePermissions,
+        [switch] $IncludeBytes
     )
     $entryKind = Get-InstallTransactionEntryKind -LiteralPath $LiteralPath
     if ($entryKind -ceq 'missing') {
-        return [pscustomobject][ordered]@{ exists=$false; sha256=$null; length=$null; identity=$null; permissions=$null }
+        $missing = [pscustomobject][ordered]@{ exists=$false; sha256=$null; length=$null; identity=$null; permissions=$null }
+        if ($IncludeBytes) { return [pscustomobject][ordered]@{ State=$missing; Bytes=$null } }
+        return $missing
     }
     if ($entryKind -cne 'file') { throw "Install recovery observed an external change: '$LiteralPath' is $entryKind instead of a regular file." }
     $lease = Open-PlatformFile -ParentLease $ParentLease -Leaf $Leaf -Access Read -CreateMode OpenExisting
     try {
-        $observation = Assert-PlatformFileIdentity -Lease $lease -Expected $lease.Observation -SingleLink -VerifyPath
+        if (-not $IncludeBytes) {
+            $observation = Assert-PlatformFileIdentity -Lease $lease -Expected $lease.Observation -SingleLink -VerifyPath
+            [byte[]]$bytes = $lease.ReadAllBytes(268435456)
+            $permissions = if ($IncludePermissions) { Get-PlatformPermissions -Lease $lease } else { $null }
+            return [pscustomobject][ordered]@{
+                exists=$true
+                sha256=Get-InstallTransactionSha256 -Bytes $bytes
+                length=[int64]$bytes.Length
+                identity=ConvertTo-InstallTransactionIdentity -Observation $observation -PlatformOs $PlatformOs
+                permissions=$permissions
+            }
+        }
+        $beforeObservation = Assert-PlatformFileIdentity -Lease $lease -Expected $lease.Observation -SingleLink -VerifyPath
+        $beforePermissions = if ($IncludePermissions) { Get-PlatformPermissions -Lease $lease } else { $null }
         [byte[]]$bytes = $lease.ReadAllBytes(268435456)
-        $permissions = if ($IncludePermissions) { Get-PlatformPermissions -Lease $lease } else { $null }
-        return [pscustomobject][ordered]@{
+        $afterObservation = Assert-PlatformFileIdentity -Lease $lease -Expected $beforeObservation -SingleLink -VerifyPath
+        $afterPermissions = if ($IncludePermissions) { Get-PlatformPermissions -Lease $lease } else { $null }
+        if ([int64]$beforeObservation.Size -ne [int64]$bytes.Length -or
+            [int64]$afterObservation.Size -ne [int64]$bytes.Length -or
+            -not (Test-InstallTransactionPermissionsEqual -Actual $afterPermissions -Expected $beforePermissions)) {
+            throw "Install recovery observed an external change while reading: '$LiteralPath'."
+        }
+        $state = [pscustomobject][ordered]@{
             exists=$true
             sha256=Get-InstallTransactionSha256 -Bytes $bytes
             length=[int64]$bytes.Length
-            identity=ConvertTo-InstallTransactionIdentity -Observation $observation -PlatformOs $PlatformOs
-            permissions=$permissions
+            identity=ConvertTo-InstallTransactionIdentity -Observation $beforeObservation -PlatformOs $PlatformOs
+            permissions=$beforePermissions
         }
+        return [pscustomobject][ordered]@{ State=$state; Bytes=[byte[]]$bytes }
     }
     finally { $lease.Dispose() }
 }

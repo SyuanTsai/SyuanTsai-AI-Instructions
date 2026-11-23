@@ -2911,10 +2911,11 @@ function Assert-AiInstructionsInstallJournalV2 {
         Assert-AiInstructionsInstallJournalExactProperties -Object $operation.target -Names @('kind','value') -Context "$context.target"
         $targetKind = [string]$operation.target.kind
         $targetValue = [string]$operation.target.value
-        if ($targetKind -cnotin @('repository-relative','git-shared-exclude','git-index','git-ref','git-head','git-stash-evidence')) { throw "$context.target.kind is invalid." }
+        if ($targetKind -cnotin @('repository-relative','git-shared-exclude','git-shared-exclude-directory','git-index','git-ref','git-head','git-stash-evidence')) { throw "$context.target.kind is invalid." }
         switch ($targetKind) {
             'repository-relative' { Assert-AiInstructionsInstallJournalV2RelativePath -Value $operation.target.value -Context "$context.target.value" }
             'git-shared-exclude' { if ($operation.target.value -isnot [string] -or -not [string]::Equals([IO.Path]::GetFullPath($targetValue),[IO.Path]::GetFullPath((Join-Path ([string]$Journal.scope.commonGitDirectory) 'info/exclude')),$pathComparison)) { throw "$context.target.value is not the scope shared exclude." } }
+            'git-shared-exclude-directory' { if ($operation.target.value -isnot [string] -or -not [string]::Equals([IO.Path]::GetFullPath($targetValue),[IO.Path]::GetFullPath((Join-Path ([string]$Journal.scope.commonGitDirectory) 'info')),$pathComparison)) { throw "$context.target.value is not the scope shared exclude directory." } }
             'git-index' { if ($operation.target.value -isnot [string] -or -not [string]::Equals([IO.Path]::GetFullPath($targetValue),[IO.Path]::GetFullPath([string]$Journal.scope.indexPath),$pathComparison)) { throw "$context.target.value is not the scope index." } }
             'git-head' { if ($operation.target.value -isnot [string] -or $targetValue -cne 'HEAD') { throw "$context.target.value must be HEAD." } }
             'git-ref' {
@@ -2965,7 +2966,7 @@ function Assert-AiInstructionsInstallJournalV2 {
                 if ($null -ne $operation.observedAfter) { throw "$context.observedAfter must be null for non-file operations." }
                 if ($null -ne $operation.displacedMetadata) { throw "$context.displacedMetadata must be null for non-file operations." }
                 if ($null -ne $operation.displacedAfterMetadata) { throw "$context.displacedAfterMetadata must be null for non-file operations." }
-                if ($targetKind -cne 'repository-relative') { throw "$context directory anchor target kind is invalid." }
+                if ($targetKind -cnotin @('repository-relative','git-shared-exclude-directory')) { throw "$context directory anchor target kind is invalid." }
                 if ([string]$operation.method -cne 'directory-rename' -or $null -eq $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context directory anchor method or artifact leaves are invalid." }
                 Assert-AiInstructionsInstallJournalV2DirectoryAnchorState -State $operation.before -Context "$context.before" -ExpectedIdentityKind $expectedIdentityKind
                 Assert-AiInstructionsInstallJournalV2DirectoryAnchorState -State $operation.after -Context "$context.after" -ExpectedIdentityKind $expectedIdentityKind
