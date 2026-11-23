@@ -1679,6 +1679,28 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
         (&$script:Syp214Recover).exitCode|Should Not Be 0;[Convert]::ToBase64String([IO.File]::ReadAllBytes($targetPath))|Should Be ([Convert]::ToBase64String($originalTarget))
         (Test-Syp214UnifiedStateEqual $before (Get-Syp214FixtureSnapshot $targetRoot $userHome $script:Syp214GenericEntries))|Should Be $true
     }
+    if(-not$IsWindows){
+    # Scenario: A Unix remove-file redo is interrupted before its displaced-after metadata is journaled.
+    # Purpose: Trust only the undo receipt, restore the prepared mode/uid/gid, and remove all transaction residue.
+    It 'InterT15_restores_Unix_remove_file_metadata_without_journaled_displaced_after_metadata' {
+        [IO.File]::SetUnixFileMode($targetPath,[IO.UnixFileMode]416)
+        $beforeState=Get-Syp214UnixFileState $targetPath
+        [string]$beforeState.permissions.mode|Should Be '640'
+        $op=$script:Syp214GenericOperations.remove
+
+        (&$script:Syp214Run "after-operation-$($op.sequence)-before-journal").exitCode|Should Not Be 0
+        $txn=Get-Syp214UnifiedTransactionFixture $targetRoot
+        $journalOperation=@($txn.journal.operations|Where-Object sequence -eq $op.sequence)[0]
+        [string]$journalOperation.state|Should Be 'pending'
+        $journalOperation.PSObject.Properties['displacedAfterMetadata']|Should BeNullOrEmpty
+
+        (&$script:Syp214Recover).exitCode|Should Not Be 0
+        $afterState=Get-Syp214UnixFileState $targetPath
+        foreach($name in @('mode','uid','gid')){[string]$afterState.permissions.$name|Should Be ([string]$beforeState.permissions.$name)}
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($targetPath))|Should Be ([Convert]::ToBase64String($originalTarget))
+        @(Get-ChildItem -Force -Directory -LiteralPath (Get-Syp214RepositoryTransactionRoot $targetRoot) -ErrorAction SilentlyContinue).Count|Should Be 0
+    }
+    }
     # Scenario: A later edit recreates deleted Instructions.
     # Purpose: Fail closed and preserve that edit.
     It 'InterT20_preserves_later_Instructions_edit_after_atomic_delete_interruption' {

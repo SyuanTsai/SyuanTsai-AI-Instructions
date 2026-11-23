@@ -5368,7 +5368,7 @@ function Get-RepositoryTransactionObservedAfterFromLease {
 function Restore-RepositoryTransactionDisplacedMetadata {
     # Three-state metadata CAS for an original file that undo has placed back at its target.
     # Callers invoke this unconditionally; only this function decides whether metadata may be applied:
-    #   never displaced (no journaled displaced-after value) -> no mutation
+    #   never displaced (no journaled displaced-after or undo receipt) -> no mutation
     #   live == prepared original metadata                   -> no-op
     #   live == journaled displaced-after metadata           -> apply the original and read it back
     #   live == this undo publication's verified metadata    -> apply the original and read it back
@@ -5378,7 +5378,7 @@ function Restore-RepositoryTransactionDisplacedMetadata {
     param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation,[AllowNull()][object]$UndoPublicationMetadata)
     if([string]$Operation.kind-cnotin@('write-file','remove-file')-or$null-eq$Operation.displacedMetadata){return}
     $displacedAfter=if($null-ne$Operation.PSObject.Properties['displacedAfterMetadata']){$Operation.displacedAfterMetadata}else{$null}
-    if($null-eq$displacedAfter){return}
+    if($null-eq$displacedAfter-and$null-eq$UndoPublicationMetadata){return}
     $thirdState="Repository transaction sequence $($Operation.sequence) role $($Operation.role) target $($Operation.target.value) is in a third state; evidence was retained for manual inspection and cleanup."
     $path=if([string]$Operation.target.kind-ceq'git-shared-exclude'){[string]$Operation.target.value}else{Join-Path ([string]$Journal.scope.repositoryRoot) ([string]$Operation.target.value).Replace('/',[IO.Path]::DirectorySeparatorChar)}
     $parent=[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($path));$leaf=[IO.Path]::GetFileName($path)
@@ -5389,7 +5389,7 @@ function Restore-RepositoryTransactionDisplacedMetadata {
             if(-not(Test-RepositoryTransactionIdentityEqual -Actual (ConvertTo-ProjectPublicationIdentity $lease.Observation) -Expected $Operation.before.identity)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message $thirdState)}
             $live=ConvertTo-RepositoryTransactionMetadataSnapshot -Permissions (Get-PlatformPermissions -Lease $lease)
             if(Test-RepositoryTransactionDisplacedMetadataEqual -Actual $live -Expected $Operation.displacedMetadata){return}
-            $matchesDisplacedAfter=Test-RepositoryTransactionDisplacedMetadataEqual -Actual $live -Expected $displacedAfter
+            $matchesDisplacedAfter=$null-ne$displacedAfter-and(Test-RepositoryTransactionDisplacedMetadataEqual -Actual $live -Expected $displacedAfter)
             $matchesUndoPublication=$null-ne$UndoPublicationMetadata-and(Test-RepositoryTransactionDisplacedMetadataEqual -Actual $live -Expected $UndoPublicationMetadata)
             # Publish-PlatformFile's undo path deliberately transfers the live published
             # target metadata to the original backup before moving that identity back.  On
@@ -5398,7 +5398,7 @@ function Restore-RepositoryTransactionDisplacedMetadata {
             # Accept only that already-journaled transaction state; arbitrary metadata still
             # remains a third state and is never overwritten.
             $matchesPublishedAfter=$false
-            if(-not$matchesDisplacedAfter-and$null-ne$Operation.observedAfter){
+            if($null-ne$displacedAfter-and-not$matchesDisplacedAfter-and$null-ne$Operation.observedAfter){
                 $liveObservedAfter=Get-RepositoryTransactionObservedAfterFromLease -Lease $lease
                 $matchesPublishedAfter=Test-RepositoryTransactionObservedAfterEqual -Actual $liveObservedAfter -Expected $Operation.observedAfter
             }
