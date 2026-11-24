@@ -34,6 +34,9 @@ $script:AgentEnvironmentSetupExitCodes = [ordered]@{
     'concurrent' = 26
     'interrupted-install' = 27
     'codex-home-conflict' = 28
+    'projection-collision' = 29
+    'update-failed' = 30
+    'projection-failed' = 31
 }
 
 # K2/K4: the six files bound to --expected-commit.
@@ -76,6 +79,48 @@ function Get-AgentEnvironmentSetupExitCode {
 function Get-AgentEnvironmentSetupBoundFiles { return [string[]]@($script:AgentEnvironmentSetupBoundFiles) }
 function Get-AgentEnvironmentSetupRequiredCapabilities { return [string[]]@($script:AgentEnvironmentSetupRequiredCapabilities) }
 function Get-AgentEnvironmentSetupReceiptFieldNames { return [string[]]@($script:AgentEnvironmentSetupReceiptFields) }
+
+function Get-AgentEnvironmentSetupCloudPlan {
+    param(
+        [Parameter(Mandatory = $true)][string] $Rid,
+        [Parameter(Mandatory = $true)][string] $ExpectedCommit,
+        [AllowNull()] $InstalledBundle
+    )
+    if ($ExpectedCommit -cnotmatch '^[0-9a-f]{40}$') { throw (New-AgentEnvironmentSetupRefusal usage 'The cloud setup commit is invalid.') }
+    if (-not $Rid.StartsWith('linux-',[StringComparison]::Ordinal)) {
+        return [pscustomobject][ordered]@{ action='none'; candidateState=$null; currentCommit=$null }
+    }
+    if ($null -eq $InstalledBundle) {
+        return [pscustomobject][ordered]@{ action='install'; candidateState='absent'; currentCommit=$null }
+    }
+    if ($null -eq $InstalledBundle.PSObject.Properties['schemaVersion'] -or [int]$InstalledBundle.schemaVersion -ne 3 -or
+        $null -eq $InstalledBundle.PSObject.Properties['commit'] -or [string]$InstalledBundle.commit -cnotmatch '^[0-9a-f]{40}$') {
+        throw (New-AgentEnvironmentSetupRefusal update-failed 'Linux cloud setup requires an installed v3/v5 runtime or an empty CODEX_HOME.')
+    }
+    $currentCommit = [string]$InstalledBundle.commit
+    return [pscustomobject][ordered]@{
+        action='update'
+        candidateState=$(if ($currentCommit -ceq $ExpectedCommit) { 'current' } else { 'new-pin' })
+        currentCommit=$currentCommit
+    }
+}
+
+function Resolve-AgentEnvironmentSetupProjectionResult {
+    param([Parameter(Mandatory = $true)] $Result)
+    $outcome = if ($null -ne $Result.PSObject.Properties['outcome']) { [string]$Result.outcome } else { '' }
+    $exitCode = if ($null -ne $Result.PSObject.Properties['exitCode']) { [int]$Result.exitCode } else { 1 }
+    if ($exitCode -eq 0 -and $outcome -cin @('applied','current')) {
+        return [pscustomobject][ordered]@{ action=$outcome.ToLowerInvariant(); code=$null }
+    }
+    if ($exitCode -eq 3 -or $outcome -ceq 'concurrent') {
+        return [pscustomobject][ordered]@{ action='refuse'; code='concurrent' }
+    }
+    $details = if ($null -ne $Result.PSObject.Properties['failureDetails']) { @($Result.failureDetails) } else { @() }
+    if (@($details | Where-Object { $null -ne $_.PSObject.Properties['code'] -and [string]$_.code -ceq 'unmanaged-collision' }).Count -gt 0) {
+        return [pscustomobject][ordered]@{ action='refuse'; code='projection-collision' }
+    }
+    return [pscustomobject][ordered]@{ action='refuse'; code='projection-failed' }
+}
 
 function New-AgentEnvironmentSetupRefusal {
     param([Parameter(Mandatory = $true)][string] $Code, [Parameter(Mandatory = $true)][string] $Message, [string] $RecoverCommand)
@@ -1065,7 +1110,7 @@ function Publish-AgentEnvironmentSetupArchiveCache {
 function New-AgentEnvironmentSetupReceipt {
     param(
         [Parameter(Mandatory = $true)][ValidateSet('prepare','offline')][string] $Mode,
-        [Parameter(Mandatory = $true)][ValidateSet('prepared-runtime-only','verified-runtime-only','refused')][string] $Result,
+        [Parameter(Mandatory = $true)][ValidateSet('prepared-runtime-only','verified-runtime-only','completed','refused')][string] $Result,
         [AllowNull()] $Code,
         [AllowNull()] $Rid,
         [AllowNull()] $SetupCommit,
@@ -1074,12 +1119,16 @@ function New-AgentEnvironmentSetupReceipt {
         [AllowNull()] $DotNetVersion,
         [AllowNull()] $Capabilities,
         [AllowNull()] $RecoverCommand,
-        [AllowNull()] $RuntimeAction
+        [AllowNull()] $RuntimeAction,
+        [AllowNull()] $RuntimeCommit,
+        [AllowNull()] $InstallAction,
+        [AllowNull()] $ProjectionAction
     )
     # Null-or-empty optional strings are rendered as JSON null, never "".
     $optional = { param($Value) if ([string]::IsNullOrEmpty([string]$Value)) { $null } else { [string]$Value } }
     $Code = & $optional $Code; $Rid = & $optional $Rid; $SetupCommit = & $optional $SetupCommit; $PolicySha256 = & $optional $PolicySha256
     $DotNetVersion = & $optional $DotNetVersion; $RecoverCommand = & $optional $RecoverCommand; $RuntimeAction = & $optional $RuntimeAction
+    $RuntimeCommit = & $optional $RuntimeCommit; $InstallAction = & $optional $InstallAction; $ProjectionAction = & $optional $ProjectionAction
     $exitCode = if ($Result -ceq 'refused') { Get-AgentEnvironmentSetupExitCode $(if ([string]::IsNullOrEmpty($Code)) { 'internal-error' } else { $Code }) } else { 0 }
     $parts = if ($null -eq $Rid) { @($null,$null) } else { $Rid.Split('-',2) }
     $osName = switch ($parts[0]) { 'win' { 'windows' } 'linux' { 'linux' } 'osx' { 'macos' } default { $null } }
@@ -1088,11 +1137,18 @@ function New-AgentEnvironmentSetupReceipt {
         $steps.Add([pscustomobject][ordered]@{ step = 'S5'; status = 'completed'; detail = $(if ([string]::IsNullOrEmpty($RuntimeAction)) { $null } else { $RuntimeAction }) })
         $steps.Add([pscustomobject][ordered]@{ step = 'S6'; status = 'completed'; detail = 'process-scope' })
     }
-    foreach ($step in $script:AgentEnvironmentSetupDeferredSteps) { $steps.Add([pscustomobject][ordered]@{ step = $step; status = 'not-implemented-until-p10b'; detail = $null }) }
+    if ($Result -ceq 'completed') {
+        $steps.Add([pscustomobject][ordered]@{ step = 'S7'; status = 'completed'; detail = $InstallAction })
+        $steps.Add([pscustomobject][ordered]@{ step = 'S8'; status = 'completed'; detail = $ProjectionAction })
+        $steps.Add([pscustomobject][ordered]@{ step = 'S9'; status = 'completed'; detail = 'verified' })
+    }
+    else {
+        foreach ($step in $script:AgentEnvironmentSetupDeferredSteps) { $steps.Add([pscustomobject][ordered]@{ step = $step; status = 'not-implemented-until-p10b'; detail = $null }) }
+    }
     return [pscustomobject][ordered]@{
         schemaVersion = 1
         kind = 'agent-environment-setup-receipt'
-        phase = 'p10a'
+        phase = $(if ($Result -ceq 'completed') { 'p9d' } else { 'p10a' })
         mode = $Mode
         result = $Result
         code = $(if ($Result -ceq 'refused') { $Code } else { $null })
@@ -1101,7 +1157,7 @@ function New-AgentEnvironmentSetupReceipt {
         architecture = $parts[1]
         rid = $Rid
         setupCommit = $SetupCommit
-        runtimeCommit = $null
+        runtimeCommit = $RuntimeCommit
         policySha256 = $PolicySha256
         setupRoot = '~/' + $script:AgentEnvironmentSetupRelativeRoot
         codexHome = '~/.codex'
@@ -1121,6 +1177,7 @@ function ConvertTo-AgentEnvironmentSetupJsonLine {
 Export-ModuleMember -Function @(
     'Get-AgentEnvironmentSetupExitCodeTable','Get-AgentEnvironmentSetupExitCode','Get-AgentEnvironmentSetupBoundFiles',
     'Get-AgentEnvironmentSetupRequiredCapabilities','Get-AgentEnvironmentSetupReceiptFieldNames',
+    'Get-AgentEnvironmentSetupCloudPlan','Resolve-AgentEnvironmentSetupProjectionResult',
     'New-AgentEnvironmentSetupRefusal','Get-AgentEnvironmentSetupRefusalCode','Get-AgentEnvironmentSetupSha256Text',
     'Assert-AgentEnvironmentSetupPolicy','Read-AgentEnvironmentSetupPolicy','ConvertTo-AgentEnvironmentSetupPolicyTsv',
     'Assert-AgentEnvironmentSetupPolicyTsv','Get-AgentEnvironmentSetupRid','Get-AgentEnvironmentSetupPolicyAsset',
