@@ -205,18 +205,39 @@ function Invoke-SetupOwnedCommand {
     )
     $run=Invoke-PlatformPreparationCommand -Command $RuntimeExecutable -Arguments $Arguments -Environment $Environment -WorkingDirectory $WorkingDirectory -TimeoutMilliseconds 1800000
     if([int]$run.exitCode-ne0-and-not$AllowNonZero){
-        $detail=ConvertTo-AgentEnvironmentSetupSanitizedText (([string]$run.stderr).Trim()) ([string]$Environment['HOME'])
-        throw (New-AgentEnvironmentSetupRefusal $FailureCode "$Context exited with code $($run.exitCode): $detail")
+        $detail=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$run.stderr) -UserHome ([string]$Environment['HOME'])
+        throw (New-AgentEnvironmentSetupRefusal $FailureCode "$Context exited with code $($run.exitCode). Child stderr: $detail")
     }
     return $run
 }
 
 function ConvertFrom-SetupOwnedJsonResult {
-    param([Parameter(Mandatory=$true)]$Run,[Parameter(Mandatory=$true)][string]$FailureCode,[Parameter(Mandatory=$true)][string]$Context)
+    param(
+        [Parameter(Mandatory=$true)]$Run,
+        [Parameter(Mandatory=$true)][string]$FailureCode,
+        [Parameter(Mandatory=$true)][string]$Context,
+        [Parameter(Mandatory=$true)][string]$UserHome
+    )
+    $detail=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$Run.stderr) -UserHome $UserHome
     $lines=@(([string]$Run.stdout).Split("`n")|ForEach-Object{$_.TrimEnd("`r")}|Where-Object{$_.Length-gt0})
-    if($lines.Count-ne1){throw (New-AgentEnvironmentSetupRefusal $FailureCode "$Context did not return exactly one JSON line.")}
+    if($lines.Count-ne1){throw (New-AgentEnvironmentSetupRefusal $FailureCode "$Context did not return exactly one JSON line. Child stderr: $detail")}
     try{return $lines[0]|ConvertFrom-Json -ErrorAction Stop}
-    catch{throw (New-AgentEnvironmentSetupRefusal $FailureCode "$Context returned invalid JSON.")}
+    catch{throw (New-AgentEnvironmentSetupRefusal $FailureCode "$Context returned invalid JSON. Child stderr: $detail")}
+}
+
+function Get-SetupExpectedCommitText {
+    param(
+        [Parameter(Mandatory=$true)][string]$RepositoryRoot,
+        [Parameter(Mandatory=$true)][string]$ExpectedCommit,
+        [Parameter(Mandatory=$true)][string]$RelativePath,
+        [Parameter(Mandatory=$true)][string]$Context
+    )
+    $gitPath=[string](Get-Command git -CommandType Application|Select-Object -First 1).Source
+    $read=Invoke-SetupVerifierGit -GitPath $gitPath -RepositoryRoot $RepositoryRoot -Arguments @('show',("{0}:{1}" -f $ExpectedCommit,$RelativePath)) -Binary
+    if($read.ExitCode-ne0){throw (New-AgentEnvironmentSetupRefusal update-failed "The expected setup commit does not contain a readable $Context.")}
+    try{
+        return [Text.UTF8Encoding]::new($false,$true).GetString([byte[]]$read.Bytes)
+    }catch{throw (New-AgentEnvironmentSetupRefusal update-failed "The expected setup commit contains a non-UTF-8 $Context.")}
 }
 
 function Get-SetupExpectedCatalog {
@@ -224,13 +245,12 @@ function Get-SetupExpectedCatalog {
         [Parameter(Mandatory=$true)][string]$RepositoryRoot,
         [Parameter(Mandatory=$true)][string]$ExpectedCommit
     )
-    $gitPath=[string](Get-Command git -CommandType Application|Select-Object -First 1).Source
-    $read=Invoke-SetupVerifierGit -GitPath $gitPath -RepositoryRoot $RepositoryRoot -Arguments @('show',("{0}:catalog/skills-catalog.json" -f $ExpectedCommit)) -Binary
-    if($read.ExitCode-ne0){throw (New-AgentEnvironmentSetupRefusal update-failed 'The expected setup commit does not contain a readable Skills Catalog.')}
     try{
-        $text=[Text.UTF8Encoding]::new($false,$true).GetString([byte[]]$read.Bytes)
-        return $text|ConvertFrom-Json -ErrorAction Stop
-    }catch{throw (New-AgentEnvironmentSetupRefusal update-failed 'The expected setup commit contains an invalid Skills Catalog.')}
+        return (Get-SetupExpectedCommitText -RepositoryRoot $RepositoryRoot -ExpectedCommit $ExpectedCommit -RelativePath 'catalog/skills-catalog.json' -Context 'Skills Catalog')|ConvertFrom-Json -ErrorAction Stop
+    }catch{
+        if((Get-AgentEnvironmentSetupRefusalCode $_)-cne'internal-error'){throw}
+        throw (New-AgentEnvironmentSetupRefusal update-failed 'The expected setup commit contains an invalid Skills Catalog.')
+    }
 }
 
 function Test-SetupExpectedProjectionCollision {
@@ -238,7 +258,7 @@ function Test-SetupExpectedProjectionCollision {
         [Parameter(Mandatory=$true)]$Catalog,
         [Parameter(Mandatory=$true)][string]$UserHome,
         [string[]]$ManagedTargetPaths=@(),
-        [string[]]$ManagedSkillIds=@(),
+        [string[]]$SelectedSkillIds=@(),
         [switch]$OwnedManifest
     )
     if($null-eq$Catalog.PSObject.Properties['schemaVersion']-or[int64]$Catalog.schemaVersion-ne3-or
@@ -256,24 +276,13 @@ function Test-SetupExpectedProjectionCollision {
         $projectionRoots.Add($expectedRoot)
     }
     $selected=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    foreach($profile in @($Catalog.profiles|Where-Object{$_.default-eq$true})){
-        foreach($skillIdValue in @($profile.includes)){
-            $skillId=[string]$skillIdValue
-            if($skillId-cnotmatch'^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$'){
-                throw (New-AgentEnvironmentSetupRefusal update-failed 'The expected Skills Catalog default profile contains an invalid Skill ID.')
-            }
-            [void]$selected.Add($skillId)
-        }
-        foreach($skillIdValue in @($profile.excludes)){[void]$selected.Remove([string]$skillIdValue)}
-    }
-    foreach($skillIdValue in $ManagedSkillIds){
+    foreach($skillIdValue in $SelectedSkillIds){
         $skillId=[string]$skillIdValue
         if($skillId-cnotmatch'^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$'){
-            throw (New-AgentEnvironmentSetupRefusal projection-failed 'The installed USER manifest contains an invalid Skill ID.')
+            throw (New-AgentEnvironmentSetupRefusal update-failed 'The expected Skills selection resolver returned an invalid Skill ID.')
         }
         [void]$selected.Add($skillId)
     }
-    if($selected.Count-eq0){throw (New-AgentEnvironmentSetupRefusal update-failed 'The expected Skills Catalog has no default USER Skill selection.')}
     $managedTargets=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach($targetPathValue in $ManagedTargetPaths){
         $targetPath=([string]$targetPathValue).Replace('\','/')
@@ -349,6 +358,36 @@ function Test-SetupExpectedProjectionCollision {
     return $false
 }
 
+function Invoke-SetupCoordinatorChild {
+    param(
+        [Parameter(Mandatory=$true)][string]$RuntimeExecutable,
+        [Parameter(Mandatory=$true)][string]$EntryPath,
+        [Parameter(Mandatory=$true)][string]$CodexHome,
+        [Parameter(Mandatory=$true)][string]$UserHome,
+        [Parameter(Mandatory=$true)][ValidateSet('WhatIf','Apply','VerifyOnly')][string]$Mode,
+        [Parameter(Mandatory=$true)][Collections.IDictionary]$Environment,
+        [Parameter(Mandatory=$true)][string]$WorkingDirectory
+    )
+    $childEnvironment=[ordered]@{}
+    foreach($key in $Environment.Keys){$childEnvironment[[string]$key]=[string]$Environment[$key]}
+    $childEnvironment['AI_SETUP_COORDINATOR_CODEX_HOME']=$CodexHome
+    $childEnvironment['AI_SETUP_COORDINATOR_ENTRY']=$EntryPath
+    $childEnvironment['AI_SETUP_COORDINATOR_MODE']=$Mode
+    $childEnvironment['AI_SETUP_COORDINATOR_USER_HOME']=$UserHome
+    $childScript=@'
+$entry=[string]$env:AI_SETUP_COORDINATOR_ENTRY
+$arguments=@('-CodexHome',[string]$env:AI_SETUP_COORDINATOR_CODEX_HOME,'-UserHome',[string]$env:AI_SETUP_COORDINATOR_USER_HOME,'-OutputFormat','Json')
+switch([string]$env:AI_SETUP_COORDINATOR_MODE){
+    'WhatIf'{& $entry @arguments -Apply -WhatIf 6>$null}
+    'Apply'{& $entry @arguments -Apply 6>$null}
+    'VerifyOnly'{& $entry @arguments -VerifyOnly 6>$null}
+    default{throw 'Unsupported setup coordinator child mode.'}
+}
+'@
+    $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+    return Invoke-SetupOwnedCommand -RuntimeExecutable $RuntimeExecutable -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -Environment $childEnvironment -WorkingDirectory $WorkingDirectory -FailureCode projection-failed -Context "USER projection $Mode" -AllowNonZero
+}
+
 function Invoke-SetupProjectionCollisionPreflight {
     param(
         [Parameter(Mandatory=$true)][string]$RepositoryRoot,
@@ -360,6 +399,7 @@ function Invoke-SetupProjectionCollisionPreflight {
     )
     $environmentEntry=Join-Path $CodexHome 'hooks/update-agent-environment.ps1'
     $catalog=Get-SetupExpectedCatalog -RepositoryRoot $RepositoryRoot -ExpectedCommit $ExpectedCommit
+    $selectionSource=Get-SetupExpectedCommitText -RepositoryRoot $RepositoryRoot -ExpectedCommit $ExpectedCommit -RelativePath 'scripts/skills-selection.psm1' -Context 'Skills selection resolver'
     $manifestPath=Join-Path $UserHome '.agents/catalog-skills.manifest.json'
     $manifest=$null
     if(Test-Path -LiteralPath $manifestPath){
@@ -377,18 +417,37 @@ function Invoke-SetupProjectionCollisionPreflight {
     $managedFiles=if($null-eq$manifest){@()}else{@($manifest.files)}
     $managedTargets=@($managedFiles|ForEach-Object{if($null-eq$_.PSObject.Properties['targetPath']){throw (New-AgentEnvironmentSetupRefusal projection-failed 'The installed USER manifest file inventory is incomplete.')}[string]$_.targetPath})
     $managedSkills=@($managedFiles|ForEach-Object{if($null-ne$_.PSObject.Properties['skillId']){[string]$_.skillId}}|Where-Object{$_}|Sort-Object -Unique)
-    if(Test-SetupExpectedProjectionCollision -Catalog $catalog -UserHome $UserHome -ManagedTargetPaths $managedTargets -ManagedSkillIds $managedSkills -OwnedManifest:($null-ne$manifest)){
+    $selection=[pscustomobject]@{profiles=@();includeSkills=@();excludeSkills=@()}
+    [object[]]$capabilityEvidence=@()
+    if($hasInstalledCoordinator){
+        $validationLauncher=Join-Path $CodexHome 'hooks/bootstrap-ai-instructions.ps1'
+        if(-not(Test-Path -LiteralPath $validationLauncher -PathType Leaf)){throw (New-AgentEnvironmentSetupRefusal update-failed 'USER projection preflight cannot verify the installed sync configuration.')}
+        [void](Invoke-SetupOwnedCommand -RuntimeExecutable $RuntimeExecutable -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-File',$validationLauncher,'-ValidateOnly') -Environment $Environment -WorkingDirectory $RepositoryRoot -FailureCode update-failed -Context 'USER projection installed configuration validation')
+        $configurationPath=Join-Path $CodexHome 'ai-instructions-sync.json'
+        try{$configuration=[IO.File]::ReadAllText($configurationPath)|ConvertFrom-Json -ErrorAction Stop}
+        catch{throw (New-AgentEnvironmentSetupRefusal update-failed 'USER projection preflight cannot read the verified sync configuration.')}
+        if([int]$configuration.schemaVersion-ne5-or$null-eq$configuration.PSObject.Properties['catalog']){throw (New-AgentEnvironmentSetupRefusal update-failed 'USER projection preflight requires a verified config v5 selection.')}
+        $selection=$configuration.catalog
+        if($null-ne$configuration.PSObject.Properties['capabilityEvidence']){$capabilityEvidence=@($configuration.capabilityEvidence)}
+    }
+    try{$selectedSkills=@(Resolve-AgentEnvironmentSetupSkillIds -Catalog $catalog -Selection $selection -CapabilityEvidence $capabilityEvidence -InstalledSkillIds $managedSkills -SelectionSource $selectionSource)}
+    catch{throw (New-AgentEnvironmentSetupRefusal update-failed ('The expected-commit Skills selection could not be resolved: '+$_.Exception.Message))}
+    if(Test-SetupExpectedProjectionCollision -Catalog $catalog -UserHome $UserHome -ManagedTargetPaths $managedTargets -SelectedSkillIds $selectedSkills -OwnedManifest:($null-ne$manifest)){
         throw (New-AgentEnvironmentSetupRefusal projection-collision 'USER projection preflight found unmanaged target bytes before runtime mutation.')
     }
     if(-not$hasInstalledCoordinator){return}
-    $preflightRun=Invoke-SetupOwnedCommand -RuntimeExecutable $RuntimeExecutable -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-File',$environmentEntry,'-CodexHome',$CodexHome,'-UserHome',$UserHome,'-Apply','-WhatIf','-OutputFormat','Json') -Environment $Environment -WorkingDirectory $RepositoryRoot -FailureCode projection-failed -Context 'USER projection WhatIf' -AllowNonZero
-    $preflight=ConvertFrom-SetupOwnedJsonResult $preflightRun projection-failed 'USER projection WhatIf'
-    $details=if($null-ne$preflight.PSObject.Properties['failureDetails']){@($preflight.failureDetails)}else{@()}
-    if(@($details|Where-Object{$null-ne$_.PSObject.Properties['code']-and[string]$_.code-ceq'unmanaged-collision'}).Count-gt0){
-        throw (New-AgentEnvironmentSetupRefusal projection-collision 'USER projection WhatIf refused unmanaged target bytes before runtime mutation.')
+    $preflightRun=Invoke-SetupCoordinatorChild -RuntimeExecutable $RuntimeExecutable -EntryPath $environmentEntry -CodexHome $CodexHome -UserHome $UserHome -Mode WhatIf -Environment $Environment -WorkingDirectory $RepositoryRoot
+    $preflight=ConvertFrom-SetupOwnedJsonResult $preflightRun projection-failed 'USER projection WhatIf' $UserHome
+    $preflightDecision=Resolve-AgentEnvironmentSetupProjectionResult $preflight
+    $childError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$preflightRun.stderr) -UserHome $UserHome
+    if([string]$preflightDecision.code-ceq'projection-collision'){
+        throw (New-AgentEnvironmentSetupRefusal projection-collision "USER projection WhatIf refused unmanaged target bytes before runtime mutation. Child stderr: $childError")
     }
-    if([int]$preflight.exitCode-ne0-or[string]$preflight.outcome-cnotin@('planned','current')){
-        throw (New-AgentEnvironmentSetupRefusal projection-failed 'USER projection WhatIf was refused before runtime mutation.')
+    if($null-ne$preflightDecision.code){
+        throw (New-AgentEnvironmentSetupRefusal ([string]$preflightDecision.code) "USER projection WhatIf was refused before runtime mutation. Child stderr: $childError")
+    }
+    if([string]$preflightDecision.action-cnotin@('planned','current')){
+        throw (New-AgentEnvironmentSetupRefusal projection-failed "USER projection WhatIf returned an unsupported action. Child stderr: $childError")
     }
 }
 
@@ -464,8 +523,11 @@ $workflow|ConvertTo-Json -Depth 8 -Compress
 '@
     $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
     $run=Invoke-SetupOwnedCommand -RuntimeExecutable $RuntimeExecutable -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -Environment $childEnvironment -WorkingDirectory $RepositoryRoot -FailureCode update-failed -Context 'Linux updater workflow child'
-    $workflow=ConvertFrom-SetupOwnedJsonResult $run update-failed 'Linux updater workflow child'
-    if([string]$workflow.outcome-cne'installed'){throw (New-AgentEnvironmentSetupRefusal update-failed "Linux updater outcome '$($workflow.outcome)' was refused.")}
+    $workflow=ConvertFrom-SetupOwnedJsonResult $run update-failed 'Linux updater workflow child' ([string]$Environment['HOME'])
+    $workflowDecision=Resolve-AgentEnvironmentSetupProjectionResult $workflow
+    $childError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$run.stderr) -UserHome ([string]$Environment['HOME'])
+    if([string]$workflowDecision.code-ceq'concurrent'){throw (New-AgentEnvironmentSetupRefusal concurrent "Linux updater workflow was concurrent. Child stderr: $childError")}
+    if([string]$workflow.outcome-cne'installed'){throw (New-AgentEnvironmentSetupRefusal update-failed "Linux updater outcome '$($workflow.outcome)' was refused. Child stderr: $childError")}
     return $workflow
 }
 
@@ -511,15 +573,20 @@ function Invoke-SetupLinuxCloudWiring {
     $activeBundle=try{[IO.File]::ReadAllText($bundlePath)|ConvertFrom-Json -ErrorAction Stop}catch{throw (New-AgentEnvironmentSetupRefusal update-failed 'The installed runtime bundle is invalid after installation or update.')}
     if([int]$activeBundle.schemaVersion-ne3-or[string]$activeBundle.commit-cne$ExpectedCommit){throw (New-AgentEnvironmentSetupRefusal update-failed 'Linux cloud setup did not activate the expected v3 runtime pin.')}
     $environmentEntry=Join-Path $CodexHome 'hooks/update-agent-environment.ps1'
-    $applyRun=Invoke-SetupOwnedCommand -RuntimeExecutable $RuntimeExecutable -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-File',$environmentEntry,'-CodexHome',$CodexHome,'-UserHome',$UserHome,'-Apply','-OutputFormat','Json') -Environment $Environment -WorkingDirectory $RepositoryRoot -FailureCode projection-failed -Context 'USER projection Apply' -AllowNonZero
-    $apply=ConvertFrom-SetupOwnedJsonResult $applyRun projection-failed 'USER projection Apply'
+    # A clean same-pin rerun stays byte-identical. Apply remains intentional here:
+    # after read-only validation/preflight, it repairs manifest-owned drift while
+    # collision checks continue to preserve unmanaged bytes.
+    $applyRun=Invoke-SetupCoordinatorChild -RuntimeExecutable $RuntimeExecutable -EntryPath $environmentEntry -CodexHome $CodexHome -UserHome $UserHome -Mode Apply -Environment $Environment -WorkingDirectory $RepositoryRoot
+    $apply=ConvertFrom-SetupOwnedJsonResult $applyRun projection-failed 'USER projection Apply' $UserHome
     $applyDecision=Resolve-AgentEnvironmentSetupProjectionResult $apply
-    if([string]$applyDecision.code-ceq'projection-collision'){throw (New-AgentEnvironmentSetupRefusal projection-collision 'USER projection Apply refused unmanaged target bytes after the pre-mutation preflight.')}
-    if($null-ne$applyDecision.code){throw (New-AgentEnvironmentSetupRefusal ([string]$applyDecision.code) 'USER projection Apply was refused.')}
-    $verifyRun=Invoke-SetupOwnedCommand -RuntimeExecutable $RuntimeExecutable -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-File',$environmentEntry,'-CodexHome',$CodexHome,'-UserHome',$UserHome,'-VerifyOnly','-OutputFormat','Json') -Environment $Environment -WorkingDirectory $RepositoryRoot -FailureCode projection-failed -Context 'USER projection VerifyOnly' -AllowNonZero
-    $verify=ConvertFrom-SetupOwnedJsonResult $verifyRun projection-failed 'USER projection VerifyOnly'
+    $applyError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$applyRun.stderr) -UserHome $UserHome
+    if([string]$applyDecision.code-ceq'projection-collision'){throw (New-AgentEnvironmentSetupRefusal projection-collision "USER projection Apply refused unmanaged target bytes after the pre-mutation preflight. Child stderr: $applyError")}
+    if($null-ne$applyDecision.code){throw (New-AgentEnvironmentSetupRefusal ([string]$applyDecision.code) "USER projection Apply was refused. Child stderr: $applyError")}
+    $verifyRun=Invoke-SetupCoordinatorChild -RuntimeExecutable $RuntimeExecutable -EntryPath $environmentEntry -CodexHome $CodexHome -UserHome $UserHome -Mode VerifyOnly -Environment $Environment -WorkingDirectory $RepositoryRoot
+    $verify=ConvertFrom-SetupOwnedJsonResult $verifyRun projection-failed 'USER projection VerifyOnly' $UserHome
     $verifyDecision=Resolve-AgentEnvironmentSetupProjectionResult $verify
-    if($null-ne$verifyDecision.code-or$verifyDecision.action-cne'current'){throw (New-AgentEnvironmentSetupRefusal $(if($null-ne$verifyDecision.code){[string]$verifyDecision.code}else{'projection-failed'}) 'USER projection readiness verification was refused.')}
+    $verifyError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$verifyRun.stderr) -UserHome $UserHome
+    if($null-ne$verifyDecision.code-or$verifyDecision.action-cne'current'){throw (New-AgentEnvironmentSetupRefusal $(if($null-ne$verifyDecision.code){[string]$verifyDecision.code}else{'projection-failed'}) "USER projection readiness verification was refused. Child stderr: $verifyError")}
     return [pscustomobject][ordered]@{runtimeCommit=[string]$activeBundle.commit;installAction=$installAction;projectionAction=[string]$applyDecision.action}
 }
 
@@ -699,15 +766,16 @@ try {
     $runtimeDirectory = [string]$runtimeReceipt.runtimeClosure.rootPath
     $arguments = @('-NoLogo','-NoProfile','-NonInteractive','-File',(Join-Path $PSScriptRoot 'setup-agent-environment.ps1'),'-Canonical',$(if ($Prepare) { '-Prepare' } else { '-Offline' }),'-ExpectedCommit',$ExpectedCommit,'-ArchivePath',$archive,'-RuntimeReceiptPath',$verifiedRuntimeReceiptPath)
     $child = Invoke-PlatformPreparationCommand -Command $runtimeExecutable -Arguments $arguments -Environment (Get-AgentEnvironmentSetupChildEnvironment $runtimeDirectory $userHome) -WorkingDirectory $layout.SetupRoot -TimeoutMilliseconds 1800000
-    if (-not [string]::IsNullOrWhiteSpace([string]$child.stderr)) { Write-SetupDiagnostic ('canonical stage: ' + (ConvertTo-AgentEnvironmentSetupSanitizedText ([string]$child.stderr).Trim() $userHome)) }
+    $canonicalChildError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$child.stderr) -UserHome $userHome
+    if($canonicalChildError-cne'<empty>'){Write-SetupDiagnostic ('canonical stage: '+$canonicalChildError)}
     $childLines = @(([string]$child.stdout).Split("`n") | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_.Length -gt 0 })
-    if ($childLines.Count -ne 1) { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The canonical stage did not return exactly one JSON line.') }
-    try { $childResult = $childLines[0] | ConvertFrom-Json -ErrorAction Stop } catch { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The canonical stage returned invalid JSON.') }
+    if ($childLines.Count -ne 1) { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed "The canonical stage did not return exactly one JSON line. Child stderr: $canonicalChildError") }
+    try { $childResult = $childLines[0] | ConvertFrom-Json -ErrorAction Stop } catch { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed "The canonical stage returned invalid JSON. Child stderr: $canonicalChildError") }
     if ([int]$child.exitCode -ne 0) {
         $childCode = if ($null -ne $childResult.PSObject.Properties['code']) { [string]$childResult.code } else { 'internal-error' }
         if ((Get-AgentEnvironmentSetupExitCode $childCode) -ne [int]$child.exitCode) { $childCode = 'internal-error' }
         $recoverCommand = if ($null -ne $childResult.PSObject.Properties['recoverCommand']) { [string]$childResult.recoverCommand } else { $null }
-        throw (New-AgentEnvironmentSetupRefusal $childCode 'The canonical stage refused.' $recoverCommand)
+        throw (New-AgentEnvironmentSetupRefusal $childCode "The canonical stage refused. Child stderr: $canonicalChildError" $recoverCommand)
     }
     if ([string]$childResult.stage -cne 'canonical' -or $childResult.processPathVerified -isnot [bool] -or -not $childResult.processPathVerified -or [string]$childResult.powerShellVersion -cne $asset.Version -or [string]$childResult.codexHome -cne '~/.codex' -or [string]$childResult.executablePath -cne (ConvertTo-AgentEnvironmentSetupHomePath $runtimeExecutable $userHome)) {
         throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The canonical stage evidence does not match the pinned runtime.')

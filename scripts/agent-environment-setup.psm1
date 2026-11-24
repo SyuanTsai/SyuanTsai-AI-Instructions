@@ -109,7 +109,7 @@ function Resolve-AgentEnvironmentSetupProjectionResult {
     param([Parameter(Mandatory = $true)] $Result)
     $outcome = if ($null -ne $Result.PSObject.Properties['outcome']) { [string]$Result.outcome } else { '' }
     $exitCode = if ($null -ne $Result.PSObject.Properties['exitCode']) { [int]$Result.exitCode } else { 1 }
-    if ($exitCode -eq 0 -and $outcome -cin @('applied','current')) {
+    if ($exitCode -eq 0 -and $outcome -cin @('applied','current','planned')) {
         return [pscustomobject][ordered]@{ action=$outcome.ToLowerInvariant(); code=$null }
     }
     if ($exitCode -eq 3 -or $outcome -ceq 'concurrent') {
@@ -120,6 +120,26 @@ function Resolve-AgentEnvironmentSetupProjectionResult {
         return [pscustomobject][ordered]@{ action='refuse'; code='projection-collision' }
     }
     return [pscustomobject][ordered]@{ action='refuse'; code='projection-failed' }
+}
+
+function Resolve-AgentEnvironmentSetupSkillIds {
+    param(
+        [Parameter(Mandatory = $true)] $Catalog,
+        [Parameter(Mandatory = $true)] $Selection,
+        [AllowEmptyCollection()][object[]] $CapabilityEvidence = @(),
+        [AllowEmptyCollection()][string[]] $InstalledSkillIds = @(),
+        [Parameter(Mandatory = $true)][string] $SelectionSource
+    )
+    if ([string]::IsNullOrWhiteSpace($SelectionSource)) { throw 'The expected-commit Skills selection resolver source is empty.' }
+    $module = $null
+    try {
+        $moduleName = 'agent-environment-setup-selection-' + [Guid]::NewGuid().ToString('N')
+        $module = New-Module -Name $moduleName -ScriptBlock ([scriptblock]::Create($SelectionSource))
+        $command = $module.ExportedCommands['Resolve-SkillsSelection']
+        if ($null -eq $command) { throw 'The expected-commit Skills selection resolver does not export Resolve-SkillsSelection.' }
+        return [string[]]@(& $command -Catalog $Catalog -Selection $Selection -CapabilityEvidence $CapabilityEvidence -InstalledSkillIds $InstalledSkillIds -WarningAction SilentlyContinue)
+    }
+    finally { if ($null -ne $module) { Remove-Module $module.Name -Force -ErrorAction SilentlyContinue } }
 }
 
 function New-AgentEnvironmentSetupRefusal {
@@ -321,6 +341,14 @@ function ConvertTo-AgentEnvironmentSetupSanitizedText {
     $result = $Text
     foreach ($variant in @($homePath,$homePath.Replace('\','/'))) { $result = [regex]::Replace($result,[regex]::Escape($variant),'~',$options) }
     return $result
+}
+
+function Get-AgentEnvironmentSetupChildErrorLine {
+    param([AllowNull()][string] $Stderr, [Parameter(Mandatory = $true)][string] $UserHome)
+    $sanitized = ConvertTo-AgentEnvironmentSetupSanitizedText $Stderr $UserHome
+    $line = @(([string]$sanitized).Split("`n") | ForEach-Object { $_.TrimEnd("`r").Trim() } | Where-Object { $_.Length -gt 0 } | Select-Object -First 1)
+    if ($line.Count -eq 0) { return '<empty>' }
+    return [string]$line[0]
 }
 
 # Runtime receipt persistence: Resolve-PlatformPowerShell returns absolute paths.
@@ -1194,13 +1222,13 @@ function ConvertTo-AgentEnvironmentSetupJsonLine {
 Export-ModuleMember -Function @(
     'Get-AgentEnvironmentSetupExitCodeTable','Get-AgentEnvironmentSetupExitCode','Get-AgentEnvironmentSetupBoundFiles',
     'Get-AgentEnvironmentSetupRequiredCapabilities','Get-AgentEnvironmentSetupReceiptFieldNames',
-    'Get-AgentEnvironmentSetupCloudPlan','Resolve-AgentEnvironmentSetupProjectionResult',
+    'Get-AgentEnvironmentSetupCloudPlan','Resolve-AgentEnvironmentSetupProjectionResult','Resolve-AgentEnvironmentSetupSkillIds',
     'New-AgentEnvironmentSetupRefusal','Get-AgentEnvironmentSetupRefusalCode','Get-AgentEnvironmentSetupSha256Text',
     'Assert-AgentEnvironmentSetupPolicy','Read-AgentEnvironmentSetupPolicy','ConvertTo-AgentEnvironmentSetupPolicyTsv',
     'Assert-AgentEnvironmentSetupPolicyTsv','Get-AgentEnvironmentSetupRid','Get-AgentEnvironmentSetupPolicyAsset',
     'Get-AgentEnvironmentSetupLayout','ConvertTo-AgentEnvironmentSetupHomePath','ConvertFrom-AgentEnvironmentSetupHomePath',
     'New-AgentEnvironmentSetupRuntimeAttemptLayout',
-    'ConvertTo-AgentEnvironmentSetupSanitizedText','ConvertTo-AgentEnvironmentSetupStoredRuntimeReceipt',
+    'ConvertTo-AgentEnvironmentSetupSanitizedText','Get-AgentEnvironmentSetupChildErrorLine','ConvertTo-AgentEnvironmentSetupStoredRuntimeReceipt',
     'ConvertFrom-AgentEnvironmentSetupStoredRuntimeReceipt','Assert-AgentEnvironmentSetupRuntimeReceiptLayout','Get-AgentEnvironmentSetupPlan',
     'Assert-AgentEnvironmentSetupPhysicalPath','Get-AgentEnvironmentSetupUserHome','Assert-AgentEnvironmentSetupCodexHome',
     'Assert-AgentEnvironmentSetupCommit','Test-AgentEnvironmentSetupSameFile','Get-AgentEnvironmentSetupChildEnvironment','Read-AgentEnvironmentSetupFile',
