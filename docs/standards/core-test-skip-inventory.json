@@ -34,9 +34,10 @@
         "bootstrap-ai-instructions.Tests.ps1::InterT118_preserves_external_target_evidence_for_parent-replacement_during_read_only_rollback",
         "bootstrap-ai-instructions.Tests.ps1::InterT119_fails_closed_when_shared_exclude_worktree_inventory_fails",
         "skills-source-acquisition.Tests.ps1::UnitT09_rejects_case_insensitive_file_collisions_before_hashing",
-        "skills-source-acquisition.Tests.ps1::UnitT09d_rejects_Unicode_NFC_path_collisions_before_hashing"
+        "skills-source-acquisition.Tests.ps1::UnitT09d_rejects_Unicode_NFC_path_collisions_before_hashing",
+        "syp214-user-only.Tests.ps1::InterT49_allows_distinct_case_variant_Unix_roots"
       ],
-      "reason": "The reviewed default macOS APFS runner cannot materialize the case and Unicode collision fixtures, and bootstrap's listed CMD/findstr, NTFS junction/reparse, Windows file-share, DACL, read-only attribute and native handle fixtures exercise mechanisms that do not exist with the same semantics on macOS."
+      "reason": "The reviewed default macOS APFS runner cannot materialize the case, Unicode collision, or distinct case-variant root fixtures, and bootstrap's listed CMD/findstr, NTFS junction/reparse, Windows file-share, DACL, read-only attribute and native handle fixtures exercise mechanisms that do not exist with the same semantics on macOS."
     },
     "linux": {
       "expectedSkippedTests": [

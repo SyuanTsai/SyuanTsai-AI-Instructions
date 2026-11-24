@@ -117,6 +117,26 @@ function Remove-Syp214TemporaryRecoveryRoot {
     Remove-Item -LiteralPath $fullPath -Recurse -Force
 }
 
+function Test-Syp214CaseSensitiveFileSystem {
+    $probeRoot=Join-Path ([IO.Path]::GetTempPath()) ('syp214-case-probe-'+[guid]::NewGuid().ToString('N'))
+    $lowerRoot=Join-Path $probeRoot 'case-root'
+    $upperRoot=Join-Path $probeRoot 'CASE-ROOT'
+    $isCaseSensitive=$false
+    try{
+        [void][IO.Directory]::CreateDirectory($probeRoot)
+        [void][IO.Directory]::CreateDirectory($lowerRoot)
+        $isCaseSensitive=-not[IO.Directory]::Exists($upperRoot)
+        if($isCaseSensitive){[void][IO.Directory]::CreateDirectory($upperRoot)}
+        return $isCaseSensitive
+    }finally{
+        if($isCaseSensitive-and[IO.Directory]::Exists($upperRoot)){
+            [IO.Directory]::Delete($upperRoot,$false)
+        }
+        if([IO.Directory]::Exists($lowerRoot)){[IO.Directory]::Delete($lowerRoot,$false)}
+        if([IO.Directory]::Exists($probeRoot)){[IO.Directory]::Delete($probeRoot,$false)}
+    }
+}
+
 function Get-Syp214GitInfoExcludeFixturePath {
     param([string]$Repository)
     $relativePath=(Invoke-TestGit -Repository $Repository -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
@@ -1396,8 +1416,10 @@ Describe 'SYP214 whole-Skill migration evidence' {
         finally { if($substAlias){Remove-Syp214SubstAlias -Alias $substAlias} }
     }
 
-    # Register only on the native host; keep this file's Core CI skip count at zero.
+    # Register only on the native host. The case-variant fixture is declared skipped
+    # at discovery time when the actual Unix test filesystem is case-insensitive.
     if($IsLinux -or $IsMacOS){
+        $caseVariantFileSystemIsSensitive=Test-Syp214CaseSensitiveFileSystem
         # Scenario: Repository and USER roots are separate existing Unix directories.
         # Purpose: Permit migration when native device and inode observations prove the roots are distinct.
         It 'InterT46_allows_distinct_Unix_repository_and_USER_roots' {
@@ -1447,7 +1469,7 @@ Describe 'SYP214 whole-Skill migration evidence' {
 
         # Scenario: Two existing Unix directories differ only by letter case on a case-sensitive filesystem.
         # Purpose: Keep canonical-path comparison ordinal so distinct case variants remain eligible.
-        It 'InterT49_allows_distinct_case_variant_Unix_roots' {
+        It 'InterT49_allows_distinct_case_variant_Unix_roots' -Skip:(-not $caseVariantFileSystemIsSensitive) {
             $platformRuntimePath=Join-Path $PSScriptRoot '../scripts/platform-runtime.psd1'
             $platformRuntime=Import-Module $platformRuntimePath -Force -PassThru
             & $platformRuntime.ExportedCommands['Assert-PlatformRuntimeInventory'] -Root (Split-Path -Parent $platformRuntimePath) -ManifestPath $platformRuntimePath | Out-Null
@@ -1455,10 +1477,6 @@ Describe 'SYP214 whole-Skill migration evidence' {
             $lowerRoot=Join-Path $caseRoot 'case-root'
             $upperRoot=Join-Path $caseRoot 'CASE-ROOT'
             [void][IO.Directory]::CreateDirectory($lowerRoot)
-            if([IO.Directory]::Exists($upperRoot)){
-                Set-TestInconclusive 'The test filesystem is case-insensitive; distinct case-variant directories cannot be created.'
-                return
-            }
             [void][IO.Directory]::CreateDirectory($upperRoot)
 
             (Assert-RepoAndUserRootsDistinct -Repository $lowerRoot -UserHome $upperRoot) | Should Be $true

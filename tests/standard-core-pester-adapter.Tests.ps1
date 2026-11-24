@@ -1378,6 +1378,25 @@ Describe 'Unix Git maintenance containment' {
             }
         }
 
+        if (-not $IsWindows) {
+            # Scenario: A Unix Core job supplies its runner-owned temporary boundary while the ambient TMPDIR may be an alias.
+            # Purpose: Preserve the canonical runner boundary in the restricted child environment without changing Windows Core.
+            It 'InterT83_forwards_the_Unix_runner_temporary_boundary' {
+                $fixture=New-P02AFixture
+                $runnerTemp=Join-Path $fixture.Root 'runner-temp'
+                [void][IO.Directory]::CreateDirectory($runnerTemp)
+                $escapedRunnerTemp=$runnerTemp.Replace("'","''")
+                $body="Describe 'runner temporary boundary' { It 'inherits RUNNER_TEMP' { [Environment]::GetEnvironmentVariable('RUNNER_TEMP','Process') | Should Be '$escapedRunnerTemp' } }"
+                Write-P02AText (Join-Path $fixture.TestRoot 'runner-temp.Tests.ps1') $body
+                $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('runner-temp.Tests.ps1')
+                $config=Get-Content -LiteralPath $invocation.ConfigPath -Raw | ConvertFrom-Json
+                $config | Add-Member NoteProperty InjectedEnvironment ([pscustomobject]@{RUNNER_TEMP=$runnerTemp})
+                Write-P02AText $invocation.ConfigPath ($config | ConvertTo-Json -Depth 8)
+                $run=Invoke-P02AHiddenAdapter $invocation $fixture
+                Assert-P02AExpectedWithChildDiagnostics $run.ExitCode 0 $fixture 'Unix child must inherit the runner temporary boundary.'
+            }
+        }
+
         # Scenario: Two passing files are partitioned into two bulk shards and only partition 1 executes.
         # Purpose: Report exactly the paths in completed shards, excluding the unexecuted alpha shard.
         It 'InterT50_partition_summary_lists_only_executed_files' {

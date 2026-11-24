@@ -244,6 +244,11 @@ function Get-PesterShardChildEnvironment {
     }
     $values['PSModulePath'] = Join-Path $PSHOME 'Modules'
     if (-not $isWindowsHost) {
+        # GitHub's macOS TMPDIR commonly traverses the /var -> /private/var
+        # alias. Retain the runner-owned canonical temporary boundary so tests
+        # and nested platform-runtime children do not fall back to that alias.
+        $runnerTemp = [Environment]::GetEnvironmentVariable('RUNNER_TEMP','Process')
+        if ($null -ne $runnerTemp) { $values['RUNNER_TEMP'] = $runnerTemp }
         # Git automatic maintenance and detached gc can outlive their invoking Git
         # process, escape the shard process group, and be adopted by the Linux
         # subreaper without a surviving ancestry edge. Keep Git work synchronous;

@@ -4148,8 +4148,9 @@ public sealed class C245NonCooperativeStream : Stream {
         )
         Assert-ExactStringSequence $inventory.platforms.macos.expectedSkippedTests ($bootstrapWindowsOnly + @(
             'skills-source-acquisition.Tests.ps1::UnitT09_rejects_case_insensitive_file_collisions_before_hashing',
-            'skills-source-acquisition.Tests.ps1::UnitT09d_rejects_Unicode_NFC_path_collisions_before_hashing'
-        )) 'macOS must skip the Windows-only bootstrap cases plus its case and Unicode collision fixtures.'
+            'skills-source-acquisition.Tests.ps1::UnitT09d_rejects_Unicode_NFC_path_collisions_before_hashing',
+            'syp214-user-only.Tests.ps1::InterT49_allows_distinct_case_variant_Unix_roots'
+        )) 'macOS must skip the Windows-only bootstrap cases plus its case, Unicode collision, and distinct case-variant root fixtures.'
         Assert-ExactStringSequence $inventory.platforms.linux.expectedSkippedTests $bootstrapWindowsOnly 'Linux must skip only the Windows-only bootstrap cases.'
     }
 

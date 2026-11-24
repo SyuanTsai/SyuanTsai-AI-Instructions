@@ -804,6 +804,9 @@ jobs:
         Assert-NotMatch $executor 'DllImport|CreateJobObject|AssignProcessToJobObject|Get-CimInstance|Stop-Process|\.Kill\(|setsid|ProcessStartInfo' 'The shard must not duplicate native containment or discovery backends.'
         Assert-Match $executor 'MainModule\.FileName' 'The bounded child must inherit the verified runner executable.'
         Assert-NotMatch $executor 'PesterShardLinux|Pester 3\.4\.0|Windows PowerShell 5\.1' 'The bounded executor must not retain a duplicated Unix backend or legacy Pester paths.'
+        $unixAdoptedDiagnostics = (Get-PesterExecutorFunction -Name 'Get-PesterShardUnixAdoptedProcessDiagnostics').ToString()
+        Assert-Equal ([regex]::Matches($executor, '/proc').Count) 2 'The executor may reference /proc only for the bounded adopted-child diagnostic probe.'
+        Assert-Equal ([regex]::Matches($unixAdoptedDiagnostics, '/proc').Count) 2 'Both reviewed /proc references must remain inside the adopted-child diagnostic function.'
         Assert-Match $executor 'ReadAllBytes\("/proc/\$processId/cmdline"\)' 'Linux adopted-child diagnostics must read the attributed PID command line without adding a process-discovery backend.'
         Assert-Match $executor '\$bytes\.Length -gt 4096' 'Linux adopted-child command-line evidence must remain bounded.'
         Assert-Match $executor 'ConvertTo-PesterShardSanitizedDiagnosticText \$commandLine' 'Linux adopted-child command-line evidence must use the standard diagnostic sanitizer.'
