@@ -77,18 +77,6 @@ function Test-InstallerHasProperty {
     return $null -ne $Object -and $null -ne $Object.PSObject.Properties[$Name]
 }
 
-function Test-InstallerWslHost {
-    if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Linux)) { return $false }
-    if (-not [string]::IsNullOrWhiteSpace($env:WSL_DISTRO_NAME) -or -not [string]::IsNullOrWhiteSpace($env:WSL_INTEROP)) { return $true }
-    foreach ($path in @('/proc/sys/kernel/osrelease','/proc/version')) {
-        try {
-            if ([IO.File]::Exists($path) -and [IO.File]::ReadAllText($path) -match '(?i)microsoft|wsl') { return $true }
-        }
-        catch { }
-    }
-    return $false
-}
-
 function Assert-InstallerMutationPath {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -872,7 +860,7 @@ $hooksPath = Join-Path $codexHomePath 'hooks.json'
 $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
 $installLockPath = Join-Path $codexHomePath 'ai-instructions-install.lock'
 
-if (Test-InstallerWslHost) {
+if (Test-AiInstructionsWslHost) {
     throw (New-AiInstructionsRefusalException -Code runtime-baseline-unavailable -Message 'WSL is unsupported for AI instructions installation.')
 }
 

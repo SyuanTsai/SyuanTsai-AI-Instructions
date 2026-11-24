@@ -2228,6 +2228,23 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
         $v2=[pscustomobject]@{os='windows';architecture='x64';capabilities=@($required|ForEach-Object{[pscustomobject]@{name=$_;status='available'}})}
         (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 2 -CapabilityReceipt $v2)|Should Be $false
     }
+
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Linux)) {
+        # Scenario: A complete Linux capability receipt is evaluated while the process carries a WSL host marker, then after that marker is restored.
+        # Purpose: Keep WSL fail closed in the shared projection gate without disabling supported native Linux hosts.
+        It 'UnitT45_refuses_projection_runtime_on_WSL' {
+            $required=@('directory-lease','file-lease','file-identity','lock','publication','owned-file-removal','permissions','directory-publication')
+            $available=[pscustomobject]@{os='linux';architecture='x64';capabilities=@($required|ForEach-Object{[pscustomobject]@{name=$_;status='available'}})}
+            $saved=[Environment]::GetEnvironmentVariable('WSL_DISTRO_NAME')
+            try{
+                [Environment]::SetEnvironmentVariable('WSL_DISTRO_NAME','fixture-wsl')
+                (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 3 -CapabilityReceipt $available)|Should Be $false
+            }finally{[Environment]::SetEnvironmentVariable('WSL_DISTRO_NAME',$saved)}
+            if(-not(Test-AiInstructionsWslHost)){
+                (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 3 -CapabilityReceipt $available)|Should Be $true
+            }
+        }
+    }
 }
 
 Describe 'SYP-511 capability evidence reconciliation' {

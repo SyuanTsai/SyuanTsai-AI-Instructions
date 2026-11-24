@@ -170,12 +170,25 @@ function Assert-AiInstructionsProjectionCapabilityReceipt {
     return $Receipt
 }
 
+function Test-AiInstructionsWslHost {
+    if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Linux)) { return $false }
+    if (-not [string]::IsNullOrWhiteSpace($env:WSL_DISTRO_NAME) -or -not [string]::IsNullOrWhiteSpace($env:WSL_INTEROP)) { return $true }
+    foreach ($path in @('/proc/sys/kernel/osrelease','/proc/version')) {
+        try {
+            if ([IO.File]::Exists($path) -and [IO.File]::ReadAllText($path) -match '(?i)microsoft|wsl') { return $true }
+        }
+        catch { }
+    }
+    return $false
+}
+
 function Test-AiInstructionsProjectionRuntimeAvailable {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][object] $CatalogSchemaVersion,
         [AllowNull()][object] $CapabilityReceipt
     )
+    if (Test-AiInstructionsWslHost) { return $false }
     $catalogIsV3 = (($CatalogSchemaVersion -is [int]) -or ($CatalogSchemaVersion -is [long])) -and [int64]$CatalogSchemaVersion -eq 3
     if (-not $catalogIsV3) { return $false }
     try {
@@ -2041,6 +2054,9 @@ function Assert-AiInstructionsRuntimeGate {
         [AllowNull()][object] $CapabilityReceipt,
         [string] $CanonicalRepository = $script:CanonicalRepository
     )
+    if (Test-AiInstructionsWslHost) {
+        throw (New-AiInstructionsRefusalException -Code runtime-baseline-unavailable -Message 'WSL is unsupported for the AI instructions projection runtime.')
+    }
     $bundleVersion = if (Test-AiInstructionsObjectHasProperty -Object $Bundle -Name 'schemaVersion') { $Bundle.schemaVersion } else { $null }
     $configurationVersion = if (Test-AiInstructionsObjectHasProperty -Object $Configuration -Name 'schemaVersion') { $Configuration.schemaVersion } else { $null }
     $generation = Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $bundleVersion -ConfigurationSchemaVersion $configurationVersion -BundleExists:$true -ConfigurationExists:$true
@@ -3935,6 +3951,7 @@ Export-ModuleMember -Function @(
     'Get-AiInstructionsRuntimeInventorySha256V3',
     'New-AiInstructionsRuntimeBundleV2',
     'New-AiInstructionsRuntimeBundleV3',
+    'Test-AiInstructionsWslHost',
     'Test-AiInstructionsProjectionRuntimeAvailable',
     'Select-AiInstructionsInstallWriterSchema',
     'New-AiInstructionsInstallJournalV1',
