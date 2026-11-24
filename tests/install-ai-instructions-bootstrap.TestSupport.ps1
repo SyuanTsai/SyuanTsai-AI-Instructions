@@ -188,6 +188,26 @@ function Copy-TestInstallerBootstrapAuthority {
     Copy-Item -LiteralPath (Join-Path $SourceRoot 'instructions\common\bootstrap-section.md') -Destination $destination -Force
 }
 
+function Get-TestRenderedBootstrapSectionBytes {
+    param([Parameter(Mandatory=$true)][string]$RepositoryRoot)
+
+    $os=if([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)){'windows'}elseif([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)){'macos'}else{'linux'}
+    $powerShellPath=[IO.Path]::GetFullPath((Join-Path $PSHOME $(if($os-ceq'windows'){'pwsh.exe'}else{'pwsh'})))
+    $receipt=[pscustomobject]@{
+        os=$os
+        runtime=[pscustomobject]@{powerShellExecutablePath=$powerShellPath}
+        capabilities=@([pscustomobject]@{
+            name='powershell-runtime'
+            status='available'
+            evidence=@("Physical pwsh identity and version probe passed: $powerShellPath")
+        })
+    }
+    [byte[]]$bytes=Get-AiInstructionsBootstrapSectionBytes `
+        -TemplateBytes ([IO.File]::ReadAllBytes((Join-Path $RepositoryRoot 'instructions/common/bootstrap-section.md'))) `
+        -CapabilityReceipt $receipt
+    return ,$bytes
+}
+
 function Invoke-TestAgentEnvironmentEntryWithExclusiveLockProbe {
     param(
         [Parameter(Mandatory=$true)][string]$EntryPath,

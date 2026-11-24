@@ -78,6 +78,12 @@ function Get-CanonicalBootstrapSectionBytes {
     if ([regex]::Matches($text,'(?m)^## Repository Instructions Bootstrap[ \t]*$').Count -ne 1) {
         throw 'BootstrapSectionAuthorityInvalid: instructions/common/bootstrap-section.md must contain exactly one managed heading.'
     }
+    $placeholder = '{{AI_INSTRUCTIONS_PWSH_INVOCATION}}'
+    $knownMatches = [regex]::Matches($text,[regex]::Escape($placeholder))
+    $allMatches = [regex]::Matches($text,'\{\{[A-Z][A-Z0-9_]*\}\}')
+    if ($knownMatches.Count -ne 1 -or $allMatches.Count -ne 1 -or $allMatches[0].Value -cne $placeholder) {
+        throw "BootstrapSectionAuthorityInvalid: instructions/common/bootstrap-section.md must contain exactly one '$placeholder' placeholder and no unknown placeholders."
+    }
     return $bytes
 }
 

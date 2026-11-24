@@ -183,7 +183,8 @@ function New-TestProjectionDesiredState {
     Assert-UserSkillsManagedManifestBinding -Manifest $manifest -CatalogBytes $catalogBytes -LockBytes $lockBytes -ExpectedCatalogRepository $manifest.catalogRepository -ExpectedCatalogCommit $manifest.catalogCommit|Out-Null
     $instructionsArtifact=if($WithoutClaude){$null}else{[pscustomobject][ordered]@{
         targetPath='.claude/CLAUDE.md'
-        sectionBytes=[IO.File]::ReadAllBytes((Join-Path $runtimeRoot 'bootstrap-section.md'))
+        sectionBytes=Get-AiInstructionsBootstrapSectionBytes -TemplateBytes ([IO.File]::ReadAllBytes((Join-Path $runtimeRoot 'bootstrap-section.md'))) `
+            -CapabilityReceipt $capabilityReceipt
     }}
     [pscustomobject][ordered]@{
         RuntimeRoot=$runtimeRoot;Catalog=$catalog;Lock=$lock;SkillIds=$selectedSkillIds;Files=$files;Manifest=$manifest
@@ -2085,6 +2086,23 @@ Describe 'SYP-510 Windows production USER projections' {
         (Get-TestTreeSnapshot $userHome)|Should Be $before
     }
 
+    # Scenario: The production USER Claude artifact is derived from the verified runtime template and capability receipt.
+    # Purpose: Keep template bytes in the runtime inventory while binding desired and installed bytes to the resolved pwsh source.
+    It 'InterT12_renders_the_USER_Claude_section_from_the_verified_template_and_receipt' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'syp535-rendered-section-stage') -WithoutCopilot
+        [byte[]]$template=[IO.File]::ReadAllBytes((Join-Path $desired.RuntimeRoot 'bootstrap-section.md'))
+        [byte[]]$expected=Get-AiInstructionsBootstrapSectionBytes -TemplateBytes $template -CapabilityReceipt $desired.GateContext.capabilityReceipt
+
+        [Convert]::ToBase64String([byte[]]$desired.InstructionsArtifact.sectionBytes)|Should Be ([Convert]::ToBase64String($expected))
+        ([Text.UTF8Encoding]::new($false,$true).GetString($template))|Should Match '\{\{AI_INSTRUCTIONS_PWSH_INVOCATION\}\}'
+        $renderedText=[Text.UTF8Encoding]::new($false,$true).GetString([byte[]]$desired.InstructionsArtifact.sectionBytes)
+        $renderedText|Should Not Match '\{\{AI_INSTRUCTIONS_PWSH_INVOCATION\}\}'
+        if([string]$desired.GateContext.capabilityReceipt.os-cne'windows'){
+            $renderedText|Should Match ([regex]::Escape([string]$desired.GateContext.capabilityReceipt.runtime.powerShellExecutablePath))
+            $renderedText|Should Match ([regex]::Escape('-NoProfile -NonInteractive -File "$codexHome/hooks/bootstrap-ai-instructions.ps1"'))
+        }
+    }
+
     # Scenario: The stable update-agent-environment entry reads config v5 and the production Catalog/Lock v3, then applies and verifies the selected USER projections.
     # Purpose: Prove Apply and VerifyOnly preserve the installed v3/v5 projection selection through the public command surface without source acquisition.
     It 'InterT15_preserves_the_production_v3v5_selection_through_the_stable_entry' {
@@ -3023,7 +3041,9 @@ Describe 'USER Claude managed bootstrap section' {
 
         $desired=Get-UserSkillsDesiredState -RuntimeRoot $fixture.RuntimeRoot -Configuration $configuration -CatalogRepository ([string]$bundle.repository) -CatalogCommit ([string]$bundle.commit) -WorkingRoot (Join-Path $TestDrive 'claude-production-planner-work') -GateContext $gate -LocalArchiveOverrides @{'agent-skills'=$archivePath}
 
-        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$authority=Get-AiInstructionsBootstrapSectionBytes `
+            -TemplateBytes ([IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md'))) `
+            -CapabilityReceipt $gate.capabilityReceipt
         [Convert]::ToBase64String([byte[]]$desired.InstructionsArtifact.sectionBytes)|Should Be ([Convert]::ToBase64String($authority))
         (@($desired.ProjectionIds|Sort-Object)-join',')|Should Be 'user-agents,user-claude,user-copilot'
         $desired.Manifest.schemaVersion|Should Be 3
@@ -3274,6 +3294,24 @@ Describe 'USER Claude managed bootstrap section' {
             $caught.Exception.Code|Should Be $case.Code
             (Get-TestTreeSnapshot $userHome)|Should Be $before
         }
+    }
+
+    # Scenario: The bound runtime template is modified after desired state was produced but before USER mutation.
+    # Purpose: Revalidate inventory-bound template bytes and refuse the write before touching the isolated USER tree.
+    It 'InterT123_rejects_a_tampered_bootstrap_template_before_USER_mutation' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-template-tamper-fixture')
+        $templatePath=Join-Path $desired.RuntimeRoot 'bootstrap-section.md'
+        $template=[IO.File]::ReadAllText($templatePath,[Text.UTF8Encoding]::new($false,$true))
+        $template|Should Match '\{\{AI_INSTRUCTIONS_PWSH_INVOCATION\}\}'
+        [IO.File]::WriteAllText($templatePath,$template.Replace('{{AI_INSTRUCTIONS_PWSH_INVOCATION}}','{{AI_INSTRUCTIONS_PWSH_INVOCATION}} tampered'),[Text.UTF8Encoding]::new($false))
+        $userHome=Join-Path $TestDrive 'claude-template-tamper-user';New-Item -ItemType Directory -Force -Path $userHome|Out-Null
+        [IO.File]::WriteAllText((Join-Path $userHome 'personal.txt'),'preserve',[Text.UTF8Encoding]::new($false));$before=Get-TestTreeSnapshot $userHome
+
+        $caught=$null;try{Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply|Out-Null}catch{$caught=$_}
+
+        $caught|Should Not BeNullOrEmpty
+        $caught.Exception.Code|Should Be 'closure-invalid'
+        (Get-TestTreeSnapshot $userHome)|Should Be $before
     }
 
     # Scenario: A fresh home has no .claude directory and fails after staging, publication, or durable operation journaling.

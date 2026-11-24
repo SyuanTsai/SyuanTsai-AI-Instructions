@@ -707,6 +707,7 @@ function Get-PlatformCapabilities {
         runtime = [pscustomobject][ordered]@{
             powerShellVersion = $PSVersionTable.PSVersion.ToString()
             dotNetVersion = [Runtime.InteropServices.RuntimeInformation]::FrameworkDescription
+            powerShellExecutablePath = [IO.Path]::GetFullPath($powerShellExecutable)
         }
         capabilities = [object[]]$capabilities.ToArray()
     }

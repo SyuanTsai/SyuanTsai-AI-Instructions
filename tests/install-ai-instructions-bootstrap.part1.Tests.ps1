@@ -1014,7 +1014,7 @@ finally {
         $agentsPath=Join-Path $codexHome 'AGENTS.md';$utf8=[Text.UTF8Encoding]::new($false)
         [byte[]]$bom=@(0xEF,0xBB,0xBF);[byte[]]$prefix=$utf8.GetBytes("# Personal`r`nkeep  `r`n## Repository Instructions Bootstrap`r`nold`r`n");[byte[]]$suffix=$utf8.GetBytes("## Tail`r`nvalue  `r`n")
         [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($bom+$prefix+$suffix))
-        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$authority=Get-TestRenderedBootstrapSectionBytes -RepositoryRoot $repositoryRoot
         [byte[]]$expected=[byte[]]@($bom+$utf8.GetBytes("# Personal`r`nkeep  `r`n")+$authority+$suffix)
         $isolatedHome=Join-Path $TestDrive 'installer-isolated-user-home'
         $isolatedEnvironment=Initialize-InstallerIsolatedProcessEnvironment -IsolatedHome $isolatedHome
@@ -1047,7 +1047,7 @@ finally {
         New-Item -ItemType Directory -Force -Path $codexHome|Out-Null
         $agentsPath=Join-Path $codexHome 'AGENTS.md';$utf8=[Text.UTF8Encoding]::new($false)
         [byte[]]$personal=$utf8.GetBytes("# Personal`nkeep`n");[IO.File]::WriteAllBytes($agentsPath,$personal)
-        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$authority=Get-TestRenderedBootstrapSectionBytes -RepositoryRoot $repositoryRoot
         [byte[]]$golden=[byte[]]@($utf8.GetBytes("# Personal`nkeep`n`n")+$authority)
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($golden))
@@ -1109,7 +1109,7 @@ finally {
     # Purpose: Materialize exactly the canonical section bytes without a BOM or surrounding bytes.
     It 'InterT97_creates_a_missing_AGENTS_file_with_only_canonical_section_bytes' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
-        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $codexHome 'AGENTS.md')))|Should Be ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))))
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $codexHome 'AGENTS.md')))|Should Be ([Convert]::ToBase64String((Get-TestRenderedBootstrapSectionBytes -RepositoryRoot $repositoryRoot)))
     }
 
     if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
@@ -1121,7 +1121,7 @@ finally {
         [byte[]]$prefix=$utf8.GetBytes("# Personal`r`nkeep`r`n## Repository Instructions Bootstrap`r`nold`r`n")
         [byte[]]$suffix=$utf8.GetBytes("  ## Personal Tail`r`nvalue  `r`n")
         [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($prefix+$suffix))
-        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$authority=Get-TestRenderedBootstrapSectionBytes -RepositoryRoot $repositoryRoot
         [byte[]]$expected=[byte[]]@($utf8.GetBytes("# Personal`r`nkeep`r`n")+$authority+$suffix)
 
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
@@ -1138,7 +1138,7 @@ finally {
         [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
         [byte[]]$suffix=$utf8.GetBytes("Personal notes`r`n--------------`r`nKEEP  `r`n")
         [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($personalPrefix+$oldSection+$suffix))
-        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$authority=Get-TestRenderedBootstrapSectionBytes -RepositoryRoot $repositoryRoot
         [byte[]]$expected=[byte[]]@($personalPrefix+$authority+$utf8.GetBytes("`r`n")+$suffix)
 
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
@@ -1155,7 +1155,7 @@ finally {
         [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
         [byte[]]$suffix=$utf8.GetBytes("## Personal Tail`r`nKEEP  `r`n")
         [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($personalPrefix+$oldSection+$suffix))
-        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$authority=Get-TestRenderedBootstrapSectionBytes -RepositoryRoot $repositoryRoot
         [byte[]]$expected=[byte[]]@($personalPrefix+$authority+$suffix)
 
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
@@ -1171,7 +1171,7 @@ finally {
         [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n* * *`r`n")
         [byte[]]$suffix=$utf8.GetBytes("  ## Personal Tail`r`nKEEP  `r`n")
         [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($oldSection+$suffix))
-        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$authority=Get-TestRenderedBootstrapSectionBytes -RepositoryRoot $repositoryRoot
         [byte[]]$expected=[byte[]]@($authority+$suffix)
 
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
@@ -1188,7 +1188,7 @@ finally {
         [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
         [byte[]]$suffix=$utf8.GetBytes("Personal notes`r`n--------------`r`nKEEP  `r`n")
         [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($personalPrefix+$oldSection+$suffix))
-        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$authority=Get-TestRenderedBootstrapSectionBytes -RepositoryRoot $repositoryRoot
         [byte[]]$expected=[byte[]]@($personalPrefix+$authority+$utf8.GetBytes("`r`n")+$suffix)
 
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
