@@ -256,13 +256,16 @@ jobs:
             PesterVersion = '4.10.1'
             ExpectedSkippedCount = $expectedSkips.Count
             ExpectedSkippedTests = $expectedSkips
+            # Each matrix job selects exactly one file, so do not reapply repository-wide isolation defaults.
+            IsolatedTestFileNames = [string[]]@()
+            BulkShardSize = 1
             ShardPartitionCount = 1
             ShardPartitionIndex = 0
             OuterTimeoutSeconds = 4800
             TestRoot = './tests'
             EvidenceRoot = $evidenceRoot
             SelectedTestFileNames = [string[]]@($env:SYP_UNIX_FILE)
-            SummaryOutputPath = Join-Path (Split-Path -Parent $evidenceRoot) 'executor-summary.json'
+            SummaryOutputPath = Join-Path $evidenceRoot 'executor-summary.json'
             SummarySchemaVersion = 2
             SummaryRunId = [string]$env:GITHUB_RUN_ID
             SummaryRunAttempt = [int]$env:GITHUB_RUN_ATTEMPT

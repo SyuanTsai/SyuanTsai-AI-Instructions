@@ -609,6 +609,9 @@ jobs:
         Assert-WindowsCoreWorkflowContract -WorkflowText $core
         Assert-WindowsInstallSmokeWorkflowContract -WorkflowText $install
         Assert-UnixCoreWorkflowContract -WorkflowText $unix
+        $unixCrLf = (ConvertTo-WorkflowLf $unix).Replace("`n", "`r`n")
+        Assert-UnixCoreWorkflowContract -WorkflowText $unixCrLf
+        $unix = ConvertTo-WorkflowLf $unix
         Assert-RequiredCheckNameContract -WindowsCoreText $core -WindowsInstallSmokeText $install
         Assert-Match $unix '(?m)^name: Unix Core \(non-required\)$' 'Unix Core must identify itself as non-required.'
         Assert-Match $unix '(?m)^    name: \$\{\{ matrix\.display \}\} Core / \$\{\{ matrix\.file \}\}$' 'Unix Core per-file checks must preserve platform and file names.'
