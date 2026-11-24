@@ -6854,3 +6854,151 @@ Describe 'SYP354 trust-anchor rotation approval boundary' {
         $matrix | Should Match 'Trust-anchor rotation.*approval boundary.*\*\*MUST\*\* merge only after the user verifies proposed fingerprints with an independent tool'
     }
 }
+
+Describe 'SYP537 repository-level secret protection contract' -Tag 'SYP537' {
+    BeforeAll {
+        $script:Syp537RepositoryRoot = Split-Path -Parent $PSScriptRoot
+        $script:Syp537StandardPath = Join-Path $script:Syp537RepositoryRoot 'docs/standards/skill-repository-standard.md'
+        $script:Syp537Standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:Syp537StandardPath
+
+        function Get-Syp537Section {
+            param(
+                [Parameter(Mandatory)] [string] $Text,
+                [Parameter(Mandatory)] [string] $Heading,
+                [string] $NextHeadingPattern = '^## |^### '
+            )
+
+            [regex]::Match($Text, "(?ms)^$([regex]::Escape($Heading))\r?\n(?<body>.*?)(?=$NextHeadingPattern)")
+        }
+
+        function Test-Syp537ExceptionContract {
+            param([Parameter(Mandatory)] [string] $Text)
+
+            $Text -match '本要求不是 exception-capable，第 14\.2 節 exception 不得豁免' -and
+                $Text -notmatch '可申請|得申請|(?i:may request)'
+        }
+    }
+
+    # Scenario: The repository-level secret protection section is missing or placed outside the release-approval boundary.
+    # Purpose: Keep the new normative control between the central CI requirements and Human Release Approval.
+    It 'UnitT10_places_repository_secret_protection_between_sections_12_3_and_13' {
+        $sectionMatch = Get-Syp537Section -Text $script:Syp537Standard -Heading '### 12.4 Repository-level secret protection'
+
+        $sectionMatch.Success | Should -Be $true
+        $script:Syp537Standard.IndexOf('### 12.3 Central reference implementation ownership and CI', [StringComparison]::Ordinal) | Should -BeLessThan $sectionMatch.Index
+        $sectionMatch.Index | Should -BeLessThan $script:Syp537Standard.IndexOf('## 13. AI Review and Human Release Approval', [StringComparison]::Ordinal)
+    }
+
+    # Scenario: Secret scanning or push protection is enabled only as guidance rather than a repository requirement.
+    # Purpose: Require both GitHub security_and_analysis statuses to be enabled.
+    It 'UnitT20_requires_both_GitHub_secret_protection_statuses_to_be_enabled' {
+        $section = (Get-Syp537Section -Text $script:Syp537Standard -Heading '### 12.4 Repository-level secret protection').Groups['body'].Value
+        $secretScanningPattern = '`security_and_analysis\.secret_scanning\.status`\s+\*\*MUST\*\* 為 `enabled`'
+        $pushProtectionPattern = '`security_and_analysis\.secret_scanning_push_protection\.status`\s+\*\*MUST\*\* 為 `enabled`'
+
+        $section | Should -Match $secretScanningPattern
+        $section | Should -Match $pushProtectionPattern
+
+        $pushProtectionMutation = $section -replace '(`security_and_analysis\.secret_scanning_push_protection\.status`\s+)\*\*MUST\*\*', '$1**SHOULD**'
+        $pushProtectionMutation | Should -Not -Match $pushProtectionPattern
+        $pushProtectionMutation | Should -Match $secretScanningPattern
+
+        $secretScanningMutation = $section -replace '(`security_and_analysis\.secret_scanning\.status`\s+)\*\*MUST\*\*', '$1**SHOULD**'
+        $secretScanningMutation | Should -Not -Match $secretScanningPattern
+        $secretScanningMutation | Should -Match $pushProtectionPattern
+    }
+
+    # Scenario: Approval evidence is produced without reading the repository settings or open secret-scanning alerts.
+    # Purpose: Bind approval to both read-only GitHub REST queries.
+    It 'UnitT30_requires_the_repository_and_open_alert_REST_queries' {
+        $section = (Get-Syp537Section -Text $script:Syp537Standard -Heading '### 12.4 Repository-level secret protection').Groups['body'].Value
+        $alertsEndpoint = 'GET /repos/{owner}/{repo}/secret-scanning/alerts?state=open&hide_secret=true&per_page=100'
+
+        $section | Should -Match ([regex]::Escape('GET /repos/{owner}/{repo}'))
+        $section | Should -Match ([regex]::Escape($alertsEndpoint))
+        $section | Should -Match 'Link.*分頁'
+        $section | Should -Match '\*\*MUST\*\* 帶 `hide_secret=true`'
+        $section | Should -Match '\*\*MUST NOT\*\* 輸出、記錄或保存 alert 原始內容或 secret 值'
+
+        $section.Replace('hide_secret=true', '') | Should -Not -Match ([regex]::Escape($alertsEndpoint))
+    }
+
+    # Scenario: A failed repository audit can still be approved or its result is omitted from the release record.
+    # Purpose: Fail approval closed and preserve the required audit evidence.
+    It 'UnitT40_blocks_approval_on_audit_failure_and_records_release_evidence' {
+        $section = (Get-Syp537Section -Text $script:Syp537Standard -Heading '### 12.4 Repository-level secret protection').Groups['body'].Value
+
+        $section | Should -Match 'MUST NOT\*\* 取得 Human Release Approval'
+        $section | Should -Match '稽核結果.*\*\*MUST\*\* 記入該次 release 的人工核准紀錄'
+        $section | Should -Match '不屬於第 8\.3 節 Human Approval stage 的 machine-readable evidence'
+    }
+
+    # Scenario: An open alert is closed without first revoking a leaked credential or with a permissive resolution.
+    # Purpose: Require safe triage for real leaks while retaining explicit false-positive and test-data resolutions.
+    It 'UnitT45_requires_safe_open_alert_triage' {
+        $section = (Get-Syp537Section -Text $script:Syp537Standard -Heading '### 12.4 Repository-level secret protection').Groups['body'].Value
+
+        $section | Should -Match '有效外洩時.*\*\*MUST\*\* 先撤銷或輪替'
+        $section | Should -Match '`false_positive`'
+        $section | Should -Match '`used_in_tests`'
+        $section | Should -Match '`wont_fix` \*\*MUST NOT\*\* 用來放行有效外洩'
+    }
+
+    # Scenario: Repository secret protection is reinterpreted as a new validation gate or tool integration.
+    # Purpose: Keep this repository-level control outside the formal gate-stage architecture.
+    It 'UnitT50_keeps_repository_secret_protection_outside_the_gate_stage' {
+        $section = (Get-Syp537Section -Text $script:Syp537Standard -Heading '### 12.4 Repository-level secret protection').Groups['body'].Value
+
+        $section | Should -Match '不是第 8\.3 節的 gate stage'
+        foreach ($boundary in @('formal baseline tool', 'resolver adapter', 'consumer mode', 'required context')) {
+            $section | Should -Match ("不新增.*{0}" -f [regex]::Escape($boundary))
+        }
+    }
+
+    # Scenario: The repository-level control can be waived as an ordinary release exception.
+    # Purpose: Preserve the non-exception-capable security boundary.
+    It 'UnitT60_makes_repository_secret_protection_non_exception_capable' {
+        $section = (Get-Syp537Section -Text $script:Syp537Standard -Heading '### 12.4 Repository-level secret protection').Groups['body'].Value
+
+        (Test-Syp537ExceptionContract -Text $section) | Should -Be $true
+
+        $mutation = $section.Replace('本要求不是 exception-capable', '本要求不是 exception-capable，但可申請 exception')
+        (Test-Syp537ExceptionContract -Text $mutation) | Should -Be $false
+    }
+
+    # Scenario: Cross-references omit the audit from approval, conformance evidence, or authority regression coverage.
+    # Purpose: Keep sections 12.2, 13.2, and 17 aligned with the new normative requirement.
+    It 'UnitT70_updates_release_approval_conformance_and_regression_cross_references' {
+        $testsSection = (Get-Syp537Section -Text $script:Syp537Standard -Heading '### 12.2 Tests' -NextHeadingPattern '^### 12\.3').Groups['body'].Value
+        $approvalSection = (Get-Syp537Section -Text $script:Syp537Standard -Heading '### 13.2 Release Approval').Groups['body'].Value
+        $conformanceSection = (Get-Syp537Section -Text $script:Syp537Standard -Heading '## 17. Conformance levels' -NextHeadingPattern '^## ').Groups['body'].Value
+
+        $testsSection | Should -Match '第 12\.4 節 repository-level secret protection'
+        $approvalSection | Should -Match 'Human Release Approval \*\*MUST\*\* 先完成第 12\.4 節'
+        $conformanceSection | Should -Match '(?m)^19\. 第 12\.4 節 repository-level secret protection 的稽核紀錄。\r?$'
+    }
+
+    # Scenario: A later edit rewords §12.4 so a keyword still matches but the requirement is weakened
+    # (first page only, no revoked closure, extending the machine-readable evidence contract, ...).
+    # Purpose: Pin every normative line of §12.4 verbatim; any change requires updating this regression under §19.
+    It 'UnitT80_pins_every_normative_line_of_section_12_4_verbatim' {
+        $section = (Get-Syp537Section -Text $script:Syp537Standard -Heading '### 12.4 Repository-level secret protection').Groups['body'].Value
+        $actual = @(($section -split '\r?\n') | Where-Object { $_.Trim().Length -gt 0 })
+        $expected = @(
+            '每個受本標準規範的 Skill source repository（第 1 節所列 owned production Skills 所在的 repository，包括 Skill-Darktide-Translate）**MUST** 在 GitHub 啟用 secret scanning 與 push protection，也就是 repository `security_and_analysis` 中 `secret_scanning` 與 `secret_scanning_push_protection` 的 `status` 皆為 `enabled`。',
+            '這是 repository-level control，不是第 8.3 節的 gate stage：它不新增 formal baseline tool、resolver adapter、consumer mode 或 required context，也不取代 Package Validation 中 skill-tools `no-secrets` 對 `SKILL.md` 的檢查。',
+            'Human Release Approval（第 13.2 節）前，approver **MUST** 以唯讀 GitHub REST API 確認：',
+            '- `GET /repos/{owner}/{repo}` 回應中的 `security_and_analysis.secret_scanning.status` **MUST** 為 `enabled`，且 `security_and_analysis.secret_scanning_push_protection.status` **MUST** 為 `enabled`；',
+            '- `GET /repos/{owner}/{repo}/secret-scanning/alerts?state=open&hide_secret=true&per_page=100` 依回應 `Link` header 走完所有分頁後，open alert 總數為 0。查詢 **MUST** 帶 `hide_secret=true`；稽核 **MUST NOT** 輸出、記錄或保存 alert 原始內容或 secret 值，只保存衍生的筆數與 `status` 值。',
+            '讀取上述欄位需要 repository administrator 權限；alerts 端點另需 `Secret scanning alerts: read`（fine-grained token）或 `security_events`／`repo`（classic token）。',
+            'Open alert **MUST** 先 triage：確認為有效外洩時，**MUST** 先撤銷或輪替該憑證，再以 `revoked` 關閉；確認為 false positive 或測試資料時，依 GitHub 對應的 resolution（`false_positive`、`used_in_tests`）關閉並在 resolution comment 記錄理由。`wont_fix` **MUST NOT** 用來放行有效外洩。',
+            '任一 `status` 欄位缺少或不是 `enabled`、API 無法讀取，或 open alert 總數不為 0 時，該 release candidate **MUST NOT** 取得 Human Release Approval。稽核結果（查詢時間、repository、兩個 `status` 值與 open alert 總數）**MUST** 記入該次 release 的人工核准紀錄，例如 release PR 或 tracking issue。這份紀錄不屬於第 8.3 節 Human Approval stage 的 machine-readable evidence；`validation-security-gate.json` 與 runner 的 human-approval evidence contract 不因本節改變。本要求不是 exception-capable，第 14.2 節 exception 不得豁免。',
+            '已知限制：GitHub secret scanning 以 provider pattern 為主，可能漏掉 generic 或高 entropy 的 secret。依 SYP-509 評估，本期不核准 Gitleaks 或其他第三方 secrets scanner；日後新增任何 secrets scanner 都依第 8.2 節與第 19 節處理。'
+        )
+
+        $actual.Count | Should -Be $expected.Count
+        for ($i = 0; $i -lt $expected.Count; $i++) {
+            $actual[$i] | Should -BeExactly $expected[$i]
+        }
+    }
+}

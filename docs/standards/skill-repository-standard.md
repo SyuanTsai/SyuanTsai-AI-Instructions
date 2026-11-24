@@ -820,6 +820,7 @@ Repository Tests stage **MUST** 在 Package Validation 與 SkillSpector Static �
 - SkillSpector run-owned isolated installation、resolver credential lifetime、static installed dist-info／entry-point verification，以及禁止 identity verification 階段執行 installed `.pth` startup code；
 - release/install approval boundary；
 - Standard self-conformance requirement；
+- 第 12.4 節 repository-level secret protection 的 MUST、唯讀稽核方式與「不是 gate stage」的邊界；
 - review matrix 與 SYP-167 authority deliverables 不得過期。
 
 語意診斷套件 `tests/standard-semantic-inventory-probe.Advanced.ps1`、`tests/standard-semantic-preflight.Advanced.ps1` 與 `tests/standard-semantic-raw-graph.Advanced.ps1` 保留供明確指定的診斷執行，不屬普通必要 authority gate。普通 required Pester 根目錄發現仍執行 `tests/standard-semantic-bridge.Tests.ps1` 中四個 SYP-212 caller RSA snapshot tests；這些測試保護 caller key snapshot，不代表外部 semantic release evidence。
@@ -855,6 +856,25 @@ Source-copy equivalence or removal is deferred to downstream adoption. A future 
 
 Tests **MUST NOT** 因 migration 而弱化既有 integrity/security/regression guarantees。
 
+### 12.4 Repository-level secret protection
+
+每個受本標準規範的 Skill source repository（第 1 節所列 owned production Skills 所在的 repository，包括 Skill-Darktide-Translate）**MUST** 在 GitHub 啟用 secret scanning 與 push protection，也就是 repository `security_and_analysis` 中 `secret_scanning` 與 `secret_scanning_push_protection` 的 `status` 皆為 `enabled`。
+
+這是 repository-level control，不是第 8.3 節的 gate stage：它不新增 formal baseline tool、resolver adapter、consumer mode 或 required context，也不取代 Package Validation 中 skill-tools `no-secrets` 對 `SKILL.md` 的檢查。
+
+Human Release Approval（第 13.2 節）前，approver **MUST** 以唯讀 GitHub REST API 確認：
+
+- `GET /repos/{owner}/{repo}` 回應中的 `security_and_analysis.secret_scanning.status` **MUST** 為 `enabled`，且 `security_and_analysis.secret_scanning_push_protection.status` **MUST** 為 `enabled`；
+- `GET /repos/{owner}/{repo}/secret-scanning/alerts?state=open&hide_secret=true&per_page=100` 依回應 `Link` header 走完所有分頁後，open alert 總數為 0。查詢 **MUST** 帶 `hide_secret=true`；稽核 **MUST NOT** 輸出、記錄或保存 alert 原始內容或 secret 值，只保存衍生的筆數與 `status` 值。
+
+讀取上述欄位需要 repository administrator 權限；alerts 端點另需 `Secret scanning alerts: read`（fine-grained token）或 `security_events`／`repo`（classic token）。
+
+Open alert **MUST** 先 triage：確認為有效外洩時，**MUST** 先撤銷或輪替該憑證，再以 `revoked` 關閉；確認為 false positive 或測試資料時，依 GitHub 對應的 resolution（`false_positive`、`used_in_tests`）關閉並在 resolution comment 記錄理由。`wont_fix` **MUST NOT** 用來放行有效外洩。
+
+任一 `status` 欄位缺少或不是 `enabled`、API 無法讀取，或 open alert 總數不為 0 時，該 release candidate **MUST NOT** 取得 Human Release Approval。稽核結果（查詢時間、repository、兩個 `status` 值與 open alert 總數）**MUST** 記入該次 release 的人工核准紀錄，例如 release PR 或 tracking issue。這份紀錄不屬於第 8.3 節 Human Approval stage 的 machine-readable evidence；`validation-security-gate.json` 與 runner 的 human-approval evidence contract 不因本節改變。本要求不是 exception-capable，第 14.2 節 exception 不得豁免。
+
+已知限制：GitHub secret scanning 以 provider pattern 為主，可能漏掉 generic 或高 entropy 的 secret。依 SYP-509 評估，本期不核准 Gitleaks 或其他第三方 secrets scanner；日後新增任何 secrets scanner 都依第 8.2 節與第 19 節處理。
+
 ## 13. AI Review and Human Release Approval
 
 ### 13.1 AI Review
@@ -879,6 +899,8 @@ Human Release Approval **MUST** 是下列事項的最終邊界：
 - accepted High/Critical risk；
 - intentional analyzer suppression that affects release outcome；
 - normative policy / validation source trust-root change。
+
+Human Release Approval **MUST** 先完成第 12.4 節的 repository-level secret protection 稽核；稽核未通過時不得核准。
 
 Approval **MUST** 綁定被 review 的 immutable candidate identity；candidate bytes / commit 改變後，舊 approval 不得沿用。
 
@@ -1034,7 +1056,8 @@ Repository 要宣稱 Standard v1 conformant，**MUST** 證明：
 15. approved-release installation semantics；
 16. suppression/exception contract 與 non-waivable core；
 17. release/install/post-install integrity；
-18. repository-specific deviations 僅存在於 approved adapter/config/exception。
+18. repository-specific deviations 僅存在於 approved adapter/config/exception；
+19. 第 12.4 節 repository-level secret protection 的稽核紀錄。
 
 Conformance report **MUST** 明確記錄 `standardVersion`、authority repository、authority commit、authority tree、所用 transport 的 archive hash（只有使用 archive 時）、authority file inventory、candidate identity、validation run/toolset identity、covered Skill inventory 及 deviations；若沒有 deviation，記錄 `None`，不得省略此欄位。只寫 `Standard v1` 而沒有 immutable authority revision/hash 的 report 不可作為可重現 conformance evidence。
 
