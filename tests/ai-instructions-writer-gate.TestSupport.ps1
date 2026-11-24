@@ -4,6 +4,14 @@ $script:P9cTestSupportPath=Join-Path $PSScriptRoot 'ai-instructions-writer-gate.
 $script:P9cFixedGitDate='2000-01-01T00:00:00+00:00'
 $script:InstallerPath=Join-Path $script:RepositoryRoot 'scripts\install-ai-instructions-bootstrap.ps1'
 Import-Module (Join-Path $script:RepositoryRoot 'scripts\ai-instructions-runtime-contract.psm1') -Force
+
+function New-P7ePrivateDirectory {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    New-Item -ItemType Directory -Force -Path $Path|Out-Null
+    if(-not$IsWindows){
+        [IO.File]::SetUnixFileMode($Path,([IO.UnixFileMode]::UserRead-bor[IO.UnixFileMode]::UserWrite-bor[IO.UnixFileMode]::UserExecute))
+    }
+}
 Import-Module (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Force
 Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-catalog-contract.psm1') -Force
 Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-source-composition.psm1') -Force
@@ -84,10 +92,8 @@ function New-P7eV3Candidate {
     Copy-Item -LiteralPath (Join-Path $Destination 'catalog\examples\skills-catalog-lock-v3.example.json') -Destination (Join-Path $Destination 'catalog\skills-catalog-lock.json') -Force
     $installerPath=Join-Path $Destination 'scripts\install-ai-instructions-bootstrap.ps1'
     $installer=[IO.File]::ReadAllText($installerPath)
-    $marker='$projectionRuntimeAvailable = Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion $catalogDocument.schemaVersion -CapabilityReceipt $capabilityReceipt # P7E_TEST_FIXTURE_MARKER: production requires Catalog v3 and a Windows capability receipt.'
-    if(-not$installer.Contains($marker)){throw 'P7e test-only writer marker was not found.'}
-    $installer=$installer.Replace($marker,'$projectionRuntimeAvailable = $true # P7E_TEST_FIXTURE_MARKER: isolated Catalog v3 test candidate only.')
-    [IO.File]::WriteAllText($installerPath,$installer,[Text.UTF8Encoding]::new($false))
+    $marker='$projectionRuntimeAvailable = Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion $catalogDocument.schemaVersion -CapabilityReceipt $capabilityReceipt # P7E_TEST_FIXTURE_MARKER: production requires Catalog v3 and a complete projection capability receipt.'
+    if(-not$installer.Contains($marker)){throw 'P7e production writer marker was not found.'}
     $fanOutStub=@'
 [CmdletBinding()]
 param([string]$CatalogPath,[string]$LockPath,[string]$ConfigurationPath,[string]$RuntimeRoot,[string]$TargetRoot,[string]$UserHome,[switch]$WhatIf)

@@ -10,6 +10,14 @@ function Get-TestUpdaterFileSha256 {
     finally { $sha256.Dispose() }
 }
 
+function ConvertTo-TestUpdaterDiagnosticText {
+    param([Parameter(Mandatory=$true)][object[]]$Output)
+    $text=@($Output|ForEach-Object{[string]$_})-join[Environment]::NewLine
+    $text=[regex]::Replace($text,'\x1B\[[0-?]*[ -/]*[@-~]','')
+    $text=[regex]::Replace($text,'(?m)\r?\n[ \t]*\|[ \t]*',' ')
+    return [regex]::Replace($text,'\s+',' ').Trim()
+}
+
 function Get-TestUpdaterHomeDigest {
     param([Parameter(Mandatory=$true)][string]$CodexHome)
     return (@(Get-ChildItem -LiteralPath $CodexHome -Recurse -Force|Sort-Object FullName|ForEach-Object{
@@ -810,7 +818,7 @@ exit 23
         }
 
         $exitCode | Should Not Be 0
-        $outputText = $output -join [Environment]::NewLine
+        $outputText = ConvertTo-TestUpdaterDiagnosticText -Output $output
         $outputText | Should Match 'classification=concurrency; installationState=not-installed; retryable=false'
         $outputText | Should Match 'concurrent|installer is already running'
         $outputText | Should Not Match 'classification=operational'

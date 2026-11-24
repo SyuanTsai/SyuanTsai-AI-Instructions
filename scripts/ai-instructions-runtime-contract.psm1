@@ -177,8 +177,12 @@ function Test-AiInstructionsProjectionRuntimeAvailable {
         [AllowNull()][object] $CapabilityReceipt
     )
     $catalogIsV3 = (($CatalogSchemaVersion -is [int]) -or ($CatalogSchemaVersion -is [long])) -and [int64]$CatalogSchemaVersion -eq 3
-    if (-not $catalogIsV3 -or -not (Test-AiInstructionsObjectHasProperty -Object $CapabilityReceipt -Name 'os')) { return $false }
-    return [string]$CapabilityReceipt.os -ceq 'windows'
+    if (-not $catalogIsV3) { return $false }
+    try {
+        Assert-AiInstructionsProjectionCapabilityReceipt -Receipt $CapabilityReceipt | Out-Null
+        return $true
+    }
+    catch { return $false }
 }
 
 function Select-AiInstructionsInstallWriterSchema {

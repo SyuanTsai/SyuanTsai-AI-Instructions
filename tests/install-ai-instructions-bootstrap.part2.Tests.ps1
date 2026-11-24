@@ -17,12 +17,39 @@ Describe 'install-ai-instructions-bootstrap' {
         $caught.Exception.Message|Should Match 'publication=unavailable: probe evidence for publication'
     }
 
-    if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
-        It 'InterT79_unix_refuses_unavailable_directory_publication_without_mutation' {
-            $result=Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+    # Scenario: A Catalog-v3 explicit writer receives a live-shaped platform receipt whose directory-publication probe is unavailable.
+    # Purpose: Refuse from capability evidence before creating Codex Home on every supported native host, independent of its OS name.
+    It 'InterT79_refuses_unavailable_directory_publication_without_mutation' {
+        $candidateRoot=Join-Path $TestDrive ('capability-candidate-'+[Guid]::NewGuid().ToString('N'))
+        New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+        $installerPath=Join-Path $candidateRoot 'scripts/install-ai-instructions-bootstrap.ps1'
+        $installer=[IO.File]::ReadAllText($installerPath)
+        $marker='$capabilityReceipt = Get-PlatformCapabilities -Required @()'
+        if(([regex]::Matches($installer,[regex]::Escape($marker))).Count-ne1){throw 'Capability receipt fixture marker was not unique.'}
+        $injection=$marker+"`n"+'    ($capabilityReceipt.capabilities | Where-Object name -ceq ''directory-publication'').status = ''unavailable'''
+        [IO.File]::WriteAllText($installerPath,$installer.Replace($marker,$injection),[Text.UTF8Encoding]::new($false))
+        $archivePath=Join-Path $TestDrive ('capability-candidate-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join'').Trim()
+        $output=& $script:TestPowerShellExecutable -NoProfile -NonInteractive -File $installerPath -RepositoryRoot $candidateRoot -CodexHome $codexHome -Acquisition github-codeload -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' -SourceCommit $sourceCommit -ArchiveSha256 $archiveSha256 -SourceArchivePath $archivePath -WriterSchema V3V5 2>&1
+        $LASTEXITCODE|Should Not Be 0
+        $diagnostic=$output-join[Environment]::NewLine
+        (Get-AiInstructionsRefusalCode $diagnostic)|Should Be capability-unavailable
+        $diagnostic|Should Match 'directory-publication'
+        Test-Path -LiteralPath $codexHome|Should Be $false
+    }
+
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Linux)) {
+        # Scenario: A Linux process carries the WSL host marker while invoking the normal Auto writer path.
+        # Purpose: Keep unsupported WSL fail closed before any installer mutation instead of treating it as native Linux.
+        It 'InterT80_refuses_WSL_without_mutation' {
+            $saved=[Environment]::GetEnvironmentVariable('WSL_DISTRO_NAME')
+            try{
+                [Environment]::SetEnvironmentVariable('WSL_DISTRO_NAME','fixture-wsl')
+                $result=Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+            }finally{[Environment]::SetEnvironmentVariable('WSL_DISTRO_NAME',$saved)}
             $result.ExitCode|Should Not Be 0
-            (Get-AiInstructionsRefusalCode $result.Output)|Should Be capability-unavailable
-            $result.Output|Should Match 'directory-publication'
+            $result.Output|Should Match 'WSL|unsupported'
             Test-Path -LiteralPath $codexHome|Should Be $false
         }
     }

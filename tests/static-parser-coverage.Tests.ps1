@@ -364,6 +364,23 @@ Describe 'Static parser coverage and finding preservation' {
     # Purpose: exercise source ownership, Unicode, proof shape and shell controls without scanner or network dependencies.
     It 'InterT10_runs_native_parser_contracts_without_skipping_or_scanner_installation' {
         $python=(Get-Command python -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+        $nativePwsh=(Get-Command pwsh -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+        $nativeVersion=(@(& $nativePwsh -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()')-join'').Trim()
+        if($nativeVersion-cne'7.6.6'){
+            $savedModule=[Environment]::GetEnvironmentVariable('STATIC_PARSER_MODULE_ROOT')
+            $savedPwsh=[Environment]::GetEnvironmentVariable('STATIC_PARSER_PWSH')
+            try{
+                [Environment]::SetEnvironmentVariable('STATIC_PARSER_MODULE_ROOT',(Join-Path $parserRepositoryRoot 'scripts'))
+                [Environment]::SetEnvironmentVariable('STATIC_PARSER_PWSH',$nativePwsh)
+                $output=@(& $python -I -B -c 'import os,sys;sys.path.insert(0,os.environ["STATIC_PARSER_MODULE_ROOT"]);from standard_static_powershell import native_proof;native_proof("Write-Output ok","powershell",os.environ["STATIC_PARSER_PWSH"])' 2>&1)
+                $exit=$LASTEXITCODE
+            }finally{
+                [Environment]::SetEnvironmentVariable('STATIC_PARSER_MODULE_ROOT',$savedModule)
+                [Environment]::SetEnvironmentVariable('STATIC_PARSER_PWSH',$savedPwsh)
+            }
+            Assert-ParserCase ($exit-ne0-and($output-join"`n")-match'native proof source identity differs') "Unreviewed PowerShell grammar '$nativeVersion' did not fail closed: $($output-join' ')"
+            return
+        }
         $log=Join-Path $TestDrive 'native-parser-contracts.log'
         $previous=$ErrorActionPreference
         try{

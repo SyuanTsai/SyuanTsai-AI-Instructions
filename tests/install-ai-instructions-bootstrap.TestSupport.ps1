@@ -20,6 +20,7 @@ function New-InstallerSourceArchive {
         try {
             if ($Unrelated) {
                 $entry = $archive.CreateEntry('unrelated-root/README.md')
+                $entry.LastWriteTime=[DateTimeOffset]::new(2000,1,1,0,0,0,[TimeSpan]::Zero)
                 $writer = New-Object System.IO.StreamWriter($entry.Open(),(New-Object System.Text.UTF8Encoding($false)))
                 try { $writer.Write("# Unrelated archive fixture`n") }
                 finally { $writer.Dispose() }
@@ -33,6 +34,7 @@ function New-InstallerSourceArchive {
                 foreach ($file in @($sourceFiles | Sort-Object FullName)) {
                     $relativePath = if($file.FullName.StartsWith($sourceRootPath + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){$file.FullName.Substring($sourceRootPath.Length).TrimStart([char[]]@('\','/')).Replace('\','/')}else{'instructions/common/bootstrap-section.md'}
                     $entry = $archive.CreateEntry("candidate-root/$relativePath")
+                    $entry.LastWriteTime=[DateTimeOffset]::new(2000,1,1,0,0,0,[TimeSpan]::Zero)
                     $input = [System.IO.File]::OpenRead($file.FullName)
                     $output = $entry.Open()
                     try { $input.CopyTo($output) }

@@ -280,7 +280,7 @@ Describe 'install journal serialization formats' {
         $fixturePath=Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-install-journal-v1.example.json'
         $journal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json (Get-Content -Raw -Encoding UTF8 -LiteralPath $fixturePath)
         $transactionRoot=Join-Path $script:JournalSerializationRoot '.ai-instructions-txn';New-Item -ItemType Directory -Force -Path $transactionRoot|Out-Null
-        $transactionPath=Join-Path $transactionRoot ([string]$journal.transactionId);New-Item -ItemType Directory -Path $transactionPath|Out-Null
+        $transactionPath=Join-Path $transactionRoot ([string]$journal.transactionId);New-P7ePrivateDirectory -Path $transactionPath
         $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
         try{
             $states=[ordered]@{}

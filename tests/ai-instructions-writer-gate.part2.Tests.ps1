@@ -673,7 +673,9 @@ exit /b %errorlevel%
         & git -C $real add README.md;& git -C $real -c user.name=fixture -c user.email=fixture@example.invalid commit --quiet -m fixture;$LASTEXITCODE|Should Be 0
         New-Item -ItemType Directory -Force -Path (Join-Path $real '.codex')|Out-Null
         [IO.File]::WriteAllText((Join-Path $real '.codex\ai-instructions.manifest.json'),'{ stale current-worktree manifest',[Text.UTF8Encoding]::new($false))
-        $junction=Join-Path $root 'junction';New-Item -ItemType Junction -Path $junction -Target $real|Out-Null
+        $junction=Join-Path $root 'junction'
+        $linkType=if([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)){'Junction'}else{'SymbolicLink'}
+        New-Item -ItemType $linkType -Path $junction -Target $real|Out-Null
         $linked=Join-Path $root 'linked'
         try{
             (@(& git -C $junction worktree list --porcelain)[0])|Should Match 'junction-current[\\/]real$'

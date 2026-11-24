@@ -77,6 +77,18 @@ function Test-InstallerHasProperty {
     return $null -ne $Object -and $null -ne $Object.PSObject.Properties[$Name]
 }
 
+function Test-InstallerWslHost {
+    if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Linux)) { return $false }
+    if (-not [string]::IsNullOrWhiteSpace($env:WSL_DISTRO_NAME) -or -not [string]::IsNullOrWhiteSpace($env:WSL_INTEROP)) { return $true }
+    foreach ($path in @('/proc/sys/kernel/osrelease','/proc/version')) {
+        try {
+            if ([IO.File]::Exists($path) -and [IO.File]::ReadAllText($path) -match '(?i)microsoft|wsl') { return $true }
+        }
+        catch { }
+    }
+    return $false
+}
+
 function Assert-InstallerMutationPath {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -842,13 +854,6 @@ catch { throw (New-AiInstructionsRefusalException -Code closure-invalid -Message
 Import-Module (Join-Path $repositoryRootPath 'scripts\ai-instructions-install-transaction.psm1') -Force
 $capabilityReceipt = $null
 $catalogDocument = Test-SkillsCatalogDocument -CatalogPath (Join-Path $repositoryRootPath 'catalog\skills-catalog.json')
-$projectionPlatformAvailable = [int64]$catalogDocument.schemaVersion -eq 3 -and
-    [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
-if ($WriterSchema -ceq 'V3V5' -and -not $projectionPlatformAvailable) {
-    throw [System.InvalidOperationException]::new(
-        'Catalog v3 and the Windows projection runtime are not available. [ai-instructions-refusal-code=projection-runtime-unavailable]'
-    )
-}
 
 if ([string]::IsNullOrWhiteSpace($CodexHome)) {
     $CodexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
@@ -866,6 +871,10 @@ $agentsPath = Join-Path $codexHomePath 'AGENTS.md'
 $hooksPath = Join-Path $codexHomePath 'hooks.json'
 $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
 $installLockPath = Join-Path $codexHomePath 'ai-instructions-install.lock'
+
+if (Test-InstallerWslHost) {
+    throw (New-AiInstructionsRefusalException -Code runtime-baseline-unavailable -Message 'WSL is unsupported for AI instructions installation.')
+}
 
 if ($capabilityEvidencePersistenceSpecified) {
     $preflightState = Get-InstallerExistingRuntimeState -ConfigurationPath $configurationPath -RuntimeDirectory $runtimeDirectory
@@ -887,6 +896,13 @@ else {
 }
 Get-InstallerBootstrapSectionContent -ExistingBytes $preflightAgentsBytes -SectionBytes $bootstrapSectionBytes | Out-Null
 
+$capabilityReceipt = Get-PlatformCapabilities -Required @()
+$capabilityReceipt = Assert-AiInstructionsInstallerCapabilities -Receipt $capabilityReceipt
+$projectionRuntimeAvailable = Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion $catalogDocument.schemaVersion -CapabilityReceipt $capabilityReceipt # P7E_TEST_FIXTURE_MARKER: production requires Catalog v3 and a complete projection capability receipt.
+if ($WriterSchema -ceq 'V3V5' -and -not $projectionRuntimeAvailable) {
+    throw (New-AiInstructionsRefusalException -Code projection-runtime-unavailable -Message 'Catalog v3 and the required projection runtime capabilities are not available.')
+}
+
 New-Item -ItemType Directory -Force -Path $codexHomePath | Out-Null
 $rootLease = Open-PlatformDirectory -Root $codexHomePath -RootOnly
 $installLockLease = $null
@@ -901,10 +917,6 @@ try {
         if($cause -is [TimeoutException]){throw 'Another AI instructions installer is already running for this Codex Home.'}
         throw
     }
-
-    $capabilityReceipt = Get-PlatformCapabilities -Required @()
-    $capabilityReceipt = Assert-AiInstructionsInstallerCapabilities -Receipt $capabilityReceipt
-    $projectionRuntimeAvailable = Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion $catalogDocument.schemaVersion -CapabilityReceipt $capabilityReceipt # P7E_TEST_FIXTURE_MARKER: production requires Catalog v3 and a Windows capability receipt.
 
     $legacyResidue = @(Get-ChildItem -Force -LiteralPath $codexHomePath | Where-Object { $_.Name -like '.ai-instructions-install-*' -or $_.Name -like '.ai-instructions-backup-*' })
     if ($legacyResidue.Count -gt 0) {
