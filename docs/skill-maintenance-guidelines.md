@@ -58,6 +58,19 @@ Skill 的執行依賴由使用者功能決定。開發整理工具、CI、掃描
 
 有效需求與必要操作知識提取完成後，工單專屬計畫、試跑日誌及產生式報告退出 Skill 交付內容。保留可追溯歷史與原始 finding，不掃蕩其他任務的工作區、未提交變更或證據。將無用檔案移到新的 references 子目錄不算完成清理。
 
+## 通過中央 gate 的寫作限制
+
+Consumer gate 以 `skill-tools check --fail-on warning --min-score 91` 檢查每個 Skill：任何 validation warning、lint warning 或單一 Skill 分數低於 91 都會讓 gate 失敗。下列限制來自這組設定，Standard 沒有逐條列出；細節以 resolver 當次解析的 skill-tools 版本為準，工具升級後若結果不同，依實際結果修正本節。
+
+- description 不使用 generic verb：`manage`、`handle`、`process`、`deal with`、`work with`、`do stuff`、`help with`、`assist with`、`take care of`（不分大小寫）。Skill 名稱本身含這些字時（例如 `manage-ai-memory`），description 也要改寫成具體動作。
+- description 寫出觸發情境，例如 `Use when …`、`Use for …`；缺少觸發片語且沒有可辨識的動作動詞時，會出現 `description-trigger-keywords` warning。
+- SKILL.md 本文至少有一個 fenced code block 或 Example／Usage 標題，否則會出現 `instructions-has-examples` warning。
+- 本文不寫 `/Users/<name>`、`/home/<name>`、`C:\Users\<name>`、`/var/`、`/tmp/<name>` 這類固定路徑；這是 error。
+- 檔首不加 BOM；SKILL.md 含 frontmatter 不超過 5,000 tokens。
+- 91 分是五項直接相加：Description Quality 30、Instruction Clarity 25、Spec Compliance 20、Progressive Disclosure 15、Security 10。常見的失分來源：description 不在 50～300 字元、缺少編號步驟或錯誤處理段落、本文超過 100 行卻沒有連結 references／scripts、本文超過 500 行。
+
+分數不足時先修正描述與結構，不為了分數加入沒有用途的範例或段落。
+
 ## Review 與完成條件
 
 Review 以實際 diff 回答以下問題；在既有 PR 中簡短記錄即可：
