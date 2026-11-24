@@ -267,6 +267,7 @@ Describe 'Agent Skill authority workflow contract' {
             '.github/workflows/standards-conformance.yml' = 1
             '.github/workflows/syp101-production-smoke.yml' = 1
             '.github/workflows/syp86-production-lock.yml' = 1
+            '.github/workflows/unix-core.yml' = 4
             '.github/workflows/validator-maintenance-producer.yml' = 1
         }
         $script:ExpectedOrdinaryWorkflowPaths = @($script:WorkflowExpectations.Keys)
@@ -306,7 +307,7 @@ Describe 'Agent Skill authority workflow contract' {
 
         function Assert-OrdinaryWorkflowInventory {
             param([string[]] $Paths)
-            Assert-Equal $Paths.Count $script:ExpectedOrdinaryWorkflowPaths.Count 'The repository must retain exactly the seven registered active workflow files.'
+            Assert-Equal $Paths.Count $script:ExpectedOrdinaryWorkflowPaths.Count 'The repository must retain exactly the eight registered active workflow files.'
             Assert-Equal (($Paths | Sort-Object) -join '|') (($script:ExpectedOrdinaryWorkflowPaths | Sort-Object) -join '|') 'The workflow inventory must retire the unmatched protected maintenance consumer and reject unreviewed workflow additions.'
         }
 
@@ -384,8 +385,10 @@ Describe 'Agent Skill authority workflow contract' {
 
         $script:WindowsCoreWorkflowGoldenPath = Join-Path $script:RepositoryRoot 'tests/golden/pr8-powershell-validation.yml.golden'
         $script:WindowsInstallSmokeWorkflowGoldenPath = Join-Path $script:RepositoryRoot 'tests/golden/syp101-production-smoke.yml.golden'
+        $script:UnixCoreWorkflowGoldenPath = Join-Path $script:RepositoryRoot 'tests/golden/unix-core.yml.golden'
         $script:WindowsCoreWorkflowGolden = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:WindowsCoreWorkflowGoldenPath
         $script:WindowsInstallSmokeWorkflowGolden = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:WindowsInstallSmokeWorkflowGoldenPath
+        $script:UnixCoreWorkflowGolden = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UnixCoreWorkflowGoldenPath
 
         function Assert-WindowsCoreWorkflowContract {
             param([Parameter(Mandatory = $true)][string] $WorkflowText)
@@ -395,6 +398,11 @@ Describe 'Agent Skill authority workflow contract' {
         function Assert-WindowsInstallSmokeWorkflowContract {
             param([Parameter(Mandatory = $true)][string] $WorkflowText)
             Assert-WorkflowMatchesGolden -WorkflowText $WorkflowText -GoldenText $script:WindowsInstallSmokeWorkflowGolden -Context 'Windows Install Smoke workflow'
+        }
+
+        function Assert-UnixCoreWorkflowContract {
+            param([Parameter(Mandatory = $true)][string] $WorkflowText)
+            Assert-WorkflowMatchesGolden -WorkflowText $WorkflowText -GoldenText $script:UnixCoreWorkflowGolden -Context 'Unix Core workflow'
         }
 
         function Get-GitHubArtifactWorkflowStructure {
@@ -584,16 +592,34 @@ jobs:
         $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
         Assert-Equal ([regex]::Matches($required, 'Import-Module \$pester\.Path -Force')).Count 0 'Core must leave module execution inside the bounded child executor.'
         Assert-Equal ([regex]::Matches($required, '& ./scripts/Invoke-PesterShardProcess\.ps1 @executorArguments')).Count 1 'Core must run the retained Pester difference through the bounded executor once.'
+        $unixSetup = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/actions/setup-unix-core-pwsh/action.yml')
+        Assert-Equal ([regex]::Matches($unixSetup, 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9\s+# v6\.1\.0')).Count 1 'Unix Core setup must use the reviewed cache action commit.'
+        Assert-Match $unixSetup 'Get-FileHash -LiteralPath \$archivePath -Algorithm SHA256' 'Unix Core setup must verify the downloaded archive before use.'
+        Assert-Match $unixSetup 'MainModule\.FileName' 'Unix Core setup must verify the actual step shell executable.'
+        Assert-Match $unixSetup 'chmod -- u\+x \$powerShellExe' 'Unix Core setup must use the GNU/BSD portable chmod option order.'
+        Assert-NotMatch $unixSetup 'continue-on-error|chmod u\+x --' 'Unix Core setup must not soften errors or use the BSD-incompatible chmod order.'
     }
 
-    # Scenario: Both required workflows are compared with reviewable complete-file LF goldens.
-    # Purpose: Lock every top-level key, job, step, and required check name without fragment gaps.
+    # Scenario: Both required workflows and the non-required Unix Core workflow are compared with reviewable complete-file LF goldens.
+    # Purpose: Lock every top-level key, job, step, aggregate, pin and check name without fragment gaps.
     It 'UnitT12_matches_both_complete_required_workflow_golden_contracts' {
         $core = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml')
         $install = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/syp101-production-smoke.yml')
+        $unix = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/unix-core.yml')
         Assert-WindowsCoreWorkflowContract -WorkflowText $core
         Assert-WindowsInstallSmokeWorkflowContract -WorkflowText $install
+        Assert-UnixCoreWorkflowContract -WorkflowText $unix
         Assert-RequiredCheckNameContract -WindowsCoreText $core -WindowsInstallSmokeText $install
+        Assert-Match $unix '(?m)^name: Unix Core \(non-required\)$' 'Unix Core must identify itself as non-required.'
+        Assert-Match $unix '(?m)^    name: \$\{\{ matrix\.display \}\} Core / \$\{\{ matrix\.file \}\}$' 'Unix Core per-file checks must preserve platform and file names.'
+        Assert-Equal ([regex]::Matches($unix, '(?m)^    name: \$\{\{ matrix\.display \}\} Core$')).Count 1 'Unix Core must define one platform aggregate job template.'
+        Assert-Match $unix 'DDBC4A2D113BBD46D283CFEDCBCD117A70CAEFD7673F41F2B4E0000BADF103BC' 'Unix Core must bind the reviewed Linux x64 PowerShell hash.'
+        Assert-Match $unix '6DF833D094EBAC1C1A74340D7B3437F4AAF5E03CE640484A1C4359F3CE8B3DB1' 'Unix Core must bind the reviewed macOS arm64 PowerShell hash.'
+        Assert-Match $unix '(?m)^permissions:\r?\n  contents: read$' 'Unix Core must retain read-only contents permission.'
+        Assert-Match $unix 'fail-fast:\s*false' 'Unix Core must allow all platform/file jobs to report.'
+        Assert-Match $unix 'timeout-minutes: 90' 'Unix Core per-file execution must have a bounded timeout.'
+        Assert-Match $unix 'failedTests' 'Unix Core summaries must record failing test names.'
+        Assert-NotMatch $unix 'continue-on-error|name: Windows Core|name: Windows Install Smoke|name: Consumer transition probe aggregate' 'Unix Core must not soften failures or collide with required check names.'
     }
 
     # Scenario: One complete-file required workflow invariant is tampered with in a TestDrive copy.
@@ -702,6 +728,8 @@ jobs:
                     $pullRequestJobNames.Add('windows-core')
                 } elseif($relativePath -in @('.github/workflows/consumer-transition-probe.yml', '.github/workflows/skill-tools-path-patch.yml')) {
                     Assert-Equal $jobMatches.Count 2 "The three-platform probe '$relativePath' must contain one matrix leg and one aggregate job."
+                } elseif($relativePath -ceq '.github/workflows/unix-core.yml') {
+                    Assert-Equal $jobMatches.Count 4 'Unix Core must contain plan, authority, per-file Pester and aggregate jobs.'
                 } else {
                     Assert-Equal $jobMatches.Count 1 "Ordinary pull-request workflow '$relativePath' must have exactly one job."
                     $pullRequestJobNames.Add($jobMatches[0].Groups[1].Value)
@@ -714,6 +742,13 @@ jobs:
                 Assert-Match $workflow '(?s)windows-latest.*ubuntu-latest.*macos-latest' "The three-platform probe '$relativePath' must retain all three platform rows."
                 $expectedDriver = if ($relativePath -ceq '.github/workflows/consumer-transition-probe.yml') { 'tests/Invoke-ConsumerTransitionProbe\.ps1' } else { 'tests/Invoke-SkillToolsPathPatchProbe\.ps1' }
                 Assert-Match $workflow $expectedDriver "The three-platform probe '$relativePath' must use its shared local/CI driver."
+                continue
+            }
+            if($relativePath -ceq '.github/workflows/unix-core.yml'){
+                Assert-Match $workflow '(?s)ubuntu-latest.*macos-latest' 'Unix Core must retain Linux and macOS runner rows.'
+                Assert-Match $workflow '(?m)^  (push|pull_request|workflow_dispatch):' 'Unix Core must retain normal and manual triggers.'
+                Assert-Match $workflow 'Invoke-PesterShardProcess\.ps1' 'Unix Core must use the bounded retained-test executor.'
+                Assert-Match $workflow '(?s)Linux.*macOS|display=''Linux''.*display=''macOS''' 'Unix Core must plan both reviewed platforms.'
                 continue
             }
             Assert-NotMatch $workflow 'runs-on:\s*ubuntu-latest' "Ordinary workflow '$relativePath' must not add a Linux CI lane."
@@ -734,14 +769,15 @@ jobs:
                 Assert-Equal (@($runnerValues | Where-Object { $_ -cne 'windows-latest' }).Count) 0 "Ordinary workflow '$relativePath' may use only windows-latest."
             }
         }
-        Assert-Equal $pullRequestWorkflows.Count 4 'Core, Install Smoke, and both non-required three-platform probes must run for ordinary pull requests.'
+        Assert-Equal $pullRequestWorkflows.Count 5 'Core, Install Smoke, both three-platform probes, and non-required Unix Core must run for ordinary pull requests.'
         $expectedPullRequestWorkflows = @(
             '.github/workflows/consumer-transition-probe.yml',
             '.github/workflows/pr8-powershell-validation.yml',
             '.github/workflows/skill-tools-path-patch.yml',
-            '.github/workflows/syp101-production-smoke.yml'
+            '.github/workflows/syp101-production-smoke.yml',
+            '.github/workflows/unix-core.yml'
         )
-        Assert-Equal (($pullRequestWorkflows.ToArray() | Sort-Object) -join '|') (($expectedPullRequestWorkflows | Sort-Object) -join '|') 'Only the two required Windows workflows and the two reviewed three-platform probes may add ordinary pull-request jobs.'
+        Assert-Equal (($pullRequestWorkflows.ToArray() | Sort-Object) -join '|') (($expectedPullRequestWorkflows | Sort-Object) -join '|') 'Only the two required Windows workflows and the three reviewed non-required workflows may add ordinary pull-request jobs.'
         $expectedPullRequestJobNames = @('windows-core', 'windows-install-smoke')
         Assert-Equal (($pullRequestJobNames.ToArray() | Sort-Object) -join '|') (($expectedPullRequestJobNames | Sort-Object) -join '|') 'Ordinary pull-request CI must aggregate to exactly Windows Core and Windows Install Smoke.'
 

@@ -75,7 +75,7 @@ exit /b %errorlevel%
 #!/bin/sh
 exec "$script:TestPowerShellExecutable" -NoProfile -ExecutionPolicy Bypass -File "$scriptPath" "`$@"
 "@
-    & chmod u+x -- $wrapperPath
+    & chmod -- u+x $wrapperPath
     if ($LASTEXITCODE -ne 0) { throw "chmod failed for test Git wrapper: $wrapperPath" }
     return $wrapperPath
 }
@@ -752,7 +752,8 @@ Describe 'bootstrap-ai-instructions' {
 
     # Scenario: Another Git process attempts to stage managed-path bytes after bootstrap preflight during recovery evidence creation.
     # Purpose: Hold the native worktree index lock through finalization so the concurrent mutation is rejected and bootstrap rolls back.
-    It 'InterT66_rejects_a_concurrent_staged_blob_during_recovery_evidence_refresh' {
+    # Windows-only: the fixture injects a concurrent index writer through a cmd.exe/findstr wrapper.
+    It 'InterT66_rejects_a_concurrent_staged_blob_during_recovery_evidence_refresh' -Skip:(-not $script:IsWindowsHost) {
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
         Invoke-TestGit -Repository $targetRoot -Arguments @('stash','clear') | Out-Null
         $wrapperRoot = Join-Path $TestDrive 'concurrent-evidence-index-wrapper'
@@ -954,7 +955,8 @@ exit /b 0
 
     # Scenario: The first worktree inventory succeeds, but the strict inventory under the repository lock fails.
     # Purpose: Fail closed before remediation can change the index, shared exclusions, or managed bytes.
-    It 'InterT68d_fails_closed_when_the_locked_worktree_inventory_fails' {
+    # Windows-only: the deterministic second-call failure is injected through a cmd.exe/findstr wrapper.
+    It 'InterT68d_fails_closed_when_the_locked_worktree_inventory_fails' -Skip:(-not $script:IsWindowsHost) {
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
         Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','AGENTS.md',$script:ManifestPath.Replace('\','/')) | Out-Null
         Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','tracked remediation fixture') | Out-Null
@@ -999,7 +1001,8 @@ type nul > "$firstListMarker"
 
     # Scenario: Every pre-mutation inventory succeeds, but shared-exclude composition cannot enumerate live worktrees.
     # Purpose: Require the final repository-wide inventory to fail closed and roll back current and linked worktree bytes exactly.
-    It 'InterT119_fails_closed_when_shared_exclude_worktree_inventory_fails' {
+    # Windows-only: the ordered worktree-list failure fixture depends on cmd.exe/findstr markers.
+    It 'InterT119_fails_closed_when_shared_exclude_worktree_inventory_fails' -Skip:(-not $script:IsWindowsHost) {
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
         $linkedRoot = Join-Path $TestDrive 'shared-exclude-list-failure-linked'
         Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','shared-exclude-list-failure-fixture',$linkedRoot) | Out-Null
@@ -1062,7 +1065,8 @@ exit /b %errorlevel%
 
     # Scenario: A linked worktree publishes v4 after the optimistic scan and before the locked scan.
     # Purpose: Recheck projection ownership under the repository lock before remediation can create a commit.
-    It 'InterT68e_detects_linked_v4_published_before_the_locked_scan' {
+    # Windows-only: the publication race is injected through a cmd.exe/findstr/copy wrapper.
+    It 'InterT68e_detects_linked_v4_published_before_the_locked_scan' -Skip:(-not $script:IsWindowsHost) {
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
         $linkedRoot = Join-Path $TestDrive 'linked-v4-race-worktree'
         Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-v4-race-fixture',$linkedRoot) | Out-Null
@@ -1312,7 +1316,7 @@ finally {
                 files=@([ordered]@{sourcePath='production.txt';targetPath='production.txt';sha256=('a' * 64)})
             }
             Set-TestText -Path $manifestPath -Value (($unsafeManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
-            Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','production.txt',$script:ManifestPath) | Out-Null
+            Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','production.txt',$script:ManifestPath.Replace('\','/')) | Out-Null
             Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','unsafe manifest precedence fixture') | Out-Null
             $headBefore = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
 
@@ -1332,7 +1336,8 @@ finally {
 
     # Scenario: A linked worktree exposes a v4 manifest only through a directory junction.
     # Purpose: Fail under the repository lock before remediation, without reading unsafe manifest bytes.
-    It 'InterT68c_does_not_read_a_reparse_backed_linked_v4_manifest' {
+    # Windows-only: the fixture requires an NTFS directory junction and Windows reparse-point semantics.
+    It 'InterT68c_does_not_read_a_reparse_backed_linked_v4_manifest' -Skip:(-not $script:IsWindowsHost) {
         $linkedRoot = Join-Path $TestDrive 'linked-reparse-v4-worktree'
         Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-reparse-v4-fixture',$linkedRoot) | Out-Null
         try {
@@ -1447,7 +1452,8 @@ finally {
 
     # Scenario: The shared Git exclude path is occupied by an unrelated directory before bootstrap starts.
     # Purpose: Fail before target mutation and preserve the pre-existing filesystem entry instead of deleting it during rollback.
-    It 'InterT71_rejects_an_unsafe_shared_Git_exclude_mutation_path' {
+    # Windows-only: this case asserts the Windows guarded mutation-path diagnostic for a directory-backed exclude path.
+    It 'InterT71_rejects_an_unsafe_shared_Git_exclude_mutation_path' -Skip:(-not $script:IsWindowsHost) {
         $excludePath = (@(Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude')) -join '').Trim()
         if (-not [System.IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
         Remove-Item -LiteralPath $excludePath -Force
@@ -1466,7 +1472,8 @@ finally {
 
     # Scenario: An external process already has the shared exclude file open for writing when bootstrap reaches its exclude update.
     # Purpose: Require one exclusive read-modify-write handle and roll back target bytes instead of losing an external writer's update.
-    It 'InterT101_fails_closed_when_the_shared_exclude_write_handle_is_unavailable' {
+    # Windows-only: denial depends on Windows FileShare enforcement for an already-open exclude handle.
+    It 'InterT101_fails_closed_when_the_shared_exclude_write_handle_is_unavailable' -Skip:(-not $script:IsWindowsHost) {
         $excludePath = (@(Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude')) -join '').Trim()
         if (-not [System.IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
         $excludeBefore = [System.IO.File]::ReadAllBytes($excludePath)
@@ -1771,7 +1778,7 @@ finally {
 
         # Then
         $exitCode | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'outside the reserved Agent artifact scope.*production\.txt'
+        (ConvertTo-TestDiagnosticText -Output $output) | Should Match 'outside the reserved Agent artifact scope.*production\.txt'
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $headBefore
         (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain=v2','--untracked-files=all')) -join "`n") | Should Be $statusBefore
         (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'production.txt')).Trim() | Should Be 'production bytes'
@@ -1898,7 +1905,8 @@ finally {
 
     # Scenario: A second process tries to write after the atomic delete primitive has verified bytes and still holds its handle.
     # Purpose: Prove the production primitive denies writers until the same handle has received delete disposition.
-    It 'InterT103_blocks_a_concurrent_writer_inside_the_atomic_managed_file_delete_boundary' {
+    # Windows-only: the assertion requires a Windows sharing violation while delete disposition is held on one native handle.
+    It 'InterT103_blocks_a_concurrent_writer_inside_the_atomic_managed_file_delete_boundary' -Skip:(-not $script:IsWindowsHost) {
         $definitionRoot = Join-Path $TestDrive 'definition-source'
         New-TestRepository -Path $definitionRoot
         New-Item -ItemType Directory -Force -Path (Join-Path $definitionRoot '.codex'),(Join-Path $definitionRoot '.github') | Out-Null
@@ -1997,7 +2005,8 @@ finally {
 
     # Scenario: A validated managed parent is replaced by a junction before the native delete handle opens.
     # Purpose: Bind final-path confinement to the actual delete handle so a stale path precheck cannot authorize an outside file.
-    It 'InterT105_rejects_a_parent_junction_swap_at_the_handle_bound_delete_boundary' {
+    # Windows-only: the fixture swaps an NTFS junction at the Windows handle-bound delete boundary.
+    It 'InterT105_rejects_a_parent_junction_swap_at_the_handle_bound_delete_boundary' -Skip:(-not $script:IsWindowsHost) {
         $definitionRoot = Join-Path $TestDrive 'junction-definition-source'
         New-TestRepository -Path $definitionRoot
         New-Item -ItemType Directory -Force -Path (Join-Path $definitionRoot '.codex'),(Join-Path $definitionRoot '.github') | Out-Null
@@ -2144,7 +2153,8 @@ finally {
 
     # Scenario: A validated parent is replaced by a junction immediately before bootstrap creates a new managed file.
     # Purpose: Bind creation to guarded parent handles so a stale path check cannot create or write outside the target root.
-    It 'InterT107_rejects_a_parent_junction_swap_at_the_handle_bound_create_boundary' {
+    # Windows-only: the fixture swaps an NTFS junction at the Windows handle-bound create boundary.
+    It 'InterT107_rejects_a_parent_junction_swap_at_the_handle_bound_create_boundary' -Skip:(-not $script:IsWindowsHost) {
         $definitionRoot = Join-Path $TestDrive 'create-definition-source'
         New-TestRepository -Path $definitionRoot
         New-Item -ItemType Directory -Force -Path (Join-Path $definitionRoot '.codex'),(Join-Path $definitionRoot '.github') | Out-Null
@@ -2585,7 +2595,8 @@ exit `$LASTEXITCODE
 
     # Scenario: Another Git process inserts a stash after obsolete PersonalAgent references are enumerated.
     # Purpose: Re-resolve recovery evidence by immutable hash so index drift cannot delete unrelated user work.
-    It 'InterT88_preserves_unrelated_stashes_when_cleanup_references_shift' {
+    # Windows-only: the stash-reference race is injected through a cmd.exe/findstr wrapper.
+    It 'InterT88_preserves_unrelated_stashes_when_cleanup_references_shift' -Skip:(-not $script:IsWindowsHost) {
         # Given
         Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'committed notes'
         Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'notes.txt') | Out-Null
@@ -2661,7 +2672,8 @@ if not exist "$insertionMarker" (
 
     # Scenario: Another Git process inserts a stash after the new PersonalAgent evidence commit is stored.
     # Purpose: Identify the new evidence by immutable hash instead of whichever stash later occupies index zero.
-    It 'InterT96_identifies_new_recovery_evidence_by_hash_when_the_latest_stash_shifts' {
+    # Windows-only: the stash insertion race is injected through a cmd.exe/findstr wrapper.
+    It 'InterT96_identifies_new_recovery_evidence_by_hash_when_the_latest_stash_shifts' -Skip:(-not $script:IsWindowsHost) {
         # Given
         Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'committed notes'
         Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'notes.txt') | Out-Null
@@ -2732,7 +2744,8 @@ if errorlevel 1 exit /b 87
 
     # Scenario: A stash index changes after cleanup identity verification but before Git executes the drop.
     # Purpose: Restore any unexpectedly dropped immutable commit and retain old recovery evidence rather than lose user work.
-    It 'InterT97_restores_an_unexpected_stash_dropped_during_last_moment_index_drift' {
+    # Windows-only: the last-moment stash drift is injected through a cmd.exe/findstr wrapper.
+    It 'InterT97_restores_an_unexpected_stash_dropped_during_last_moment_index_drift' -Skip:(-not $script:IsWindowsHost) {
         # Given
         Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'committed notes'
         Set-TestText -Path (Join-Path $targetRoot 'concurrent.txt') -Value 'committed concurrent notes'
@@ -3000,7 +3013,8 @@ exit `$LASTEXITCODE
 
     # Scenario: A managed target ancestor is a junction that resolves outside the target Repository.
     # Purpose: Prevent fan-out from following reparse points and mutating files outside the authorized target.
-    It 'InterT89_rejects_target_reparse_points_before_mutation' {
+    # Windows-only: the fixture requires an NTFS directory junction and Windows reparse-point rejection.
+    It 'InterT89_rejects_target_reparse_points_before_mutation' -Skip:(-not $script:IsWindowsHost) {
         # Given
         $outsideRoot = Join-Path $TestDrive 'outside-target'
         New-Item -ItemType Directory -Force -Path $outsideRoot | Out-Null
@@ -3400,7 +3414,7 @@ exit 0
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
         $manifestPath = Join-Path $targetRoot $script:ManifestPath
         [System.IO.File]::AppendAllText($manifestPath, "`n")
-        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--force', '--', $script:ManifestPath) | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--force', '--', $script:ManifestPath.Replace('\','/')) | Out-Null
         $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
         Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
@@ -3465,7 +3479,8 @@ exit 0
 
     # Scenario: The shared Git info directory is replaced with a junction to a location outside the repository metadata.
     # Purpose: Reject an unsafe exclude ancestor before fan-out can write through the junction.
-    It 'InterT72_rejects_a_reparse_backed_shared_Git_info_directory' {
+    # Windows-only: the fixture replaces .git/info with an NTFS junction and asserts reparse-point confinement.
+    It 'InterT72_rejects_a_reparse_backed_shared_Git_info_directory' -Skip:(-not $script:IsWindowsHost) {
         $gitInfoPath = Join-Path $targetRoot '.git\info'
         $outsideInfoPath = Join-Path $TestDrive 'outside-bootstrap-git-info'
         Move-Item -LiteralPath $gitInfoPath -Destination $outsideInfoPath
@@ -3517,7 +3532,8 @@ Describe 'SYP214 read-only rollback drift preservation' {
 
     # Scenario: A read-only transaction-created file has concurrent ownership evidence beyond its original publication.
     # Purpose: Refuse to delete drifted bytes or metadata, preserve unknown publication debris, and restore unaffected snapshot paths.
-    It 'InterT118_preserves_external_target_evidence_for_<Case>_during_read_only_rollback' -TestCases @(
+    # Windows-only: every case exercises Windows DACL, read-only attributes, native file identity, or share-bound rollback semantics.
+    It 'InterT118_preserves_external_target_evidence_for_<Case>_during_read_only_rollback' -Skip:(-not $script:IsWindowsHost) -TestCases @(
         @{ Case = 'later-bytes' },
         @{ Case = 'replacement-identity' },
         @{ Case = 'dacl-drift' },

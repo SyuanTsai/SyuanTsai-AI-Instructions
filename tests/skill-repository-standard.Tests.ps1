@@ -4124,11 +4124,33 @@ public sealed class C245NonCooperativeStream : Stream {
             'skills-source-acquisition.Tests.ps1::UnitT09a_rejects_descendant_reparse_points_before_hashing',
             'skills-source-acquisition.Tests.ps1::UnitT09b_rejects_non_regular_files_before_hashing'
         ) 'Windows must retain exactly the five reviewed skips.'
-        Assert-ExactStringSequence $inventory.platforms.macos.expectedSkippedTests @(
+        $bootstrapWindowsOnly = @(
+            'bootstrap-ai-instructions.Tests.ps1::InterT66_rejects_a_concurrent_staged_blob_during_recovery_evidence_refresh',
+            'bootstrap-ai-instructions.Tests.ps1::InterT68c_does_not_read_a_reparse_backed_linked_v4_manifest',
+            'bootstrap-ai-instructions.Tests.ps1::InterT68d_fails_closed_when_the_locked_worktree_inventory_fails',
+            'bootstrap-ai-instructions.Tests.ps1::InterT68e_detects_linked_v4_published_before_the_locked_scan',
+            'bootstrap-ai-instructions.Tests.ps1::InterT71_rejects_an_unsafe_shared_Git_exclude_mutation_path',
+            'bootstrap-ai-instructions.Tests.ps1::InterT72_rejects_a_reparse_backed_shared_Git_info_directory',
+            'bootstrap-ai-instructions.Tests.ps1::InterT88_preserves_unrelated_stashes_when_cleanup_references_shift',
+            'bootstrap-ai-instructions.Tests.ps1::InterT89_rejects_target_reparse_points_before_mutation',
+            'bootstrap-ai-instructions.Tests.ps1::InterT96_identifies_new_recovery_evidence_by_hash_when_the_latest_stash_shifts',
+            'bootstrap-ai-instructions.Tests.ps1::InterT97_restores_an_unexpected_stash_dropped_during_last_moment_index_drift',
+            'bootstrap-ai-instructions.Tests.ps1::InterT101_fails_closed_when_the_shared_exclude_write_handle_is_unavailable',
+            'bootstrap-ai-instructions.Tests.ps1::InterT103_blocks_a_concurrent_writer_inside_the_atomic_managed_file_delete_boundary',
+            'bootstrap-ai-instructions.Tests.ps1::InterT105_rejects_a_parent_junction_swap_at_the_handle_bound_delete_boundary',
+            'bootstrap-ai-instructions.Tests.ps1::InterT107_rejects_a_parent_junction_swap_at_the_handle_bound_create_boundary',
+            'bootstrap-ai-instructions.Tests.ps1::InterT118_preserves_external_target_evidence_for_later-bytes_during_read_only_rollback',
+            'bootstrap-ai-instructions.Tests.ps1::InterT118_preserves_external_target_evidence_for_replacement-identity_during_read_only_rollback',
+            'bootstrap-ai-instructions.Tests.ps1::InterT118_preserves_external_target_evidence_for_dacl-drift_during_read_only_rollback',
+            'bootstrap-ai-instructions.Tests.ps1::InterT118_preserves_external_target_evidence_for_stage-and-tombstone_during_read_only_rollback',
+            'bootstrap-ai-instructions.Tests.ps1::InterT118_preserves_external_target_evidence_for_parent-replacement_during_read_only_rollback',
+            'bootstrap-ai-instructions.Tests.ps1::InterT119_fails_closed_when_shared_exclude_worktree_inventory_fails'
+        )
+        Assert-ExactStringSequence $inventory.platforms.macos.expectedSkippedTests ($bootstrapWindowsOnly + @(
             'skills-source-acquisition.Tests.ps1::UnitT09_rejects_case_insensitive_file_collisions_before_hashing',
             'skills-source-acquisition.Tests.ps1::UnitT09d_rejects_Unicode_NFC_path_collisions_before_hashing'
-        ) 'Default macOS APFS must skip the case-collision and Unicode-form fixtures.'
-        Assert-Equal @($inventory.platforms.linux.expectedSkippedTests).Count 0 'Linux must retain no reviewed Core skips.'
+        )) 'macOS must skip the Windows-only bootstrap cases plus its case and Unicode collision fixtures.'
+        Assert-ExactStringSequence $inventory.platforms.linux.expectedSkippedTests $bootstrapWindowsOnly 'Linux must skip only the Windows-only bootstrap cases.'
     }
 
     # Scenario: The managed lifecycle contract or its machine-readable evidence schema is removed or detached from the central authority.
