@@ -164,6 +164,7 @@ while [ "$#" -gt 0 ]; do
         --prepare|--offline)
             [ -z "$mode" ] || refuse usage "$EXIT_USAGE" 'Specify exactly one of --prepare or --offline.'
             mode=${1#--}
+            receipt_mode='"'"$mode"'"'
             shift ;;
         -h|--help)
             usage_text
@@ -213,7 +214,7 @@ case "$(run_clean uname -s)" in
 esac
 [ -n "$mode" ] || [ "$os_token" != linux ] || mode=prepare
 [ -n "$mode" ] || refuse usage "$EXIT_USAGE" 'Specify exactly one of --prepare or --offline.'
-receipt_mode='"'"$mode"'"'
+if [ "$receipt_mode" = null ]; then receipt_mode='"'"$mode"'"'; fi
 case "$(run_clean uname -m)" in
     x86_64|amd64) arch_token=x64 ;;
     aarch64|arm64) arch_token=arm64 ;;
@@ -327,11 +328,23 @@ done
 
 # G3/G5: before mutation, refuse only external K7 state. Setup-owned WAL is
 # handed to the verified PowerShell entry for lock-held recovery.
-if [ -e "$codex_home/.ai-instructions-txn" ] || [ -L "$codex_home/.ai-instructions-txn" ]; then
+transaction_store_has_residue() {
+    transaction_store=$1
+    if [ -L "$transaction_store" ]; then return 0; fi
+    if [ ! -e "$transaction_store" ]; then return 1; fi
+    if [ ! -d "$transaction_store" ]; then return 0; fi
+    # ls -A is available on both supported host families and includes dotfiles.
+    # A listing failure cannot prove the physical directory empty, so refuse.
+    if ! transaction_entry=$(run_clean ls -A "$transaction_store" 2>/dev/null); then
+        return 0
+    fi
+    [ -n "$transaction_entry" ]
+}
+if transaction_store_has_residue "$codex_home/.ai-instructions-txn"; then
     refuse interrupted-install "$EXIT_INTERRUPTED_INSTALL" 'An interrupted install transaction exists in CODEX_HOME; recover it before rerunning setup.' \
         'pwsh -NoProfile -NonInteractive -File scripts/install-ai-instructions-bootstrap.ps1 -CodexHome ~/.codex'
 fi
-if [ -e "$home/.ai-instructions-txn" ] || [ -L "$home/.ai-instructions-txn" ]; then
+if transaction_store_has_residue "$home/.ai-instructions-txn"; then
     refuse interrupted-install "$EXIT_INTERRUPTED_INSTALL" 'An interrupted USER agent-environment transaction exists; recover it before rerunning setup.' \
         'pwsh -NoProfile -NonInteractive -File ~/.codex/hooks/update-agent-environment.ps1 -Recover'
 fi

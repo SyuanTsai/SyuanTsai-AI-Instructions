@@ -100,7 +100,7 @@ $skill=Join-Path $UserHome '.agents/skills/plan-production-change/SKILL.md';$man
 $desired="fixture commit=$($bundle.commit)`n";$section=[IO.File]::ReadAllText((Join-Path $runtime 'bootstrap-section.md'))
 if($Apply){
  if((Test-Path $skill -PathType Leaf)-and-not(Test-Path $manifest -PathType Leaf)){[pscustomobject]@{outcome='failed';exitCode=1;failureDetails=@([pscustomobject]@{code='unmanaged-collision'})}|ConvertTo-Json -Compress -Depth 5;exit 1}
- [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($skill));[IO.File]::WriteAllText($skill,$desired);[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($manifest));[IO.File]::WriteAllText($manifest,'{"schemaVersion":3,"projections":["user-agents","user-claude"],"files":[]}');[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($claude));[IO.File]::WriteAllText($claude,$section)
+ [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($skill));[IO.File]::WriteAllText($skill,$desired);[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($manifest));[IO.File]::WriteAllText($manifest,'{"schemaVersion":3,"projections":["user-agents","user-claude"],"files":[{"skillId":"plan-production-change","targetPath":".agents/skills/plan-production-change/SKILL.md"}]}');[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($claude));[IO.File]::WriteAllText($claude,$section)
  [pscustomobject]@{outcome='applied';exitCode=0;failureDetails=@()}|ConvertTo-Json -Compress;exit 0
 }
 $current=(Test-Path $skill -PathType Leaf)-and([IO.File]::ReadAllText($skill)-ceq$desired)-and(Test-Path $manifest -PathType Leaf)-and(Test-Path $claude -PathType Leaf)-and([IO.File]::ReadAllText($claude)-ceq$section)
@@ -114,6 +114,8 @@ $runtime=Join-Path $CodexHome 'hooks/ai-instructions-runtime';[void][IO.Director
 [IO.File]::WriteAllText((Join-Path $script:UnixRepo 'scripts/fixture-ai-instructions-updater.psm1'),$fixtureUpdater,[Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $script:UnixRepo 'scripts/fixture-update-agent-environment.ps1'),$fixtureCoordinator,[Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $script:UnixRepo 'scripts/install-ai-instructions-bootstrap.ps1'),$fixtureInstaller,[Text.UTF8Encoding]::new($false))
+[void][IO.Directory]::CreateDirectory((Join-Path $script:UnixRepo 'catalog'))
+Copy-Item (Join-Path $script:UnixRepositoryRoot 'catalog/skills-catalog.json') (Join-Path $script:UnixRepo 'catalog/skills-catalog.json')
 [void][IO.Directory]::CreateDirectory((Join-Path $script:UnixRepo 'instructions/common'))
 Copy-Item (Join-Path $script:UnixRepositoryRoot 'instructions/common/bootstrap-section.md') (Join-Path $script:UnixRepo 'instructions/common/bootstrap-section.md')
 & git -C $script:UnixRepo init -q 2>$null | Out-Null

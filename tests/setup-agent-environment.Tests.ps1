@@ -238,9 +238,20 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         (Get-SetupTestPlan $receiptOnly 'Offline').decision | Should Be 'verify-runtime'
     }
 
-    # Scenario: CODEX_HOME holds an install transaction store (directory or file).
-    # Purpose: K7 refuses before any installer call and names the pwsh 7 installer recovery command.
+    # Scenario: CODEX_HOME holds the empty physical store left by a committed install, or real residue (an entry or a file).
+    # Purpose: K7 accepts only the committed empty-container state and refuses every ambiguous store before any installer call.
     It 'UnitT13_refuses_codex_home_transaction_residue_with_the_installer_recovery' {
+        $empty = New-SetupTestHome 'plan-codex-txn-empty'
+        [void][IO.Directory]::CreateDirectory((Join-Path $empty.CodexHome '.ai-instructions-txn'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $empty.Home '.ai-instructions-txn'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $empty.Layout.SetupRoot '.ai-instructions-txn'))
+        $setupModule = Get-Module agent-environment-setup
+        $emptyResidue = @(& $setupModule {
+            param($CodexHome,$UserHome,$SetupRoot)
+            Get-AgentEnvironmentSetupResidue -CodexHome $CodexHome -UserHome $UserHome -SetupRoot $SetupRoot
+        } $empty.CodexHome $empty.Home $empty.Layout.SetupRoot)
+        $emptyResidue.Count | Should Be 0
+
         foreach ($kind in @('directory','file')) {
             $fixture = New-SetupTestHome "plan-codex-txn-$kind"
             [void](New-SetupTestRuntime $fixture -Directory -Receipt)
@@ -252,6 +263,17 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
             $plan.code | Should Be 'interrupted-install'
             (@($plan.residue) -join ',') | Should BeExactly '~/.codex/.ai-instructions-txn'
             $plan.recoverCommand | Should Match '^pwsh -NoProfile -NonInteractive -File scripts/install-ai-instructions-bootstrap\.ps1 -CodexHome ~/\.codex$'
+        }
+        $linkFixture = New-SetupTestHome 'plan-codex-txn-link'
+        [void](New-SetupTestRuntime $linkFixture -Directory -Receipt)
+        [void][IO.Directory]::CreateDirectory($linkFixture.CodexHome)
+        $linkTarget = Join-Path $linkFixture.Root 'transaction-link-target'
+        [void][IO.Directory]::CreateDirectory($linkTarget)
+        $linkPath = Join-Path $linkFixture.CodexHome '.ai-instructions-txn'
+        try { [void][IO.Directory]::CreateSymbolicLink($linkPath,$linkTarget) } catch { }
+        $linkItem = Get-Item -Force -LiteralPath $linkPath -ErrorAction SilentlyContinue
+        if ($null -ne $linkItem -and $null -ne $linkItem.PSObject.Properties['LinkType'] -and $linkItem.LinkType) {
+            (Get-SetupTestPlan $linkFixture 'Offline').code | Should Be 'interrupted-install'
         }
     }
 
@@ -273,7 +295,7 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
     # Purpose: K7 refuses and names update-agent-environment.ps1 -Recover instead of recovering automatically.
     It 'UnitT15_refuses_user_home_transaction_residue_with_the_recover_command' {
         $fixture = New-SetupTestHome 'plan-user-txn'
-        [void][IO.Directory]::CreateDirectory((Join-Path $fixture.Home '.ai-instructions-txn'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $fixture.Home '.ai-instructions-txn/entry'))
         $plan = Get-SetupTestPlan $fixture 'Prepare'
         $plan.code | Should Be 'interrupted-install'
         (@($plan.residue) -join ',') | Should BeExactly '~/.ai-instructions-txn'
@@ -296,7 +318,7 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
     It 'UnitT17_checks_interrupted_install_residue_before_cache_and_runtime_state' {
         $fixture = New-SetupTestHome 'plan-precedence'
         Remove-Item -LiteralPath $fixture.Archive
-        [void][IO.Directory]::CreateDirectory((Join-Path $fixture.CodexHome '.ai-instructions-txn'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $fixture.CodexHome '.ai-instructions-txn/entry'))
         (Get-SetupTestPlan $fixture 'Offline').code | Should Be 'interrupted-install'
     }
 
@@ -322,7 +344,9 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
     It 'UnitT19_detects_dangling_symbolic_link_residue_and_ancestors_on_unix' {
         $fixture = New-SetupTestHome 'plan-dangling'
         [void][IO.Directory]::CreateDirectory($fixture.CodexHome)
-        [void][IO.File]::CreateSymbolicLink((Join-Path $fixture.CodexHome '.ai-instructions-txn'),(Join-Path $fixture.Root 'missing-target'))
+        $linkTarget = Join-Path $fixture.Root 'physical-transaction-store'
+        [void][IO.Directory]::CreateDirectory($linkTarget)
+        [void][IO.Directory]::CreateSymbolicLink((Join-Path $fixture.CodexHome '.ai-instructions-txn'),$linkTarget)
         (Get-SetupTestPlan $fixture 'Prepare').code | Should Be 'interrupted-install'
         $other = New-SetupTestHome 'path-dangling'
         [void][IO.Directory]::CreateSymbolicLink((Join-Path $other.Home '.local'),(Join-Path $other.Root 'missing-local'))
@@ -717,25 +741,32 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         $entry | Should Match "'user-agents','user-claude'"
     }
 
-    # Scenario: Linux setup runs against an installed runtime at the same pin or an ancestor pin.
-    # Purpose: Require same-pin idempotence and new-pin installation to pass through the existing updater workflow while preserving V3V5.
+    # Scenario: Linux setup runs against an installed runtime at the same pin or an ancestor pin whose platform build differs.
+    # Purpose: Keep same-pin validation read-only and isolate the new-pin updater workflow in an owned pwsh child.
     It 'UnitT42_routes_Linux_reruns_and_new_pins_through_the_updater_workflow' {
         $entry = [IO.File]::ReadAllText($script:SetupEntryPath)
         $entry | Should Match 'Invoke-AiInstructionsUpdateWorkflow'
         $entry | Should Match "-ForceCheck\s+-InstallApproved"
+        $cloudFunction = [regex]::Match($entry,'(?s)function Invoke-SetupLinuxCloudWiring \{.*?(?=\r?\n\$modeName =)').Value
+        $cloudFunction | Should Not Match 'Import-Module\s+\$updaterPath'
+        $entry | Should Match '(?s)\$childScript=@''.*Import-Module \$updaterPath.*''@.*''-EncodedCommand'',\$encoded'
+        $entry | Should Match 'Linux updater workflow child'
+        $entry | Should Match "(?s)bootstrap-ai-instructions\.ps1.*?-ValidateOnly"
         $entry | Should Match "'-ExpectedCurrentCommit'"
         $entry | Should Match "'-ExpectedCurrentGeneration','v3v5'"
         $entry | Should Match "'-WriterSchema','Auto'"
         $entry | Should Match "merge-base.*--is-ancestor"
     }
 
-    # Scenario: Projection Apply succeeds, collides, or leaves drift, with every child launched without inherited stdin.
-    # Purpose: Map collision to exit 29, verify readiness after Apply, and retain the owned-process EOF guarantee on all child paths.
+    # Scenario: Projection preflight/Apply succeeds, collides, or leaves drift, with every child launched without inherited stdin.
+    # Purpose: Refuse collision before installer/updater mutation, retain Apply as a second line, and verify readiness afterward.
     It 'UnitT43_maps_projection_collision_and_verifies_readiness_non_interactively' {
         $entry = [IO.File]::ReadAllText($script:SetupEntryPath)
         $module = [IO.File]::ReadAllText((Join-Path $script:SetupScripts 'agent-environment-setup.psm1'))
         $module | Should Match 'unmanaged-collision'
         $entry | Should Match "'-VerifyOnly','-OutputFormat','Json'"
+        $entry | Should Match "'-WhatIf','-OutputFormat','Json'"
+        $entry | Should Match '(?s)Invoke-SetupProjectionCollisionPreflight.*?if\(\$cloudPlan\.action-ceq''install''\)'
         $entry | Should Match 'Invoke-PlatformPreparationCommand'
         $entry | Should Match 'projection-collision'
         $entry | Should Match 'projection-failed'
@@ -754,6 +785,8 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         $cloud.result | Should BeExactly 'completed'
         $cloud.runtimeCommit | Should BeExactly ('c' * 40)
         (@($cloud.steps | Where-Object step -in @('S7','S8','S9') | Select-Object -ExpandProperty status) -join ',') | Should BeExactly 'completed,completed,completed'
+        $readme = [IO.File]::ReadAllText((Join-Path $script:SetupRepositoryRoot 'README.md'))
+        [regex]::Matches($readme,'(?m)^\| 0 \| `success` \|.*`completed`').Count | Should Be 2
     }
 
     # Scenario: D13 remains owned by SYP-535 after Linux cloud wiring is enabled.
@@ -1711,13 +1744,17 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         # programs exactly as it invokes the production installer/updater/coordinator,
         # while source acquisition remains local and every HOME stays under TestDrive.
         $fixtureUpdater = @'
+if (Get-Module -Name platform-runtime) { throw 'fixture updater was loaded in the setup process instead of an isolated child' }
 function Invoke-AiInstructionsUpdateWorkflow {
     param([string]$CodexHome,[switch]$ForceCheck,[switch]$InstallApproved,[scriptblock]$ResolveCandidate,[scriptblock]$AcquireCandidate,[scriptblock]$InstallCandidate)
     $bundle = Get-Content -Raw -LiteralPath (Join-Path $CodexHome 'hooks/ai-instructions-runtime/runtime-bundle.json') | ConvertFrom-Json
     $configuration = Get-Content -Raw -LiteralPath (Join-Path $CodexHome 'ai-instructions-sync.json') | ConvertFrom-Json
     $request = [pscustomobject]@{ CodexHome=$CodexHome; CurrentCommit=[string]$bundle.commit; Mode=[string]$configuration.updates.mode; Channel=[string]$configuration.updates.channel; Ref=[string]$configuration.updates.ref }
     $candidate = & $ResolveCandidate $request
-    if ([string]$candidate.Commit -ceq [string]$bundle.commit) { return [pscustomobject]@{ outcome='current' } }
+    if ([string]$candidate.Commit -ceq [string]$bundle.commit) {
+        [IO.File]::WriteAllText((Join-Path $CodexHome 'ai-instructions-update-receipt.json'),('{"outcome":"current","checkedAtUtc":"' + [DateTime]::UtcNow.ToString('o') + '"}'))
+        return [pscustomobject]@{ outcome='current' }
+    }
     $request | Add-Member CandidateCommit ([string]$candidate.Commit)
     $package = & $AcquireCandidate $request
     $again = & $ResolveCandidate $request
@@ -1728,7 +1765,7 @@ function Invoke-AiInstructionsUpdateWorkflow {
 Export-ModuleMember -Function Invoke-AiInstructionsUpdateWorkflow
 '@
         $fixtureCoordinator = @'
-[CmdletBinding()] param([string]$CodexHome,[string]$UserHome,[switch]$Apply,[switch]$VerifyOnly,[string]$OutputFormat)
+[CmdletBinding(SupportsShouldProcess=$true)] param([string]$CodexHome,[string]$UserHome,[switch]$Apply,[switch]$VerifyOnly,[string]$OutputFormat)
 $runtime = Join-Path $CodexHome 'hooks/ai-instructions-runtime'
 $bundle = Get-Content -Raw -LiteralPath (Join-Path $runtime 'runtime-bundle.json') | ConvertFrom-Json
 $skill = Join-Path $UserHome '.agents/skills/plan-production-change/SKILL.md'
@@ -1736,13 +1773,21 @@ $manifest = Join-Path $UserHome '.agents/catalog-skills.manifest.json'
 $claude = Join-Path $UserHome '.claude/CLAUDE.md'
 $desired = "fixture commit=$($bundle.commit)`n"
 $section = [IO.File]::ReadAllText((Join-Path $runtime 'bootstrap-section.md'))
+if ($WhatIfPreference) {
+    if ((Test-Path -LiteralPath $skill -PathType Leaf) -and -not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+        [pscustomobject]@{ outcome='failed'; exitCode=1; failureDetails=@([pscustomobject]@{code='unmanaged-collision'}) } | ConvertTo-Json -Compress -Depth 5
+        exit 1
+    }
+    [pscustomobject]@{ outcome='planned'; exitCode=0; failureDetails=@() } | ConvertTo-Json -Compress
+    exit 0
+}
 if ($Apply) {
     if ((Test-Path -LiteralPath $skill -PathType Leaf) -and -not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
         [pscustomobject]@{ outcome='failed'; exitCode=1; failureDetails=@([pscustomobject]@{code='unmanaged-collision'}) } | ConvertTo-Json -Compress -Depth 5
         exit 1
     }
     [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($skill)); [IO.File]::WriteAllText($skill,$desired)
-    [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($manifest)); [IO.File]::WriteAllText($manifest,'{"schemaVersion":3,"projections":["user-agents","user-claude"],"files":[]}')
+    [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($manifest)); [IO.File]::WriteAllText($manifest,'{"schemaVersion":3,"projections":["user-agents","user-claude"],"files":[{"skillId":"plan-production-change","targetPath":".agents/skills/plan-production-change/SKILL.md"}]}')
     [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($claude)); [IO.File]::WriteAllText($claude,$section)
     [pscustomobject]@{ outcome='applied'; exitCode=0; failureDetails=@() } | ConvertTo-Json -Compress
     exit 0
@@ -1751,19 +1796,29 @@ $current = (Test-Path -LiteralPath $skill -PathType Leaf) -and ([IO.File]::ReadA
 [pscustomobject]@{ outcome=$(if($current){'current'}else{'failed'}); exitCode=$(if($current){0}else{1}); failureDetails=@() } | ConvertTo-Json -Compress
 exit $(if($current){0}else{1})
 '@
+        $fixtureLauncher = @'
+[CmdletBinding()] param([switch]$ValidateOnly)
+if (-not $ValidateOnly) { throw 'fixture launcher supports only -ValidateOnly' }
+exit 0
+'@
         $fixtureInstaller = @'
 [CmdletBinding()] param([string]$RepositoryRoot,[string]$CodexHome,[string]$SourceCommit,[string]$ExpectedCurrentCommit,[string]$ExpectedUpdateMode,[string]$ExpectedUpdateChannel,[string]$ExpectedUpdateRef,[string]$ExpectedCurrentGeneration,[string]$WriterSchema)
 $runtime = Join-Path $CodexHome 'hooks/ai-instructions-runtime'; [void][IO.Directory]::CreateDirectory($runtime)
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts/fixture-ai-instructions-updater.psm1') -Destination (Join-Path $runtime 'ai-instructions-updater.psm1') -Force
 [void][IO.Directory]::CreateDirectory((Join-Path $CodexHome 'hooks'))
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts/fixture-update-agent-environment.ps1') -Destination (Join-Path $CodexHome 'hooks/update-agent-environment.ps1') -Force
+Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts/fixture-bootstrap-ai-instructions.ps1') -Destination (Join-Path $CodexHome 'hooks/bootstrap-ai-instructions.ps1') -Force
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'instructions/common/bootstrap-section.md') -Destination (Join-Path $runtime 'bootstrap-section.md') -Force
+[void][IO.Directory]::CreateDirectory((Join-Path $CodexHome '.ai-instructions-txn'))
 [IO.File]::WriteAllText((Join-Path $CodexHome 'ai-instructions-sync.json'),'{' + '"schemaVersion":5,"updates":{"mode":"notify-only","channel":"protected-branch","ref":"main"},"projections":{"user":["user-agents","user-claude"],"project":[]}}')
 [IO.File]::WriteAllText((Join-Path $runtime 'runtime-bundle.json'),('{"schemaVersion":3,"commit":"' + $SourceCommit + '"}'))
 '@
         [IO.File]::WriteAllText((Join-Path $script:UnixRepo 'scripts/fixture-ai-instructions-updater.psm1'),$fixtureUpdater,[Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllText((Join-Path $script:UnixRepo 'scripts/fixture-update-agent-environment.ps1'),$fixtureCoordinator,[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $script:UnixRepo 'scripts/fixture-bootstrap-ai-instructions.ps1'),$fixtureLauncher,[Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllText((Join-Path $script:UnixRepo 'scripts/install-ai-instructions-bootstrap.ps1'),$fixtureInstaller,[Text.UTF8Encoding]::new($false))
+        [void][IO.Directory]::CreateDirectory((Join-Path $script:UnixRepo 'catalog'))
+        Copy-Item -LiteralPath (Join-Path $script:UnixRepositoryRoot 'catalog/skills-catalog.json') -Destination (Join-Path $script:UnixRepo 'catalog/skills-catalog.json')
         [void][IO.Directory]::CreateDirectory((Join-Path $script:UnixRepo 'instructions/common'))
         Copy-Item -LiteralPath (Join-Path $script:UnixRepositoryRoot 'instructions/common/bootstrap-section.md') -Destination (Join-Path $script:UnixRepo 'instructions/common/bootstrap-section.md')
         & git -C $script:UnixRepo init -q 2>$null | Out-Null
@@ -1980,14 +2035,16 @@ Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'instructions/common/bootstrap
         $offline.Stdout.Contains($userHome) | Should Be $false
     }
 
-    # Scenario: Linux setup is rerun at the same immutable commit after the first cloud projection.
-    # Purpose: Exercise the updater current path with closed stdin and prove the managed runtime/USER trees remain byte-stable.
+    # CloudT1-T3 are Linux-only: macOS deliberately retains the runtime-only P10a contract and has no default mode.
+    if ($IsLinux) {
+    # Scenario: Linux setup is rerun at the same immutable commit after the first cloud projection and its committed empty transaction store.
+    # Purpose: Exercise read-only same-pin validation with closed stdin and prove all CODEX_HOME/managed USER bytes remain stable.
     It 'CloudT1_reruns_the_same_pin_through_the_updater_without_managed_tree_changes' {
         $userHome = New-UnixHome 'cloud-rerun'
         $first = Invoke-UnixSetup $userHome @()
         Assert-SetupTestExitCode $first 0
         $before = @(
-            Get-UnixTreeSnapshot (Join-Path $userHome '.codex/hooks/ai-instructions-runtime')
+            Get-UnixTreeSnapshot (Join-Path $userHome '.codex')
             Get-UnixTreeSnapshot (Join-Path $userHome '.agents')
             Get-UnixTreeSnapshot (Join-Path $userHome '.claude')
         ) -join "`n"
@@ -1996,22 +2053,29 @@ Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'instructions/common/bootstrap
         $again.Json.result | Should BeExactly 'completed'
         (@($again.Json.steps | Where-Object step -eq 'S7')[0].detail) | Should BeExactly 'current'
         $after = @(
-            Get-UnixTreeSnapshot (Join-Path $userHome '.codex/hooks/ai-instructions-runtime')
+            Get-UnixTreeSnapshot (Join-Path $userHome '.codex')
             Get-UnixTreeSnapshot (Join-Path $userHome '.agents')
             Get-UnixTreeSnapshot (Join-Path $userHome '.claude')
         ) -join "`n"
         $after | Should BeExactly $before
     }
 
-    # Scenario: The expected commit advances and changes the verified managed section in the isolated fixture repository.
-    # Purpose: Require the updater installed path, retained V3V5 projections and projection of the new immutable pin.
+    # Scenario: The expected commit advances and changes both managed content and a scripts/platform build input.
+    # Purpose: Require an isolated updater child, retained V3V5 projections and projection of the new immutable pin.
     It 'CloudT2_updates_to_a_descendant_pin_and_projects_the_new_verified_bytes' {
         $userHome = New-UnixHome 'cloud-new-pin'
         Assert-SetupTestExitCode (Invoke-UnixSetup $userHome @()) 0
         $sectionPath = Join-Path $script:UnixRepo 'instructions/common/bootstrap-section.md'
+        $platformPath = Join-Path $script:UnixRepo 'scripts/platform/UnixNative.cs'
+        $platformManifestPath = Join-Path $script:UnixRepo 'scripts/platform-runtime.psd1'
         try {
             [IO.File]::AppendAllText($sectionPath,"`nSYP-519 isolated fixture pin`n")
-            & git -C $script:UnixRepo add instructions/common/bootstrap-section.md 2>$null | Out-Null
+            [IO.File]::AppendAllText($platformPath,"`n// SYP-519 isolated platform fingerprint`n")
+            $platformHash = Get-AgentEnvironmentSetupSha256Text ([IO.File]::ReadAllText($platformPath))
+            $platformManifest = [IO.File]::ReadAllText($platformManifestPath)
+            $platformManifest = [regex]::Replace($platformManifest,"(?m)(Path = 'platform/UnixNative\.cs'; Sha256 = ')[a-f0-9]{64}(')",('${1}' + $platformHash + '$2'))
+            [IO.File]::WriteAllText($platformManifestPath,$platformManifest,[Text.UTF8Encoding]::new($false))
+            & git -C $script:UnixRepo add instructions/common/bootstrap-section.md scripts/platform/UnixNative.cs scripts/platform-runtime.psd1 2>$null | Out-Null
             & git -C $script:UnixRepo -c user.name=setup-test -c user.email=setup-test@example.invalid commit -q -m cloud-pin 2>$null | Out-Null
             $next = [string](& git -C $script:UnixRepo rev-parse HEAD)
             $run = Invoke-UnixSetup $userHome @() -ExpectedCommit $next -NoCheckout
@@ -2024,9 +2088,9 @@ Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'instructions/common/bootstrap
         finally { & git -C $script:UnixRepo checkout -q --detach $script:UnixCommits['runtime'] 2>$null | Out-Null }
     }
 
-    # Scenario: A fresh HOME already contains unmanaged bytes at a selected USER projection target.
-    # Purpose: Refuse with exit 29 before rewriting those bytes; the shell and every owned child observe EOF on stdin.
-    It 'CloudT3_refuses_an_unmanaged_projection_collision_without_mutating_the_file' {
+    # Scenario: A fresh HOME, then an installed HOME moving to a descendant pin, contains unmanaged bytes at a selected USER projection target.
+    # Purpose: Refuse with exit 29 before installer/updater mutation; the shell and every owned child observe EOF on stdin.
+    It 'CloudT3_refuses_fresh_and_new_pin_projection_collisions_before_mutation' {
         $userHome = New-UnixHome 'cloud-collision'
         $collision = Join-Path $userHome '.agents/skills/plan-production-change/SKILL.md'
         [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($collision))
@@ -2036,6 +2100,36 @@ Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'instructions/common/bootstrap
         Assert-SetupTestExitCode $run 29
         $run.Json.code | Should BeExactly 'projection-collision'
         (Get-FileHash -LiteralPath $collision -Algorithm SHA256).Hash | Should BeExactly $before
+        Test-Path -LiteralPath (Join-Path $userHome '.codex') | Should Be $false
+
+        $updateHome = New-UnixHome 'cloud-update-collision'
+        Assert-SetupTestExitCode (Invoke-UnixSetup $updateHome @()) 0
+        $updateCollision = Join-Path $updateHome '.agents/skills/verify-data-access-performance/SKILL.md'
+        [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($updateCollision))
+        [IO.File]::WriteAllText($updateCollision,"personal update collision bytes`n")
+        $managedBefore = @(
+            Get-UnixTreeSnapshot (Join-Path $updateHome '.codex')
+            Get-UnixTreeSnapshot (Join-Path $updateHome '.agents')
+            Get-UnixTreeSnapshot (Join-Path $updateHome '.claude')
+        ) -join "`n"
+        $sectionPath = Join-Path $script:UnixRepo 'instructions/common/bootstrap-section.md'
+        try {
+            [IO.File]::AppendAllText($sectionPath,"`nSYP-519 collision descendant`n")
+            & git -C $script:UnixRepo add instructions/common/bootstrap-section.md 2>$null | Out-Null
+            & git -C $script:UnixRepo -c user.name=setup-test -c user.email=setup-test@example.invalid commit -q -m collision-pin 2>$null | Out-Null
+            $next = [string](& git -C $script:UnixRepo rev-parse HEAD)
+            $updateRun = Invoke-UnixSetup $updateHome @() -ExpectedCommit $next -NoCheckout
+            Assert-SetupTestExitCode $updateRun 29
+            $updateRun.Json.code | Should BeExactly 'projection-collision'
+            $managedAfter = @(
+                Get-UnixTreeSnapshot (Join-Path $updateHome '.codex')
+                Get-UnixTreeSnapshot (Join-Path $updateHome '.agents')
+                Get-UnixTreeSnapshot (Join-Path $updateHome '.claude')
+            ) -join "`n"
+            $managedAfter | Should BeExactly $managedBefore
+        }
+        finally { & git -C $script:UnixRepo checkout -q --detach $script:UnixCommits['runtime'] 2>$null | Out-Null }
+    }
     }
 
     # Scenario: HOME is reached through a link, a setup ancestor dangles, or the persistent PowerShell temp directory is linked or non-private.
@@ -2219,6 +2313,18 @@ Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'instructions/common/bootstrap
         }
     }
 
+    # Scenario: An explicit Unix mode is parsed before an early expected-commit refusal.
+    # Purpose: Preserve the caller's --prepare/--offline mode in refusal receipts emitted before OS detection.
+    It 'InterT30A_preserves_explicit_mode_in_early_shell_refusal_receipts' {
+        foreach ($mode in @('prepare','offline')) {
+            $homePath = New-UnixHome "early-mode-$mode" -WithoutCache
+            $run = Invoke-UnixSetup $homePath @("--$mode") -ExpectedCommit ('z' * 40) -NoCheckout
+            $run.ExitCode | Should Be 10
+            $run.Json.code | Should BeExactly 'usage'
+            $run.Json.mode | Should BeExactly $mode
+        }
+    }
+
     # Scenario: PATH omits git, tar, gzip, or both downloaders on a fresh independent HOME.
     # Purpose: F10 table-drives typed dependency refusal with a byte-identical HOME and no residue.
     It 'InterT31_refuses_the_complete_native_dependency_matrix_without_mutation' {
@@ -2251,7 +2357,8 @@ Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'instructions/common/bootstrap
                 'legacy' { Join-Path $homePath '.codex/.ai-instructions-install-fixture' }
             }
             [void][IO.Directory]::CreateDirectory($path)
-            [IO.File]::WriteAllText((Join-Path $path 'sentinel'),'residue')
+            $residueLeaf = if ($scope -in @('codex','user')) { '.hidden-residue' } else { 'sentinel' }
+            [IO.File]::WriteAllText((Join-Path $path $residueLeaf),'residue')
             $before = Get-UnixTreeSnapshot $homePath
             $policy=[IO.File]::ReadAllText((Join-Path $script:UnixRepo 'scripts/setup-agent-environment.policy.json'))|ConvertFrom-Json
             $plan=Get-AgentEnvironmentSetupPlan -Policy $policy -UserHome $homePath -CodexHome (Join-Path $homePath '.codex') -Mode Prepare -ArchivePath '' -Rid $script:UnixRid

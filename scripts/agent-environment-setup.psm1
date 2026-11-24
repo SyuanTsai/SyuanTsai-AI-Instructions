@@ -404,6 +404,23 @@ function Get-AgentEnvironmentSetupEntry {
     return $null
 }
 
+function Test-AgentEnvironmentSetupTransactionStoreResidue {
+    param([AllowNull()] $Entry)
+    if ($null -eq $Entry) { return $false }
+    if ([string]$Entry.Kind -cne 'directory') { return $true }
+    try {
+        foreach ($child in [IO.Directory]::EnumerateFileSystemEntries([string]$Entry.Path)) {
+            return $true
+        }
+        return $false
+    }
+    catch {
+        # An unreadable store cannot be proven empty. Preserve fail-closed K7
+        # handling and let the caller report the normal recovery command.
+        return $true
+    }
+}
+
 function Get-AgentEnvironmentSetupResidue {
     param(
         [Parameter(Mandatory = $true)][string] $CodexHome,
@@ -412,7 +429,7 @@ function Get-AgentEnvironmentSetupResidue {
     )
     $found = [Collections.Generic.List[object]]::new()
     $codexTxn = Get-AgentEnvironmentSetupEntry $CodexHome '.ai-instructions-txn'
-    if ($null -ne $codexTxn) { $found.Add([pscustomobject]@{ Scope = 'codex-home'; Kind = 'transaction-store'; Path = $codexTxn.Path }) }
+    if (Test-AgentEnvironmentSetupTransactionStoreResidue $codexTxn) { $found.Add([pscustomobject]@{ Scope = 'codex-home'; Kind = 'transaction-store'; Path = $codexTxn.Path }) }
     if ([IO.Directory]::Exists($CodexHome)) {
         foreach ($entry in @([IO.Directory]::EnumerateFileSystemEntries($CodexHome) | Sort-Object)) {
             $leaf = [IO.Path]::GetFileName($entry)
@@ -422,9 +439,9 @@ function Get-AgentEnvironmentSetupResidue {
         }
     }
     $userTxn = Get-AgentEnvironmentSetupEntry $UserHome '.ai-instructions-txn'
-    if ($null -ne $userTxn) { $found.Add([pscustomobject]@{ Scope = 'user-home'; Kind = 'transaction-store'; Path = $userTxn.Path }) }
+    if (Test-AgentEnvironmentSetupTransactionStoreResidue $userTxn) { $found.Add([pscustomobject]@{ Scope = 'user-home'; Kind = 'transaction-store'; Path = $userTxn.Path }) }
     $setupTxn = Get-AgentEnvironmentSetupEntry $SetupRoot '.ai-instructions-txn'
-    if ($null -ne $setupTxn) { $found.Add([pscustomobject]@{ Scope = 'setup-root'; Kind = 'setup-publication-store'; Path = $setupTxn.Path }) }
+    if (Test-AgentEnvironmentSetupTransactionStoreResidue $setupTxn) { $found.Add([pscustomobject]@{ Scope = 'setup-root'; Kind = 'setup-publication-store'; Path = $setupTxn.Path }) }
     return [object[]]$found.ToArray()
 }
 
