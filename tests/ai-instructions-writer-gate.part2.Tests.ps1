@@ -2,8 +2,7 @@
 
 Describe 'AI instructions writer and reader gate' {
     BeforeAll {
-        $shortParent=Join-Path ([IO.Path]::GetTempPath()) 'p7e'
-        New-Item -ItemType Directory -Force -Path $shortParent|Out-Null
+        $shortParent=Get-P7eTestTempRoot
         $script:ExternalRoot=Join-Path $shortParent ([Guid]::NewGuid().ToString('N').Substring(0,8))
         New-Item -ItemType Directory -Path $script:ExternalRoot|Out-Null
         $script:V3Candidate=Join-Path $script:ExternalRoot 'src'
@@ -164,7 +163,7 @@ Describe 'AI instructions writer and reader gate' {
 
         $result.ExitCode|Should Not Be 0
         (Get-AiInstructionsRefusalCode $result.Output)|Should Be closure-invalid
-        $result.Output|Should Match 'cannot replace retained legacy REPO Skill ownership'
+        (ConvertTo-P9cTestDiagnosticText $result.Output)|Should Match 'cannot replace retained legacy REPO Skill ownership'
         (Get-P9bRepoSnapshot $target)|Should Be $before
     }
 
@@ -643,6 +642,8 @@ exit /b %errorlevel%
     }
     }
 
+    # Register only on Windows because FileShare denial is a Windows handle-sharing primitive; Unix closure identity and no-follow behavior are covered by the platform runtime tests.
+    if($IsWindows){
     # Scenario: The stable launcher has opened a verified closure file with its read-only sharing contract.
     # Purpose: Bind verified bytes through import/inventory assertion by denying concurrent writes and deletion until disposal.
     It 'UnitT95_holds_launcher_closure_bytes_against_write_and_delete' {
@@ -661,6 +662,7 @@ exit /b %errorlevel%
         }
         finally{$lease.Dispose()}
         { [IO.File]::AppendAllText($path,"# released`n",[Text.UTF8Encoding]::new($false)) }|Should Not Throw
+    }
     }
 
     # Scenario: Shared exclude composition runs for a TargetRoot spelled through a directory junction while Git lists the same worktree by its real path.
@@ -715,7 +717,7 @@ if($script:HasWindowsPowerShell51){
         # Scenario: Windows PowerShell 5.1 opens an installed v3/v5 runtime.
         # Purpose: Register only on a real 5.1 host and return runtime-baseline-unavailable without a skip.
         It 'InterT100_refuses_v3v5_on_Windows_PowerShell_5_1' {
-            $shortParent=Join-Path ([IO.Path]::GetTempPath()) 'p7e';$root=Join-Path $shortParent ([Guid]::NewGuid().ToString('N').Substring(0,8));New-Item -ItemType Directory -Path $root|Out-Null
+            $shortParent=Get-P7eTestTempRoot;$root=Join-Path $shortParent ([Guid]::NewGuid().ToString('N').Substring(0,8));New-Item -ItemType Directory -Path $root|Out-Null
             try{
                 $candidate=Join-Path $root 'src';New-P7eV3Candidate $candidate;$fixtureHome=Join-Path $root 'home';$install=Invoke-P7eInstaller -SourceRoot $candidate -CodexHome $fixtureHome -WriterSchema V3V5;$install.ExitCode|Should Be 0
                 $before=Get-P7eTreeSnapshot $fixtureHome;$result=Invoke-P7eLauncherFailure -CodexHome $fixtureHome -Desktop

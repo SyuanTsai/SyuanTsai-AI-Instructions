@@ -2,7 +2,7 @@
 
 Describe 'AI instructions unified repository transaction recovery behaviors' {
     BeforeAll {
-        $shortParent=Join-Path ([IO.Path]::GetTempPath()) 'p7e';New-Item -ItemType Directory -Force -Path $shortParent|Out-Null
+        $shortParent=Get-P7eTestTempRoot
         $script:ExternalRoot=Join-Path $shortParent ([Guid]::NewGuid().ToString('N').Substring(0,8));New-Item -ItemType Directory -Path $script:ExternalRoot|Out-Null
         $script:BootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
         $script:TransactionModulePath=Join-Path $script:RepositoryRoot 'scripts/ai-instructions-install-transaction.psm1'
@@ -32,6 +32,8 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
 
     # Scenario: A fully current project fixture is bootstrapped again with no file, Git, manifest, or exclude intent.
     # Purpose: Leave every file-tree byte unchanged and avoid creating .ai-instructions-txn for a no-op run.
+    # Register only on Windows because this case mutates the Windows ReadOnly attribute; Unix permission drift is covered by InterT168 and must retain evidence fail-closed.
+    if($IsWindows){
     # Scenario: A displacing write-file operation is still pending when the process stops, then the user changes only the target's read-only attribute.
     # Purpose: Never apply prepared displaced metadata to an operation that was never displaced; recovery keeps the user's bytes, identity, permissions, and attributes exactly.
     It 'InterT173_recovery_never_applies_displaced_metadata_to_a_pending_operation' {
@@ -60,6 +62,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         (Get-P9cFileEvidence $targetPath|ConvertTo-Json -Depth 8 -Compress)|Should -Be ($evidenceBefore|ConvertTo-Json -Depth 8 -Compress)
         (Get-Item -Force -LiteralPath $targetPath).IsReadOnly|Should -Be $true
         @(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force -ErrorAction SilentlyContinue).Count|Should -Be 0
+    }
     }
 
     # Scenario: A failpoint stops rollback after P7 moves the original shared exclude back, while live metadata exactly equals durable observedAfter.
@@ -222,7 +225,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
             (Get-AiInstructionsRefusalCode $result.Output)|Should -Be interrupted-install
             $stashAfter=(@(& git -C $target rev-parse --verify refs/stash)|Select-Object -First 1).Trim()
             $stashAfter|Should -Not -BeExactly $stashBefore
-            $result.Output|Should -Match 'refs/stash changed after the prepared decision|third state'
+            (ConvertTo-P9cTestDiagnosticText $result.Output)|Should -Match 'refs/stash changed after the prepared decision|third state'
         }
     }
 

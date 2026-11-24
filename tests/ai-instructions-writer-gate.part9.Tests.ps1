@@ -2,7 +2,7 @@
 
 Describe 'AI instructions unified repository transaction recovery behaviors' {
     BeforeAll {
-        $shortParent=Join-Path ([IO.Path]::GetTempPath()) 'p7e';New-Item -ItemType Directory -Force -Path $shortParent|Out-Null
+        $shortParent=Get-P7eTestTempRoot
         $script:ExternalRoot=Join-Path $shortParent ([Guid]::NewGuid().ToString('N').Substring(0,8));New-Item -ItemType Directory -Path $script:ExternalRoot|Out-Null
         $script:BootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
         $script:TransactionModulePath=Join-Path $script:RepositoryRoot 'scripts/ai-instructions-install-transaction.psm1'
@@ -268,7 +268,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
 }
 Describe 'install journal serialization formats' {
     BeforeAll {
-        $shortParent=Join-Path ([IO.Path]::GetTempPath()) 'p7e';New-Item -ItemType Directory -Force -Path $shortParent|Out-Null
+        $shortParent=Get-P7eTestTempRoot
         $script:JournalSerializationRoot=Join-Path $shortParent ([Guid]::NewGuid().ToString('N').Substring(0,8));New-Item -ItemType Directory -Path $script:JournalSerializationRoot|Out-Null
         $script:TransactionModulePath=Join-Path $script:RepositoryRoot 'scripts/ai-instructions-install-transaction.psm1'
     }
@@ -284,7 +284,7 @@ Describe 'install journal serialization formats' {
         $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
         try{
             $states=[ordered]@{}
-            $null=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $journal -PlatformOs windows -JournalStoreStates $states
+            $null=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $journal -PlatformOs $script:P7ePlatformOs -JournalStoreStates $states
             [byte[]]$expected=[Text.UTF8Encoding]::new($false).GetBytes((($journal|ConvertTo-Json -Depth 30).Replace("`r`n","`n"))+"`n")
             [byte[]]$actual=[IO.File]::ReadAllBytes((Join-Path $transactionPath 'journal.json'))
             [Convert]::ToBase64String($actual)|Should -BeExactly ([Convert]::ToBase64String($expected))
@@ -294,7 +294,7 @@ Describe 'install journal serialization formats' {
 
 Describe 'repo v2 journal cache conditions' {
     BeforeAll {
-        $shortParent=Join-Path ([IO.Path]::GetTempPath()) 'p7e';New-Item -ItemType Directory -Force -Path $shortParent|Out-Null
+        $shortParent=Get-P7eTestTempRoot
         $script:ExternalRoot=Join-Path $shortParent ([Guid]::NewGuid().ToString('N').Substring(0,8));New-Item -ItemType Directory -Path $script:ExternalRoot|Out-Null
         $script:TransactionModulePath=Join-Path $script:RepositoryRoot 'scripts/ai-instructions-install-transaction.psm1'
         $baseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $script:ExternalRoot 'baseline-work') -ArchivePath (Join-Path $script:ExternalRoot 'baseline.zip') -Marker baseline
@@ -320,13 +320,13 @@ Describe 'repo v2 journal cache conditions' {
         $transactionPath=$transaction[0].FullName;$journalPath=Join-Path $transactionPath 'journal.json'
         $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
         try{
-            $states=[ordered]@{};foreach($leaf in @('journal.json','journal.prev','journal.stage')){$states[$leaf]=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath (Join-Path $transactionPath $leaf) -PlatformOs windows}
+            $states=[ordered]@{};foreach($leaf in @('journal.json','journal.prev','journal.stage')){$states[$leaf]=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath (Join-Path $transactionPath $leaf) -PlatformOs $script:P7ePlatformOs}
             $previous=&$module {param($transactionLease,$transactionId) Read-AiInstructionsInstallJournalLeaf -TransactionLease $transactionLease -Leaf 'journal.json' -TransactionId $transactionId -ExpectedOwnerComponent 'repo-bootstrap'} $lease ([IO.Path]::GetFileName($transactionPath))
             $states.Contains('__repoV2TrustedJournal')|Should -Be $false
             [byte[]]$expectedPrevious=[Text.UTF8Encoding]::new($false).GetBytes(($previous|ConvertTo-Json -Depth 30 -Compress)+"`n")
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))|Should -BeExactly ([Convert]::ToBase64String($expectedPrevious))
             $next=Copy-P9cJournalPreservingStrings $previous;$next.phase='applying'
-            $returned=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $next -PreviousJournal $previous -PlatformOs windows -JournalStoreStates $states
+            $returned=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $next -PreviousJournal $previous -PlatformOs $script:P7ePlatformOs -JournalStoreStates $states
             [byte[]]$expectedNext=[Text.UTF8Encoding]::new($false).GetBytes(($next|ConvertTo-Json -Depth 30 -Compress)+"`n")
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))|Should -BeExactly ([Convert]::ToBase64String($expectedNext))
             [object]::ReferenceEquals($returned,$next)|Should -Be $true
@@ -341,9 +341,9 @@ Describe 'repo v2 journal cache conditions' {
         $transactionPath=$transaction[0].FullName;$journalPath=Join-Path $transactionPath 'journal.json'
         $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
         try{
-            $states=[ordered]@{};foreach($leaf in @('journal.json','journal.prev','journal.stage')){$states[$leaf]=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath (Join-Path $transactionPath $leaf) -PlatformOs windows}
+            $states=[ordered]@{};foreach($leaf in @('journal.json','journal.prev','journal.stage')){$states[$leaf]=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath (Join-Path $transactionPath $leaf) -PlatformOs $script:P7ePlatformOs}
             $previous=&$module {param($transactionLease,$transactionId) Read-AiInstructionsInstallJournalLeaf -TransactionLease $transactionLease -Leaf 'journal.json' -TransactionId $transactionId -ExpectedOwnerComponent 'repo-bootstrap'} $lease ([IO.Path]::GetFileName($transactionPath));$next=Copy-P9cJournalPreservingStrings $previous;$next.phase='applying'
-            $returned=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $next -PreviousJournal $previous -PlatformOs windows -JournalStoreStates $states
+            $returned=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $next -PreviousJournal $previous -PlatformOs $script:P7ePlatformOs -JournalStoreStates $states
             $cache=$states['__repoV2TrustedJournal'];$cache|Should -Not -BeNullOrEmpty
             $cache.trustedJournal|Should -Not -BeNullOrEmpty
             [string]$cache.sha256|Should -Match '^[0-9a-f]{64}$'
@@ -365,12 +365,12 @@ Describe 'repo v2 journal cache conditions' {
         $transactionPath=$transaction[0].FullName;$journalPath=Join-Path $transactionPath 'journal.json'
         $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
         try{
-            $states=[ordered]@{};foreach($leaf in @('journal.json','journal.prev','journal.stage')){$states[$leaf]=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath (Join-Path $transactionPath $leaf) -PlatformOs windows}
+            $states=[ordered]@{};foreach($leaf in @('journal.json','journal.prev','journal.stage')){$states[$leaf]=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath (Join-Path $transactionPath $leaf) -PlatformOs $script:P7ePlatformOs}
             $previous=&$module {param($transactionLease,$transactionId) Read-AiInstructionsInstallJournalLeaf -TransactionLease $transactionLease -Leaf 'journal.json' -TransactionId $transactionId -ExpectedOwnerComponent 'repo-bootstrap'} $lease ([IO.Path]::GetFileName($transactionPath));$applying=Copy-P9cJournalPreservingStrings $previous;$applying.phase='applying'
-            $returned=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $applying -PreviousJournal $previous -PlatformOs windows -JournalStoreStates $states
+            $returned=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $applying -PreviousJournal $previous -PlatformOs $script:P7ePlatformOs -JournalStoreStates $states
             $next=Copy-P9cJournalPreservingStrings $returned;$next.operations[0].state='applied'
             $external=[byte[]](@([IO.File]::ReadAllBytes($journalPath))+[byte][char]' ');[IO.File]::WriteAllBytes($journalPath,$external)
-            {Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $next -PreviousJournal $returned -PlatformOs windows -JournalStoreStates $states}|Should -Throw
+            {Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $next -PreviousJournal $returned -PlatformOs $script:P7ePlatformOs -JournalStoreStates $states}|Should -Throw
             $states.Contains('__repoV2TrustedJournal')|Should -Be $false
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))|Should -BeExactly ([Convert]::ToBase64String($external))
         }finally{$lease.Dispose();Remove-Module $module -Force}
@@ -384,9 +384,9 @@ Describe 'repo v2 journal cache conditions' {
         $transactionPath=$transaction[0].FullName;$journalPath=Join-Path $transactionPath 'journal.json'
         $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
         try{
-            $states=[ordered]@{};foreach($leaf in @('journal.json','journal.prev','journal.stage')){$states[$leaf]=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath (Join-Path $transactionPath $leaf) -PlatformOs windows}
+            $states=[ordered]@{};foreach($leaf in @('journal.json','journal.prev','journal.stage')){$states[$leaf]=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath (Join-Path $transactionPath $leaf) -PlatformOs $script:P7ePlatformOs}
             $previous=&$module {param($transactionLease,$transactionId) Read-AiInstructionsInstallJournalLeaf -TransactionLease $transactionLease -Leaf 'journal.json' -TransactionId $transactionId -ExpectedOwnerComponent 'repo-bootstrap'} $lease ([IO.Path]::GetFileName($transactionPath));$applying=Copy-P9cJournalPreservingStrings $previous;$applying.phase='applying'
-            $returned=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $applying -PreviousJournal $previous -PlatformOs windows -JournalStoreStates $states
+            $returned=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $applying -PreviousJournal $previous -PlatformOs $script:P7ePlatformOs -JournalStoreStates $states
             $next=Copy-P9cJournalPreservingStrings $returned;$next.operations[0].state='applied'
             &$module {param($Path)
                 $script:Fix5gOriginalJournalRead=(Get-Command Read-AiInstructionsInstallJournalLeaf).ScriptBlock;$script:Fix5gJournalPath=$Path
@@ -396,7 +396,7 @@ Describe 'repo v2 journal cache conditions' {
                     &$script:Fix5gOriginalJournalRead @PSBoundParameters
                 }
             } $journalPath
-            {Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $next -PreviousJournal $returned -PlatformOs windows -JournalStoreStates $states}|Should -Throw
+            {Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $next -PreviousJournal $returned -PlatformOs $script:P7ePlatformOs -JournalStoreStates $states}|Should -Throw
             $states.Contains('__repoV2TrustedJournal')|Should -Be $false
         }finally{$lease.Dispose();Remove-Module $module -Force}
     }

@@ -5,6 +5,32 @@ $script:P9cFixedGitDate='2000-01-01T00:00:00+00:00'
 $script:InstallerPath=Join-Path $script:RepositoryRoot 'scripts\install-ai-instructions-bootstrap.ps1'
 Import-Module (Join-Path $script:RepositoryRoot 'scripts\ai-instructions-runtime-contract.psm1') -Force
 
+function Get-P7eTestTempRoot {
+    $full=[IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+    if(-not$IsWindows){
+        $current=[IO.Path]::GetPathRoot($full)
+        foreach($part in $full.Substring($current.Length).Split([char[]]@('/','\'),[StringSplitOptions]::RemoveEmptyEntries)){
+            $item=Get-Item -Force -LiteralPath (Join-Path $current $part)
+            if(($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){
+                $item=$item.ResolveLinkTarget($true)
+                if($null-eq$item){throw 'The test temp root contains an unresolved link.'}
+            }
+            $current=$item.FullName
+        }
+        $full=$current
+    }
+    $root=Join-Path $full 'p7e'
+    New-Item -ItemType Directory -Force -Path $root|Out-Null
+    return $root
+}
+
+function ConvertTo-P9cTestDiagnosticText {
+    param([AllowEmptyString()][string]$Text)
+    $normalized=[regex]::Replace($Text,'\x1B\[[0-?]*[ -/]*[@-~]','')
+    $normalized=[regex]::Replace($normalized,'(?m)\r?\n[ \t]*\|[ \t]*',' ')
+    return [regex]::Replace($normalized,'\s+',' ').Trim()
+}
+
 function New-P7ePrivateDirectory {
     param([Parameter(Mandatory=$true)][string]$Path)
     New-Item -ItemType Directory -Force -Path $Path|Out-Null
@@ -15,8 +41,10 @@ function New-P7ePrivateDirectory {
 Import-Module (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Force
 Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-catalog-contract.psm1') -Force
 Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-source-composition.psm1') -Force
+$script:P7ePlatformCapabilityReceipt=Get-PlatformCapabilities -Required @()
+$script:P7ePlatformOs=[string]$script:P7ePlatformCapabilityReceipt.os
 $script:P7eUnavailableCapability = @(
-    (Get-PlatformCapabilities -Required @()).capabilities |
+    $script:P7ePlatformCapabilityReceipt.capabilities |
         Where-Object { [string]$_.status -cne 'available' } |
         Select-Object -ExpandProperty name
 )[0]
@@ -566,23 +594,30 @@ function Get-P9cPublicationStateSnapshot {
     param([Parameter(Mandatory=$true)][string]$Repository)
     $manifestPath=Join-Path $Repository '.codex/ai-instructions.manifest.json'
     $manifest=if(Test-Path -LiteralPath $manifestPath -PathType Leaf){Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json}else{$null}
-    $indexPath=(& git -C $Repository rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($indexPath)){$indexPath=Join-Path $Repository $indexPath}
-    $excludePath=(& git -C $Repository rev-parse --git-path info/exclude|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($excludePath)){$excludePath=Join-Path $Repository $excludePath}
+    $indexPath=(& git --no-optional-locks -C $Repository rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($indexPath)){$indexPath=Join-Path $Repository $indexPath}
+    $excludePath=(& git --no-optional-locks -C $Repository rev-parse --git-path info/exclude|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($excludePath)){$excludePath=Join-Path $Repository $excludePath}
     $fileRows=@(
         foreach($entry in @($manifest.files|Sort-Object targetPath)){
             $path=Join-Path $Repository ([string]$entry.targetPath)
             "$([string]$entry.artifactType)`t$([string]$entry.targetPath)`t$(if(Test-Path -LiteralPath $path -PathType Leaf){(Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()}else{'absent'})"
         }
     )
-    $headReference=(@(& git -C $Repository symbolic-ref -q HEAD 2>$null)|Select-Object -First 1)
-    $headObject=(@(& git -C $Repository rev-parse --verify HEAD 2>$null)|Select-Object -First 1)
-    $refObject=if([string]::IsNullOrWhiteSpace([string]$headReference)){$null}else{(@(& git -C $Repository rev-parse --verify ([string]$headReference) 2>$null)|Select-Object -First 1)}
+    $headReference=(@(& git --no-optional-locks -C $Repository symbolic-ref -q HEAD 2>$null)|Select-Object -First 1)
+    $headObject=(@(& git --no-optional-locks -C $Repository rev-parse --verify HEAD 2>$null)|Select-Object -First 1)
+    $refObject=if([string]::IsNullOrWhiteSpace([string]$headReference)){$null}else{(@(& git --no-optional-locks -C $Repository rev-parse --verify ([string]$headReference) 2>$null)|Select-Object -First 1)}
     $headMode=if(-not[string]::IsNullOrWhiteSpace([string]$headReference)){if([string]::IsNullOrWhiteSpace([string]$headObject)){'unborn'}else{'symbolic'}}else{'detached'}
-    $headPath=(& git -C $Repository rev-parse --git-path HEAD|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($headPath)){$headPath=Join-Path $Repository $headPath}
-    $indexRows=@(& git -C $Repository ls-files --stage)|Sort-Object -CaseSensitive
+    $headPath=(& git --no-optional-locks -C $Repository rev-parse --git-path HEAD|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($headPath)){$headPath=Join-Path $Repository $headPath}
+    $indexRows=@(& git --no-optional-locks -C $Repository ls-files --stage)|Sort-Object -CaseSensitive
     $indexEntryBytes=[Text.UTF8Encoding]::new($false).GetBytes((($indexRows-join"`n")+"`n"));$sha=[Security.Cryptography.SHA256]::Create();try{$indexEntrySha=([BitConverter]::ToString($sha.ComputeHash($indexEntryBytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
-    $status=(@(& git -C $Repository status --porcelain=v1 --untracked-files=all)-join"`n")
-    $refsWithoutStash=(@(& git -C $Repository for-each-ref '--format=%(refname)%09%(objectname)'|Where-Object{[string]$_-cnotmatch'^refs/stash(?:\s|$)'}|Sort-Object -CaseSensitive)-join"`n")
+    $previousIndexRaw=$null;$indexRaw=$null;$indexStable=$false
+    foreach($attempt in 1..4){
+        $status=(@(& git -C $Repository status --porcelain=v1 --untracked-files=all)-join"`n")
+        $indexRaw=if(Test-Path -LiteralPath $indexPath -PathType Leaf){(Get-FileHash -Algorithm SHA256 -LiteralPath $indexPath).Hash.ToLowerInvariant()}else{'absent'}
+        if($null-ne$previousIndexRaw-and$indexRaw-ceq$previousIndexRaw){$indexStable=$true;break}
+        $previousIndexRaw=$indexRaw
+    }
+    if(-not$indexStable){throw 'Git index stat-cache observation did not stabilize.'}
+    $refsWithoutStash=(@(& git --no-optional-locks -C $Repository for-each-ref '--format=%(refname)%09%(objectname)'|Where-Object{[string]$_-cnotmatch'^refs/stash(?:\s|$)'}|Sort-Object -CaseSensitive)-join"`n")
     $transactionRoot=Get-P9cRepositoryTransactionRoot -Repository $Repository;$transactionResidue=if((Test-Path -LiteralPath $transactionRoot -PathType Container)-and@(Get-ChildItem -Force -LiteralPath $transactionRoot).Count-gt0){Get-P7eTreeSnapshot $transactionRoot}else{''}
     return ([ordered]@{
         headMode=$headMode
@@ -590,7 +625,7 @@ function Get-P9cPublicationStateSnapshot {
         headObject=if([string]::IsNullOrWhiteSpace([string]$headObject)){$null}else{[string]$headObject.Trim()}
         headRaw=(Get-FileHash -Algorithm SHA256 -LiteralPath $headPath).Hash.ToLowerInvariant()
         refObject=if([string]::IsNullOrWhiteSpace([string]$refObject)){$null}else{[string]$refObject.Trim()}
-        indexRaw=if(Test-Path -LiteralPath $indexPath -PathType Leaf){(Get-FileHash -Algorithm SHA256 -LiteralPath $indexPath).Hash.ToLowerInvariant()}else{'absent'}
+        indexRaw=$indexRaw
         indexEntrySet=$indexEntrySha
         status=$status
         refsWithoutStash=$refsWithoutStash
@@ -881,7 +916,7 @@ function Invoke-P9cJournalDurabilityRecoveryMatrix {
         if($case.Expected-ceq'refused'){
             $observation.ResidueCount|Should -Be 1
             $observation.RefusalCode|Should -Be interrupted-install
-            $observation.RecoveryOutput|Should -Match '(?s)no readable journal.*index\.lock|index\.lock.*no readable journal'
+            (ConvertTo-P9cTestDiagnosticText $observation.RecoveryOutput)|Should -Match 'no readable journal.*index\.lock|index\.lock.*no readable journal'
             $observation.JournalExistsAfterRecovery|Should -Be $false
             $observation.StageExistsAfterRecovery|Should -Be $true
             $observation.IndexLockExistsAfterRecovery|Should -Be $true

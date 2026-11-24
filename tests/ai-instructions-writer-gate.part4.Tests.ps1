@@ -3,7 +3,7 @@
 
 Describe 'AI instructions unified repository transaction recovery behaviors' {
     BeforeAll {
-        $shortParent=Join-Path ([IO.Path]::GetTempPath()) 'p7e';New-Item -ItemType Directory -Force -Path $shortParent|Out-Null
+        $shortParent=Get-P7eTestTempRoot
         $script:ExternalRoot=Join-Path $shortParent ([Guid]::NewGuid().ToString('N').Substring(0,8));New-Item -ItemType Directory -Path $script:ExternalRoot|Out-Null
         $script:BootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
         $script:TransactionModulePath=Join-Path $script:RepositoryRoot 'scripts/ai-instructions-install-transaction.psm1'
@@ -285,6 +285,8 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         Test-Path -LiteralPath $scenario.journalPath -PathType Leaf|Should -Be $true
     }
 
+    # Register only on Windows because this case mutates the Windows ReadOnly attribute; Unix permission drift is covered by InterT168 and must remain fail-closed.
+    if($IsWindows){
     # Scenario: A Windows create-file publication is interrupted after mutation but before the applied journal generation binds observedAfter.
     # Purpose: Keep the documented crash window recoverable by comparing bytes and identity only when observedAfter is still null.
     It 'InterT169_undoes_a_file_when_observedAfter_is_empty_in_the_post_mutation_window' {
@@ -307,5 +309,6 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
         Test-Path -LiteralPath $createdPath|Should -Be $false
         @(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force -ErrorAction SilentlyContinue).Count|Should -Be 0
+    }
     }
 }
