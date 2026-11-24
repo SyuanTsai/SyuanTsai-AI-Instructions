@@ -623,6 +623,20 @@ jobs:
         Assert-Match $unix 'timeout-minutes: 90' 'Unix Core per-file execution must have a bounded timeout.'
         Assert-Match $unix 'failedTests' 'Unix Core summaries must record failing test names.'
         Assert-NotMatch $unix 'continue-on-error|name: Windows Core|name: Windows Install Smoke|name: Consumer transition probe aggregate' 'Unix Core must not soften failures or collide with required check names.'
+        $unixArtifactStructure = Get-GitHubArtifactWorkflowStructure -WorkflowText $unix
+        Assert-Equal @($unixArtifactStructure.Uploads).Count 4 'Unix Core must retain plan, authority, per-file and aggregate artifact uploads.'
+        Assert-Equal @($unixArtifactStructure.Downloads).Count 3 'Unix Core aggregate must consume plan, authority and per-file artifacts.'
+        foreach ($upload in @($unixArtifactStructure.Uploads)) {
+            Assert-True $upload.Name.Contains('${{ github.run_attempt }}') "Unix Core artifact '$($upload.Name)' must bind the current workflow attempt."
+        }
+        foreach ($download in @($unixArtifactStructure.Downloads)) {
+            Assert-True $download.Selector.Contains('${{ github.run_attempt }}') "Unix Core artifact selector '$($download.Selector)' must bind the current workflow attempt."
+        }
+        Assert-Match $unix '\[string\]\$plan\.runId -cne \[string\]\$env:GITHUB_RUN_ID -or \[int\]\$plan\.runAttempt -ne \[int\]\$env:GITHUB_RUN_ATTEMPT' 'Unix Core aggregate must bind plan evidence to the exact current attempt.'
+        Assert-Match $unix '\[int\]\$summary\.runAttempt -ne \[int\]\$env:GITHUB_RUN_ATTEMPT' 'Unix Core aggregate must reject a per-file summary from another attempt.'
+        Assert-Match $unix '\[int\]\$authorityIdentity\.runAttempt -ne \[int\]\$env:GITHUB_RUN_ATTEMPT' 'Unix Core aggregate must bind authority evidence to the exact current attempt.'
+        Assert-Match $unix 'SYP_PESTER_RESULT: \$\{\{ needs\.pester\.result \}\}' 'Unix Core aggregate must receive the upstream per-file matrix result.'
+        Assert-Match $unix 'upstream ''\$\(\$upstreamJob\.name\)'' result must be success' 'Unix Core aggregate must fail when any upstream job is not successful.'
     }
 
     # Scenario: One complete-file required workflow invariant is tampered with in a TestDrive copy.
@@ -807,9 +821,11 @@ jobs:
         $unixAdoptedDiagnostics = (Get-PesterExecutorFunction -Name 'Get-PesterShardUnixAdoptedProcessDiagnostics').ToString()
         Assert-Equal ([regex]::Matches($executor, '/proc').Count) 2 'The executor may reference /proc only for the bounded adopted-child diagnostic probe.'
         Assert-Equal ([regex]::Matches($unixAdoptedDiagnostics, '/proc').Count) 2 'Both reviewed /proc references must remain inside the adopted-child diagnostic function.'
-        Assert-Match $executor 'ReadAllBytes\("/proc/\$processId/cmdline"\)' 'Linux adopted-child diagnostics must read the attributed PID command line without adding a process-discovery backend.'
-        Assert-Match $executor '\$bytes\.Length -gt 4096' 'Linux adopted-child command-line evidence must remain bounded.'
-        Assert-Match $executor 'ConvertTo-PesterShardSanitizedDiagnosticText \$commandLine' 'Linux adopted-child command-line evidence must use the standard diagnostic sanitizer.'
+        Assert-NotMatch $unixAdoptedDiagnostics 'ReadAllBytes|\$matches\b|commandLineAvailable|commandLine\s*=' 'Linux adopted-child diagnostics must neither read an unbounded argv nor shadow the automatic Matches variable nor store argument values.'
+        Assert-Match $unixAdoptedDiagnostics '\[byte\[\]\]::new\(4097\)' 'Linux adopted-child diagnostics must bound the actual proc read to one byte beyond the retained limit.'
+        Assert-Match $unixAdoptedDiagnostics '\$stream\.Read\(\$buffer, \$totalRead, \$buffer\.Length - \$totalRead\)' 'Linux adopted-child diagnostics must use the bounded buffer for every read.'
+        Assert-Match $unixAdoptedDiagnostics 'ConvertTo-PesterShardSanitizedDiagnosticText \$executable' 'Linux adopted-child diagnostics must sanitize the only retained argv value.'
+        Assert-Match $unixAdoptedDiagnostics 'argumentCountAvailable = \$argumentCountAvailable\s+argumentCount = \$argumentCount\s+inputTruncated = \$inputTruncated' 'Linux adopted-child diagnostics must retain only executable metadata, an argument count and truncation state.'
         Assert-Match $smoke 'update-skills-catalog-lock\.ps1 -Check' 'Install Smoke must absorb production lock validation.'
         Assert-Match $smoke 'test-syp101-production-smoke\.ps1' 'Install Smoke must keep the real pinned-archive installation and idempotence exercise.'
 

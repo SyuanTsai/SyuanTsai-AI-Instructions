@@ -301,31 +301,75 @@ function Get-PesterShardUnixAdoptedProcessDiagnostics {
     param([AllowNull()]$Cleanup)
 
     $rows = [Collections.Generic.List[object]]::new()
-    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -or $null -eq $Cleanup) {
-        return $rows.ToArray()
-    }
-    $matches = [regex]::Matches([string]$Cleanup.Uncertainty, '(?:^|;\s*)unattributed-adopted-child:\s*(?<pid>[1-9][0-9]*)')
-    foreach ($match in $matches) {
-        $processId = [int]$match.Groups['pid'].Value
-        $commandLine = $null
-        $available = $false
-        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix -and (Test-Path -LiteralPath '/proc')) {
-            try {
-                $bytes = [IO.File]::ReadAllBytes("/proc/$processId/cmdline")
-                $truncated = $bytes.Length -gt 4096
-                if ($truncated) { $bytes = $bytes[0..4095] }
-                $commandLine = [Text.UTF8Encoding]::new($false,$false).GetString($bytes).Replace([char]0,' ').Trim()
-                $commandLine = ConvertTo-PesterShardSanitizedDiagnosticText $commandLine
-                if ($truncated) { $commandLine += ' [truncated]' }
-                $available = -not [string]::IsNullOrWhiteSpace($commandLine)
-            }
-            catch { $available = $false; $commandLine = $null }
+    try {
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -or $null -eq $Cleanup) {
+            return $rows.ToArray()
         }
-        $rows.Add([pscustomobject][ordered]@{
-            pid = $processId
-            commandLineAvailable = $available
-            commandLine = $commandLine
-        })
+        $adoptedChildMatches = [regex]::Matches([string]$Cleanup.Uncertainty, '(?:^|;\s*)unattributed-adopted-child:\s*(?<pid>[1-9][0-9]*)')
+        foreach ($adoptedChildMatch in $adoptedChildMatches) {
+            $processId = 0
+            if (-not [int]::TryParse($adoptedChildMatch.Groups['pid'].Value, [ref]$processId)) { continue }
+            $executable = $null
+            $executableAvailable = $false
+            $argumentCount = $null
+            $argumentCountAvailable = $false
+            $inputTruncated = $false
+            if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix -and (Test-Path -LiteralPath '/proc')) {
+                try {
+                    $buffer = [byte[]]::new(4097)
+                    $totalRead = 0
+                    $stream = [IO.File]::Open("/proc/$processId/cmdline", [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+                    try {
+                        while ($totalRead -lt $buffer.Length) {
+                            $readCount = $stream.Read($buffer, $totalRead, $buffer.Length - $totalRead)
+                            if ($readCount -le 0) { break }
+                            $totalRead += $readCount
+                        }
+                    }
+                    finally { $stream.Dispose() }
+                    $inputTruncated = $totalRead -gt 4096
+                    $capturedLength = [Math]::Min($totalRead, 4096)
+                    $executableEnd = -1
+                    $terminatorCount = 0
+                    for ($index = 0; $index -lt $capturedLength; $index++) {
+                        if ($buffer[$index] -eq 0) {
+                            $terminatorCount++
+                            if ($executableEnd -lt 0) { $executableEnd = $index }
+                        }
+                    }
+                    if ($executableEnd -lt 0 -and -not $inputTruncated) { $executableEnd = $capturedLength }
+                    if ($executableEnd -ge 0) {
+                        $executableBytes = [byte[]]::new($executableEnd)
+                        if ($executableEnd -gt 0) { [Array]::Copy($buffer, 0, $executableBytes, 0, $executableEnd) }
+                        $executable = [Text.UTF8Encoding]::new($false,$false).GetString($executableBytes)
+                        $executable = ConvertTo-PesterShardSanitizedDiagnosticText $executable
+                        if ($executable.Length -gt 1024) { $executable = $executable.Substring(0,1024) + '...' }
+                        $executableAvailable = -not [string]::IsNullOrWhiteSpace($executable)
+                    }
+                    if (-not $inputTruncated) {
+                        $argumentCount = [Math]::Max(0, $terminatorCount - 1)
+                        $argumentCountAvailable = $true
+                    }
+                }
+                catch {
+                    $executable = $null
+                    $executableAvailable = $false
+                    $argumentCount = $null
+                    $argumentCountAvailable = $false
+                }
+            }
+            $rows.Add([pscustomobject][ordered]@{
+                pid = $processId
+                executableAvailable = $executableAvailable
+                executable = $executable
+                argumentCountAvailable = $argumentCountAvailable
+                argumentCount = $argumentCount
+                inputTruncated = $inputTruncated
+            })
+        }
+    }
+    catch {
+        # Diagnostics must never replace the shard result or its cleanup evidence.
     }
     return $rows.ToArray()
 }

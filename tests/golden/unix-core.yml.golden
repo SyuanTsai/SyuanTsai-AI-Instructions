@@ -119,7 +119,7 @@ jobs:
       - name: Upload Unix Core plan
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: unix-core-plan-${{ github.run_id }}
+          name: unix-core-plan-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/unix-core-plan/plan.json
             ${{ runner.temp }}/unix-core-plan/plan.sha256
@@ -188,6 +188,15 @@ jobs:
             -AuthorityRoot $candidateRoot -CandidateRevision $revision -AuthorityRevision $revision `
             -EventName $env:GITHUB_EVENT_NAME -ResultArtifact "unix-core-$($env:SYP_UNIX_PLATFORM)/authority-result.json"
           if (-not $?) { throw 'Standard v1 authority gate failed.' }
+          $authorityRoot = Join-Path $env:RUNNER_TEMP "unix-core-$env:SYP_UNIX_PLATFORM"
+          $authorityResultPath = Join-Path $authorityRoot 'authority-result.json'
+          $authorityIdentity = [pscustomobject][ordered]@{
+            schemaVersion = 1
+            runId = [string]$env:GITHUB_RUN_ID
+            runAttempt = [int]$env:GITHUB_RUN_ATTEMPT
+            authoritySha256 = (Get-FileHash -LiteralPath $authorityResultPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+          [IO.File]::WriteAllText((Join-Path $authorityRoot 'authority-identity.json'), ($authorityIdentity | ConvertTo-Json -Compress) + "`n", [Text.UTF8Encoding]::new($false))
         env:
           SYP_UNIX_PLATFORM: ${{ matrix.platform }}
 
@@ -195,8 +204,10 @@ jobs:
         if: always() && !cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: unix-core-authority-${{ matrix.platform }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/unix-core-${{ matrix.platform }}/authority-result.json
+          name: unix-core-authority-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/unix-core-${{ matrix.platform }}/authority-result.json
+            ${{ runner.temp }}/unix-core-${{ matrix.platform }}/authority-identity.json
           if-no-files-found: error
           retention-days: 30
           overwrite: true
@@ -326,7 +337,7 @@ jobs:
         if: always() && !cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: unix-core-${{ matrix.platform }}-file-${{ matrix.id }}-${{ github.run_id }}
+          name: unix-core-${{ matrix.platform }}-file-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/unix-core-file-${{ matrix.id }}
           if-no-files-found: error
           retention-days: 30
@@ -377,21 +388,24 @@ jobs:
           sha256: ${{ matrix.sha256 }}
 
       - name: Download Unix Core plan
+        if: needs.plan.result == 'success'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: unix-core-plan-${{ github.run_id }}
+          name: unix-core-plan-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/unix-core-aggregate/plan
 
       - name: Download Unix Core per-file evidence
+        if: needs.pester.result == 'success'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: unix-core-${{ matrix.platform }}-file-*-${{ github.run_id }}
+          pattern: unix-core-${{ matrix.platform }}-file-*-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/unix-core-aggregate/files
 
       - name: Download Unix Core authority evidence
+        if: needs.authority.result == 'success'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: unix-core-authority-${{ matrix.platform }}-${{ github.run_id }}
+          name: unix-core-authority-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/unix-core-aggregate/authority
 
       - name: Assert the Unix Core aggregate
@@ -399,11 +413,21 @@ jobs:
         env:
           SYP_UNIX_PLATFORM: ${{ matrix.platform }}
           SYP_EXPECTED_PLAN_SHA256: ${{ needs.plan.outputs.planSha256 }}
+          SYP_PLAN_RESULT: ${{ needs.plan.result }}
+          SYP_AUTHORITY_RESULT: ${{ needs.authority.result }}
+          SYP_PESTER_RESULT: ${{ needs.pester.result }}
         run: |
           $ErrorActionPreference = 'Stop'
           $aggregateRoot = Join-Path $env:RUNNER_TEMP 'unix-core-aggregate'
           $resultPath = Join-Path $aggregateRoot 'aggregate-result.json'
           try {
+            foreach ($upstreamJob in @(
+              [pscustomobject]@{name='plan';result=$env:SYP_PLAN_RESULT},
+              [pscustomobject]@{name='authority';result=$env:SYP_AUTHORITY_RESULT},
+              [pscustomobject]@{name='pester';result=$env:SYP_PESTER_RESULT}
+            )) {
+              if ([string]$upstreamJob.result -cne 'success') { throw "Unix Core upstream '$($upstreamJob.name)' result must be success; got '$($upstreamJob.result)'." }
+            }
             $planPath = Join-Path $aggregateRoot 'plan/plan.json'
             $hashPath = Join-Path $aggregateRoot 'plan/plan.sha256'
             $planJson = (Get-Content -Raw -Encoding UTF8 -LiteralPath $planPath).TrimEnd("`r","`n")
@@ -411,6 +435,9 @@ jobs:
             $artifactHash = (Get-Content -Raw -Encoding UTF8 -LiteralPath $hashPath).Trim()
             if ($actualHash -cne $artifactHash -or $actualHash -cne $env:SYP_EXPECTED_PLAN_SHA256) { throw 'Unix Core plan SHA-256 evidence differs.' }
             $plan = $planJson | ConvertFrom-Json
+            if ([string]$plan.runId -cne [string]$env:GITHUB_RUN_ID -or [int]$plan.runAttempt -ne [int]$env:GITHUB_RUN_ATTEMPT) {
+              throw 'Unix Core plan evidence does not equal the current workflow run attempt.'
+            }
             $expectedEntries = @($plan.entries | Where-Object platform -ceq $env:SYP_UNIX_PLATFORM)
             $summaryFiles = @(Get-ChildItem -LiteralPath (Join-Path $aggregateRoot 'files') -Filter 'summary.json' -File -Recurse)
             if ($summaryFiles.Count -ne $expectedEntries.Count) { throw "Expected $($expectedEntries.Count) per-file summaries; found $($summaryFiles.Count)." }
@@ -426,6 +453,7 @@ jobs:
               $file = [string]$summary.file
               if (-not $expectedByFile.ContainsKey($file) -or -not $observedFiles.Add($file)) { throw "Unexpected or duplicate per-file summary '$file'." }
               if ([string]$summary.platform -cne $env:SYP_UNIX_PLATFORM -or [string]$summary.runId -cne [string]$env:GITHUB_RUN_ID -or
+                  [int]$summary.runAttempt -ne [int]$env:GITHUB_RUN_ATTEMPT -or
                   [string]$summary.status -cne 'passed' -or [string]$summary.executorOutcome -cne 'success') { throw "Per-file summary '$file' did not pass." }
               $expectedSkips = [string[]]@([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$expectedByFile[$file].skipsBase64)) | ConvertFrom-Json)
               $expectedSkips = [string[]]@($expectedSkips | Sort-Object -CaseSensitive)
@@ -440,8 +468,18 @@ jobs:
             if ($authorityFiles.Count -ne 1) { throw "Expected one authority result; found $($authorityFiles.Count)." }
             $authority = Get-Content -Raw -Encoding UTF8 -LiteralPath $authorityFiles[0].FullName | ConvertFrom-Json
             if ([string]$authority.status -cne 'passed' -or $authority.executed -ne $true) { throw 'Unix Core authority evidence did not pass.' }
+            $authorityIdentityFiles = @(Get-ChildItem -LiteralPath (Join-Path $aggregateRoot 'authority') -Filter 'authority-identity.json' -File -Recurse)
+            if ($authorityIdentityFiles.Count -ne 1) { throw "Expected one authority identity; found $($authorityIdentityFiles.Count)." }
+            $authorityIdentity = Get-Content -Raw -Encoding UTF8 -LiteralPath $authorityIdentityFiles[0].FullName | ConvertFrom-Json
+            $authoritySha256 = (Get-FileHash -LiteralPath $authorityFiles[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ([string]$authorityIdentity.runId -cne [string]$env:GITHUB_RUN_ID -or
+                [int]$authorityIdentity.runAttempt -ne [int]$env:GITHUB_RUN_ATTEMPT -or
+                [string]$authorityIdentity.authoritySha256 -cne $authoritySha256) {
+              throw 'Unix Core authority evidence does not equal the current workflow run attempt.'
+            }
             $aggregate = [pscustomobject][ordered]@{
               schemaVersion=1; status='passed'; platform=$env:SYP_UNIX_PLATFORM; planSha256=$actualHash
+              runId=[string]$env:GITHUB_RUN_ID; runAttempt=[int]$env:GITHUB_RUN_ATTEMPT
               fileCount=$observedFiles.Count; passed=$passed; failed=$failed; skipped=$skipped
             }
             [IO.File]::WriteAllText($resultPath, ($aggregate | ConvertTo-Json -Depth 6) + "`n", [Text.UTF8Encoding]::new($false))
@@ -458,7 +496,7 @@ jobs:
         if: always() && !cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: unix-core-${{ matrix.platform }}-aggregate-${{ github.run_id }}
+          name: unix-core-${{ matrix.platform }}-aggregate-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/unix-core-aggregate/aggregate-result.json
           if-no-files-found: error
           retention-days: 30
