@@ -4342,21 +4342,26 @@ exec __REAL_GIT__ "$@"
         $LASTEXITCODE|Should Be 0
     }
 
-    # Scenario: The renderer sees an invalid template cardinality or an unsupported platform/path receipt.
-    # Purpose: Fail closed before desired-state or installer bytes can be planned from an ambiguous authority.
+    # Scenario: The renderer sees invalid complete {{...}} template tokens or an unsupported platform/path receipt.
+    # Purpose: Fail closed before desired-state or installer bytes can be planned from an ambiguous authority; an unclosed {{ is not a token boundary.
     It 'UnitT234b_rejects_malformed_bootstrap_templates_and_unverified_Unix_paths' -TestCases @(
-        @{Name='no placeholder';Template="## Repository Instructions Bootstrap`n`n- missing`n";Os='windows';Path='C:\pwsh.exe';Status='available'},
-        @{Name='two placeholders';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}} {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n";Os='windows';Path='C:\pwsh.exe';Status='available'},
-        @{Name='unknown placeholder';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_UNKNOWN_PLACEHOLDER}}`n";Os='windows';Path='C:\pwsh.exe';Status='available'},
-        @{Name='relative Unix path';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n";Os='linux';Path='shadow/pwsh';Status='available'},
-        @{Name='Unix path differs from physical verification evidence';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n";Os='linux';Path='/tmp/path-shadow/pwsh';EvidencePath='/opt/verified/pwsh';Status='available'},
-        @{Name='unverified Unix receipt path';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n";Os='linux';Path='/tmp/path-shadow/pwsh';Status='unavailable'}
+        @{Name='no placeholder';Template="## Repository Instructions Bootstrap`n`n- missing`n";Os='windows';Path='C:\pwsh.exe';Status='available';Code='projection-runtime-unavailable'},
+        @{Name='two placeholders';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}} {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n";Os='windows';Path='C:\pwsh.exe';Status='available';Code='projection-runtime-unavailable'},
+        @{Name='unknown placeholder';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_UNKNOWN_PLACEHOLDER}}`n";Os='windows';Path='C:\pwsh.exe';Status='available';Code='projection-runtime-unavailable'},
+        @{Name='valid plus lower-case unknown';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}} {{unexpected_placeholder}}`n";Os='windows';Path='C:\pwsh.exe';Status='available';Code='projection-runtime-unavailable'},
+        @{Name='valid plus spaced unknown';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}} {{ AI_X }}`n";Os='windows';Path='C:\pwsh.exe';Status='available';Code='projection-runtime-unavailable'},
+        @{Name='relative Unix path';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n";Os='linux';Path='shadow/pwsh';Status='available';Code='capability-unavailable'},
+        @{Name='Unix path differs from physical verification evidence';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n";Os='linux';Path='/tmp/path-shadow/pwsh';EvidencePath='/opt/verified/pwsh';Status='available';Code='capability-unavailable'},
+        @{Name='unverified Unix receipt path';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n";Os='linux';Path='/tmp/path-shadow/pwsh';Status='unavailable';Code='capability-unavailable'},
+        @{Name='Unix path contains Markdown backtick';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n";Os='linux';Path='/opt/pw`sh/pwsh';Status='available';Code='capability-unavailable'}
     ) {
-        param($Name,$Template,$Os,$Path,$Status,$EvidencePath)
+        param($Name,$Template,$Os,$Path,$Status,$EvidencePath,$Code)
         if([string]::IsNullOrWhiteSpace([string]$EvidencePath)){$EvidencePath=$Path}
         $receipt=[pscustomobject]@{os=$Os;runtime=[pscustomobject]@{powerShellExecutablePath=$Path};capabilities=@([pscustomobject]@{name='powershell-runtime';status=$Status;evidence=@("Physical pwsh identity and version probe passed: $EvidencePath")})}
         [byte[]]$bytes=[Text.UTF8Encoding]::new($false).GetBytes($Template)
-        (Get-RuntimeContractError {Get-AiInstructionsBootstrapSectionBytes -TemplateBytes $bytes -CapabilityReceipt $receipt|Out-Null})|Should Match 'bootstrap|placeholder|absolute|capability|verify'
+        $error=Get-RuntimeContractError {Get-AiInstructionsBootstrapSectionBytes -TemplateBytes $bytes -CapabilityReceipt $receipt|Out-Null}
+        $error|Should Match 'bootstrap|placeholder|absolute|capability|verify'
+        $error|Should Match "ai-instructions-refusal-code=$Code"
     }
 
     # Scenario: The verified Unix pwsh receipt changes to a different canonical physical path.

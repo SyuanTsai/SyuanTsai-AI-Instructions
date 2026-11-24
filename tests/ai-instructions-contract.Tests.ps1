@@ -555,12 +555,14 @@ function New-AiInstructionFixture {
         $invalid.Output|Should Match 'BootstrapSectionAuthorityInvalid'
     }
 
-    # Scenario: The bootstrap authority omits, duplicates, or substitutes the single renderer placeholder.
-    # Purpose: Keep the generated installer bound to one deterministic pwsh invocation substitution point.
+    # Scenario: The bootstrap authority omits, duplicates, substitutes, or adds another complete {{...}} token beside the renderer placeholder.
+    # Purpose: Keep the generated installer bound to one deterministic pwsh invocation substitution point; an unclosed {{ is not a token boundary.
     It 'InterT15c_rejects_a_missing_duplicate_or_unknown_bootstrap_invocation_placeholder' -TestCases @(
         @{Name='missing';Body="- no renderer placeholder`n"},
         @{Name='duplicate';Body="- {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n"},
-        @{Name='unknown';Body="- {{AI_INSTRUCTIONS_UNKNOWN_PLACEHOLDER}}`n"}
+        @{Name='unknown';Body="- {{AI_INSTRUCTIONS_UNKNOWN_PLACEHOLDER}}`n"},
+        @{Name='valid plus lower-case unknown';Body="- {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n- {{unexpected_placeholder}}`n"},
+        @{Name='valid plus spaced unknown';Body="- {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n- {{ AI_X }}`n"}
     ) {
         param($Name,$Body)
         $root=New-AiInstructionFixture -Name "bootstrap-placeholder-$Name" -IncludeOutputs

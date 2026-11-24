@@ -520,7 +520,8 @@ function Get-AiInstructionsBootstrapSectionBytes {
         throw (New-AiInstructionsRefusalException -Code projection-runtime-unavailable -Message 'The bootstrap section template must use canonical UTF-8/LF bytes, the managed heading, and one trailing LF.')
     }
     $knownMatches = [regex]::Matches($templateText,[regex]::Escape($script:AiInstructionsBootstrapInvocationPlaceholder))
-    $allMatches = [regex]::Matches($templateText,'\{\{[A-Z][A-Z0-9_]*\}\}')
+    # A token is any complete {{...}} pair, including non-standard content; an unclosed {{ is plain text.
+    $allMatches = [regex]::Matches($templateText,'\{\{[\s\S]*?\}\}')
     if ($knownMatches.Count -ne 1 -or $allMatches.Count -ne 1 -or
         [string]$allMatches[0].Value -cne $script:AiInstructionsBootstrapInvocationPlaceholder) {
         throw (New-AiInstructionsRefusalException -Code projection-runtime-unavailable -Message "The bootstrap section template must contain exactly one '$script:AiInstructionsBootstrapInvocationPlaceholder' placeholder and no unknown placeholders.")
@@ -555,6 +556,7 @@ function Get-AiInstructionsBootstrapSectionBytes {
         }
         if (-not $powerShellPath.StartsWith('/',[StringComparison]::Ordinal) -or
             $powerShellPath.Contains("`0") -or $powerShellPath.Contains("`r") -or $powerShellPath.Contains("`n") -or
+            $powerShellPath.Contains('`') -or
             $powerShellPath.EndsWith('/',[StringComparison]::Ordinal) -or
             @($powerShellPath.Split('/') | Where-Object { $_ -in @('.','..') }).Count -gt 0) {
             throw (New-AiInstructionsRefusalException -Code capability-unavailable -Message 'The verified Unix pwsh executable path must be an absolute canonical physical path.')
