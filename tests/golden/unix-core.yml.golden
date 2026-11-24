@@ -1,0 +1,509 @@
+name: Unix Core (non-required)
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: unix-core-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Unix Core plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      planSha256: ${{ steps.plan.outputs.planSha256 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup verified PowerShell
+        uses: ./.github/actions/setup-unix-core-pwsh
+        with:
+          asset: powershell-7.6.6-linux-x64.tar.gz
+          sha256: DDBC4A2D113BBD46D283CFEDCBCD117A70CAEFD7673F41F2B4E0000BADF103BC
+
+      - name: Calculate the Unix Core plan
+        id: plan
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./scripts/Get-WindowsCorePlan.ps1 -DefineFunctionsOnly
+          $windowsPlan = Get-WindowsCorePlan -Root (Get-Location).Path `
+            -ShardWeightsPath (Resolve-Path './tests/windows-core-shard-weights.json').Path `
+            -WorkflowRunId $env:GITHUB_RUN_ID -WorkflowRunAttempt ([int]$env:GITHUB_RUN_ATTEMPT)
+          $inventory = Get-Content -Raw -Encoding UTF8 './docs/standards/core-test-skip-inventory.json' | ConvertFrom-Json
+          $platforms = @(
+            [pscustomobject][ordered]@{
+              id='linux'; display='Linux'; runner='ubuntu-latest'
+              asset='powershell-7.6.6-linux-x64.tar.gz'
+              sha256='DDBC4A2D113BBD46D283CFEDCBCD117A70CAEFD7673F41F2B4E0000BADF103BC'
+            },
+            [pscustomobject][ordered]@{
+              id='macos'; display='macOS'; runner='macos-latest'
+              asset='powershell-7.6.6-osx-arm64.tar.gz'
+              sha256='6DF833D094EBAC1C1A74340D7B3437F4AAF5E03CE640484A1C4359F3CE8B3DB1'
+            }
+          )
+          $selectedFiles = [string[]]@($windowsPlan.Plan.selectedTestFiles)
+          $selectedSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+          foreach ($file in $selectedFiles) { [void]$selectedSet.Add($file) }
+          $entries = [Collections.Generic.List[object]]::new()
+          $entryIndex = 0
+          foreach ($platform in $platforms) {
+            $expectedSkips = [string[]]@($inventory.platforms.($platform.id).expectedSkippedTests)
+            if (@($expectedSkips | Select-Object -Unique).Count -ne $expectedSkips.Count) {
+              throw "Unix Core $($platform.id) skip inventory contains duplicates."
+            }
+            foreach ($skip in $expectedSkips) {
+              if ($skip -notmatch '^[^:/\\]+\.Tests\.ps1::\S.+$') { throw "Invalid Unix Core skip identifier '$skip'." }
+              if (-not $selectedSet.Contains(($skip -split '::',2)[0])) { throw "Unix Core skip is outside the retained plan: '$skip'." }
+            }
+            foreach ($file in $selectedFiles) {
+              $entryIndex++
+              $fileSkips = [string[]]@($expectedSkips | Where-Object { ($_ -split '::',2)[0] -ceq $file } | Sort-Object -CaseSensitive)
+              $skipJson = ConvertTo-Json -InputObject $fileSkips -Compress
+              $entries.Add([pscustomobject][ordered]@{
+                id = '{0:D3}' -f $entryIndex
+                platform = $platform.id
+                display = $platform.display
+                runner = $platform.runner
+                asset = $platform.asset
+                sha256 = $platform.sha256
+                file = $file
+                skipsBase64 = [Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes($skipJson))
+              })
+            }
+          }
+          if ($entries.Count -ne (2 * $selectedFiles.Count) -or $entries.Count -gt 256) {
+            throw "Unix Core matrix must contain exactly two entries per retained file and remain within the GitHub matrix bound; got $($entries.Count)."
+          }
+          $plan = [pscustomobject][ordered]@{
+            schemaVersion = 1
+            runId = [string]$env:GITHUB_RUN_ID
+            runAttempt = [int]$env:GITHUB_RUN_ATTEMPT
+            windowsPlanSha256 = [string]$windowsPlan.PlanSha256
+            authorityTestFiles = [string[]]$windowsPlan.Plan.authorityTestFiles
+            selectedTestFiles = $selectedFiles
+            platforms = $platforms
+            entries = $entries.ToArray()
+          }
+          $planJson = ConvertTo-Json -InputObject $plan -Depth 12 -Compress
+          $sha = [Security.Cryptography.SHA256]::HashData([Text.UTF8Encoding]::new($false).GetBytes($planJson))
+          $planSha256 = [Convert]::ToHexString($sha).ToLowerInvariant()
+          $planRoot = Join-Path $env:RUNNER_TEMP 'unix-core-plan'
+          [IO.Directory]::CreateDirectory($planRoot) | Out-Null
+          [IO.File]::WriteAllText((Join-Path $planRoot 'plan.json'), $planJson + "`n", [Text.UTF8Encoding]::new($false))
+          [IO.File]::WriteAllText((Join-Path $planRoot 'plan.sha256'), $planSha256 + "`n", [Text.UTF8Encoding]::new($false))
+          $matrixJson = ConvertTo-Json -InputObject ([pscustomobject]@{include=$entries.ToArray()}) -Depth 8 -Compress
+          $delimiter = 'SYP517_' + [Guid]::NewGuid().ToString('N')
+          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "matrix<<$delimiter`n$matrixJson`n$delimiter`nplanSha256=$planSha256`n", [Text.UTF8Encoding]::new($false))
+          [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "### Unix Core plan`n`n- Per-platform files: $($selectedFiles.Count)`n- Matrix jobs: $($entries.Count)`n- SHA-256: ``$planSha256```n", [Text.UTF8Encoding]::new($false))
+
+      - name: Upload Unix Core plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: unix-core-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/unix-core-plan/plan.json
+            ${{ runner.temp }}/unix-core-plan/plan.sha256
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  authority:
+    name: ${{ matrix.display }} Core authority
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            display: Linux
+            runner: ubuntu-latest
+            asset: powershell-7.6.6-linux-x64.tar.gz
+            sha256: DDBC4A2D113BBD46D283CFEDCBCD117A70CAEFD7673F41F2B4E0000BADF103BC
+          - platform: macos
+            display: macOS
+            runner: macos-latest
+            asset: powershell-7.6.6-osx-arm64.tar.gz
+            sha256: 6DF833D094EBAC1C1A74340D7B3437F4AAF5E03CE640484A1C4359F3CE8B3DB1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup verified PowerShell
+        uses: ./.github/actions/setup-unix-core-pwsh
+        with:
+          asset: ${{ matrix.asset }}
+          sha256: ${{ matrix.sha256 }}
+
+      - name: Ensure Pester 4.10.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pesterModules = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
+          if ($pesterModules.Count -eq 0) {
+            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
+            $pesterModules = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
+          }
+          if ($pesterModules.Count -ne 1) { throw "Expected exactly one Pester 4.10.1 module; found $($pesterModules.Count)." }
+          $manifestPath = Join-Path ([string]$pesterModules[0].ModuleBase) 'Pester.psd1'
+          $manifestItem = Get-Item -Force -LiteralPath $manifestPath
+          if ($manifestItem.PSIsContainer -or ($manifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Pester manifest must be a regular non-reparse file.' }
+          $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath -ErrorAction Stop
+          if ([version]$manifest.ModuleVersion -ne [version]'4.10.1') { throw 'Installed Pester manifest is not version 4.10.1.' }
+
+      - name: Run the Standard v1 authority gate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $candidateRoot = [IO.Path]::GetFullPath((Get-Location).Path)
+          $revision = (& git rev-parse --verify 'HEAD^{commit}').Trim()
+          if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') { throw 'Could not resolve the full checked-out HEAD revision.' }
+          & ./scripts/Invoke-StandardAuthorityGate.ps1 -ArtifactsRoot $env:RUNNER_TEMP -CandidateRoot $candidateRoot `
+            -AuthorityRoot $candidateRoot -CandidateRevision $revision -AuthorityRevision $revision `
+            -EventName $env:GITHUB_EVENT_NAME -ResultArtifact "unix-core-$($env:SYP_UNIX_PLATFORM)/authority-result.json"
+          if (-not $?) { throw 'Standard v1 authority gate failed.' }
+          $authorityRoot = Join-Path $env:RUNNER_TEMP "unix-core-$env:SYP_UNIX_PLATFORM"
+          $authorityResultPath = Join-Path $authorityRoot 'authority-result.json'
+          $authorityIdentity = [pscustomobject][ordered]@{
+            schemaVersion = 1
+            runId = [string]$env:GITHUB_RUN_ID
+            runAttempt = [int]$env:GITHUB_RUN_ATTEMPT
+            authoritySha256 = (Get-FileHash -LiteralPath $authorityResultPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+          [IO.File]::WriteAllText((Join-Path $authorityRoot 'authority-identity.json'), ($authorityIdentity | ConvertTo-Json -Compress) + "`n", [Text.UTF8Encoding]::new($false))
+        env:
+          SYP_UNIX_PLATFORM: ${{ matrix.platform }}
+
+      - name: Upload Unix Core authority evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: unix-core-authority-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/unix-core-${{ matrix.platform }}/authority-result.json
+            ${{ runner.temp }}/unix-core-${{ matrix.platform }}/authority-identity.json
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  pester:
+    name: ${{ matrix.display }} Core / ${{ matrix.file }}
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup verified PowerShell
+        uses: ./.github/actions/setup-unix-core-pwsh
+        with:
+          asset: ${{ matrix.asset }}
+          sha256: ${{ matrix.sha256 }}
+
+      - name: Ensure Pester 4.10.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pesterModules = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
+          if ($pesterModules.Count -eq 0) {
+            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
+            $pesterModules = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
+          }
+          if ($pesterModules.Count -ne 1) { throw "Expected exactly one Pester 4.10.1 module; found $($pesterModules.Count)." }
+          $manifestPath = Join-Path ([string]$pesterModules[0].ModuleBase) 'Pester.psd1'
+          $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath -ErrorAction Stop
+          if ([version]$manifest.ModuleVersion -ne [version]'4.10.1') { throw 'Installed Pester manifest is not version 4.10.1.' }
+          [IO.File]::AppendAllText($env:GITHUB_ENV, 'SYP_PESTER_MODULE_PATH=' + $manifestPath + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+
+      - name: Run the retained Pester file
+        id: pester
+        shell: pwsh
+        env:
+          SYP_UNIX_FILE: ${{ matrix.file }}
+          SYP_UNIX_SKIPS_BASE64: ${{ matrix.skipsBase64 }}
+          SYP_UNIX_MATRIX_ID: ${{ matrix.id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedSkips = [string[]]@([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:SYP_UNIX_SKIPS_BASE64)) | ConvertFrom-Json)
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP "unix-core-file-$env:SYP_UNIX_MATRIX_ID/evidence"
+          [IO.Directory]::CreateDirectory($evidenceRoot) | Out-Null
+          $executorArguments = @{
+            PesterModulePath = $env:SYP_PESTER_MODULE_PATH
+            PesterVersion = '4.10.1'
+            ExpectedSkippedCount = $expectedSkips.Count
+            ExpectedSkippedTests = $expectedSkips
+            # Each matrix job selects exactly one file, so do not reapply repository-wide isolation defaults.
+            IsolatedTestFileNames = [string[]]@()
+            BulkShardSize = 1
+            ShardPartitionCount = 1
+            ShardPartitionIndex = 0
+            OuterTimeoutSeconds = 4800
+            TestRoot = './tests'
+            EvidenceRoot = $evidenceRoot
+            SelectedTestFileNames = [string[]]@($env:SYP_UNIX_FILE)
+            SummaryOutputPath = Join-Path $evidenceRoot 'executor-summary.json'
+            SummarySchemaVersion = 2
+            SummaryRunId = [string]$env:GITHUB_RUN_ID
+            SummaryRunAttempt = [int]$env:GITHUB_RUN_ATTEMPT
+            IsolationRequirement = 'cooperative'
+          }
+          & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
+          if (-not $?) { throw "Unix Core Pester execution failed for $env:SYP_UNIX_FILE." }
+
+      - name: Publish the per-file summary
+        if: always() && !cancelled()
+        shell: pwsh
+        env:
+          SYP_UNIX_PLATFORM: ${{ matrix.platform }}
+          SYP_UNIX_FILE: ${{ matrix.file }}
+          SYP_UNIX_SKIPS_BASE64: ${{ matrix.skipsBase64 }}
+          SYP_UNIX_MATRIX_ID: ${{ matrix.id }}
+          SYP_UNIX_EXECUTOR_OUTCOME: ${{ steps.pester.outcome }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP "unix-core-file-$env:SYP_UNIX_MATRIX_ID"
+          $evidenceRoot = Join-Path $root 'evidence'
+          [IO.Directory]::CreateDirectory($root) | Out-Null
+          $resultFiles = @(Get-ChildItem -LiteralPath $evidenceRoot -Filter 'pester-shard-*.json' -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike '*.process.json' -and $_.Name -notlike '*.cases.json' })
+          if ($resultFiles.Count -ne 1) { throw "Expected exactly one Pester child result for $env:SYP_UNIX_FILE; found $($resultFiles.Count)." }
+          $result = Get-Content -Raw -Encoding UTF8 -LiteralPath $resultFiles[0].FullName | ConvertFrom-Json
+          $casePath = $resultFiles[0].FullName + '.cases.json'
+          $cases = if (Test-Path -LiteralPath $casePath -PathType Leaf) {
+            @((Get-Content -Raw -Encoding UTF8 -LiteralPath $casePath | ConvertFrom-Json).cases)
+          } else { @() }
+          $expectedSkips = [string[]]@([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:SYP_UNIX_SKIPS_BASE64)) | ConvertFrom-Json)
+          $skippedTests = [string[]]@($cases | Where-Object result -ceq 'Skipped' | ForEach-Object { "$env:SYP_UNIX_FILE::$($_.name)" } | Sort-Object -CaseSensitive)
+          $failedTests = [string[]]@($cases | Where-Object { $_.result -notin @('Passed','Skipped') } | ForEach-Object { [string]$_.name } | Sort-Object -CaseSensitive)
+          if ($failedTests.Count -eq 0 -and [int]$result.FailedCount -gt 0) {
+            $failedTests = [string[]]@($(if ([string]::IsNullOrWhiteSpace([string]$result.failurePhase)) { '[runner failure]' } else { '[runner failure] ' + [string]$result.failurePhase }))
+          }
+          $expectedSorted = [string[]]@($expectedSkips | Sort-Object -CaseSensitive)
+          $skipInventoryMatches = (($expectedSorted -join "`n") -ceq ($skippedTests -join "`n"))
+          $passed = ($env:SYP_UNIX_EXECUTOR_OUTCOME -ceq 'success' -and [string]$result.status -ceq 'completed' -and
+            [int]$result.FailedCount -eq 0 -and [int]$result.PendingCount -eq 0 -and [int]$result.InconclusiveCount -eq 0 -and $skipInventoryMatches)
+          $summary = [pscustomobject][ordered]@{
+            schemaVersion = 1; platform = $env:SYP_UNIX_PLATFORM; file = $env:SYP_UNIX_FILE
+            runId = [string]$env:GITHUB_RUN_ID; runAttempt = [int]$env:GITHUB_RUN_ATTEMPT
+            status = $(if ($passed) { 'passed' } else { 'failed' }); executorOutcome = $env:SYP_UNIX_EXECUTOR_OUTCOME
+            counts = [pscustomobject][ordered]@{
+              total=[int]$result.TotalCount; passed=[int]$result.PassedCount; failed=[int]$result.FailedCount
+              skipped=[int]$result.SkippedCount; pending=[int]$result.PendingCount; inconclusive=[int]$result.InconclusiveCount
+            }
+            expectedSkippedTests = $expectedSorted; skippedTests = $skippedTests; failedTests = $failedTests
+          }
+          $summaryPath = Join-Path $root 'summary.json'
+          [IO.File]::WriteAllText($summaryPath, ($summary | ConvertTo-Json -Depth 8) + "`n", [Text.UTF8Encoding]::new($false))
+          $failedList = if ($failedTests.Count -eq 0) { 'none' } else { $failedTests -join ', ' }
+          $markdown = "### $env:SYP_UNIX_PLATFORM / $env:SYP_UNIX_FILE`n`n- Passed: $($summary.counts.passed)`n- Failed: $($summary.counts.failed)`n- Skipped: $($summary.counts.skipped)`n- Failing tests: $failedList`n"
+          [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, $markdown, [Text.UTF8Encoding]::new($false))
+
+      - name: Upload the per-file summary and evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: unix-core-${{ matrix.platform }}-file-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unix-core-file-${{ matrix.id }}
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+      - name: Assert the per-file summary
+        if: steps.pester.outcome == 'success'
+        shell: pwsh
+        env:
+          SYP_UNIX_MATRIX_ID: ${{ matrix.id }}
+        run: |
+          $summary = Get-Content -Raw -Encoding UTF8 (Join-Path $env:RUNNER_TEMP "unix-core-file-$env:SYP_UNIX_MATRIX_ID/summary.json") | ConvertFrom-Json
+          if ([string]$summary.status -cne 'passed') { throw 'Unix Core per-file summary did not pass its exact skip and result contract.' }
+
+  aggregate:
+    name: ${{ matrix.display }} Core
+    needs: [plan, authority, pester]
+    if: always()
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            display: Linux
+            runner: ubuntu-latest
+            asset: powershell-7.6.6-linux-x64.tar.gz
+            sha256: DDBC4A2D113BBD46D283CFEDCBCD117A70CAEFD7673F41F2B4E0000BADF103BC
+          - platform: macos
+            display: macOS
+            runner: macos-latest
+            asset: powershell-7.6.6-osx-arm64.tar.gz
+            sha256: 6DF833D094EBAC1C1A74340D7B3437F4AAF5E03CE640484A1C4359F3CE8B3DB1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup verified PowerShell
+        uses: ./.github/actions/setup-unix-core-pwsh
+        with:
+          asset: ${{ matrix.asset }}
+          sha256: ${{ matrix.sha256 }}
+
+      - name: Download Unix Core plan
+        if: needs.plan.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unix-core-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unix-core-aggregate/plan
+
+      - name: Download Unix Core per-file evidence
+        if: needs.pester.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: unix-core-${{ matrix.platform }}-file-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unix-core-aggregate/files
+
+      - name: Download Unix Core authority evidence
+        if: needs.authority.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unix-core-authority-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unix-core-aggregate/authority
+
+      - name: Assert the Unix Core aggregate
+        shell: pwsh
+        env:
+          SYP_UNIX_PLATFORM: ${{ matrix.platform }}
+          SYP_EXPECTED_PLAN_SHA256: ${{ needs.plan.outputs.planSha256 }}
+          SYP_PLAN_RESULT: ${{ needs.plan.result }}
+          SYP_AUTHORITY_RESULT: ${{ needs.authority.result }}
+          SYP_PESTER_RESULT: ${{ needs.pester.result }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $aggregateRoot = Join-Path $env:RUNNER_TEMP 'unix-core-aggregate'
+          $resultPath = Join-Path $aggregateRoot 'aggregate-result.json'
+          try {
+            foreach ($upstreamJob in @(
+              [pscustomobject]@{name='plan';result=$env:SYP_PLAN_RESULT},
+              [pscustomobject]@{name='authority';result=$env:SYP_AUTHORITY_RESULT},
+              [pscustomobject]@{name='pester';result=$env:SYP_PESTER_RESULT}
+            )) {
+              if ([string]$upstreamJob.result -cne 'success') { throw "Unix Core upstream '$($upstreamJob.name)' result must be success; got '$($upstreamJob.result)'." }
+            }
+            $planPath = Join-Path $aggregateRoot 'plan/plan.json'
+            $hashPath = Join-Path $aggregateRoot 'plan/plan.sha256'
+            $planJson = (Get-Content -Raw -Encoding UTF8 -LiteralPath $planPath).TrimEnd("`r","`n")
+            $actualHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.UTF8Encoding]::new($false).GetBytes($planJson))).ToLowerInvariant()
+            $artifactHash = (Get-Content -Raw -Encoding UTF8 -LiteralPath $hashPath).Trim()
+            if ($actualHash -cne $artifactHash -or $actualHash -cne $env:SYP_EXPECTED_PLAN_SHA256) { throw 'Unix Core plan SHA-256 evidence differs.' }
+            $plan = $planJson | ConvertFrom-Json
+            if ([string]$plan.runId -cne [string]$env:GITHUB_RUN_ID -or [int]$plan.runAttempt -ne [int]$env:GITHUB_RUN_ATTEMPT) {
+              throw 'Unix Core plan evidence does not equal the current workflow run attempt.'
+            }
+            $expectedEntries = @($plan.entries | Where-Object platform -ceq $env:SYP_UNIX_PLATFORM)
+            $summaryFiles = @(Get-ChildItem -LiteralPath (Join-Path $aggregateRoot 'files') -Filter 'summary.json' -File -Recurse)
+            if ($summaryFiles.Count -ne $expectedEntries.Count) { throw "Expected $($expectedEntries.Count) per-file summaries; found $($summaryFiles.Count)." }
+            $expectedByFile = @{}
+            foreach ($entry in $expectedEntries) {
+              if ($expectedByFile.ContainsKey([string]$entry.file)) { throw "Duplicate planned file '$($entry.file)'." }
+              $expectedByFile[[string]$entry.file] = $entry
+            }
+            $observedFiles = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            [long]$passed = 0; [long]$failed = 0; [long]$skipped = 0
+            foreach ($summaryFile in $summaryFiles) {
+              $summary = Get-Content -Raw -Encoding UTF8 -LiteralPath $summaryFile.FullName | ConvertFrom-Json
+              $file = [string]$summary.file
+              if (-not $expectedByFile.ContainsKey($file) -or -not $observedFiles.Add($file)) { throw "Unexpected or duplicate per-file summary '$file'." }
+              if ([string]$summary.platform -cne $env:SYP_UNIX_PLATFORM -or [string]$summary.runId -cne [string]$env:GITHUB_RUN_ID -or
+                  [int]$summary.runAttempt -ne [int]$env:GITHUB_RUN_ATTEMPT -or
+                  [string]$summary.status -cne 'passed' -or [string]$summary.executorOutcome -cne 'success') { throw "Per-file summary '$file' did not pass." }
+              $expectedSkips = [string[]]@([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$expectedByFile[$file].skipsBase64)) | ConvertFrom-Json)
+              $expectedSkips = [string[]]@($expectedSkips | Sort-Object -CaseSensitive)
+              if (($expectedSkips -join "`n") -cne (@($summary.expectedSkippedTests) -join "`n") -or
+                  ($expectedSkips -join "`n") -cne (@($summary.skippedTests) -join "`n")) { throw "Per-file skip evidence differs for '$file'." }
+              if ([int]$summary.counts.failed -ne 0 -or [int]$summary.counts.pending -ne 0 -or [int]$summary.counts.inconclusive -ne 0 -or @($summary.failedTests).Count -ne 0) {
+                throw "Per-file result evidence is not clean for '$file'."
+              }
+              $passed += [long]$summary.counts.passed; $failed += [long]$summary.counts.failed; $skipped += [long]$summary.counts.skipped
+            }
+            $authorityFiles = @(Get-ChildItem -LiteralPath (Join-Path $aggregateRoot 'authority') -Filter 'authority-result.json' -File -Recurse)
+            if ($authorityFiles.Count -ne 1) { throw "Expected one authority result; found $($authorityFiles.Count)." }
+            $authority = Get-Content -Raw -Encoding UTF8 -LiteralPath $authorityFiles[0].FullName | ConvertFrom-Json
+            if ([string]$authority.status -cne 'passed' -or $authority.executed -ne $true) { throw 'Unix Core authority evidence did not pass.' }
+            $authorityIdentityFiles = @(Get-ChildItem -LiteralPath (Join-Path $aggregateRoot 'authority') -Filter 'authority-identity.json' -File -Recurse)
+            if ($authorityIdentityFiles.Count -ne 1) { throw "Expected one authority identity; found $($authorityIdentityFiles.Count)." }
+            $authorityIdentity = Get-Content -Raw -Encoding UTF8 -LiteralPath $authorityIdentityFiles[0].FullName | ConvertFrom-Json
+            $authoritySha256 = (Get-FileHash -LiteralPath $authorityFiles[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ([string]$authorityIdentity.runId -cne [string]$env:GITHUB_RUN_ID -or
+                [int]$authorityIdentity.runAttempt -ne [int]$env:GITHUB_RUN_ATTEMPT -or
+                [string]$authorityIdentity.authoritySha256 -cne $authoritySha256) {
+              throw 'Unix Core authority evidence does not equal the current workflow run attempt.'
+            }
+            $aggregate = [pscustomobject][ordered]@{
+              schemaVersion=1; status='passed'; platform=$env:SYP_UNIX_PLATFORM; planSha256=$actualHash
+              runId=[string]$env:GITHUB_RUN_ID; runAttempt=[int]$env:GITHUB_RUN_ATTEMPT
+              fileCount=$observedFiles.Count; passed=$passed; failed=$failed; skipped=$skipped
+            }
+            [IO.File]::WriteAllText($resultPath, ($aggregate | ConvertTo-Json -Depth 6) + "`n", [Text.UTF8Encoding]::new($false))
+            [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "### $env:SYP_UNIX_PLATFORM Core`n`n- Files: $($aggregate.fileCount)`n- Passed: $passed`n- Failed: $failed`n- Skipped: $skipped`n", [Text.UTF8Encoding]::new($false))
+          }
+          catch {
+            [IO.Directory]::CreateDirectory($aggregateRoot) | Out-Null
+            $failure = [pscustomobject][ordered]@{schemaVersion=1;status='failed';platform=$env:SYP_UNIX_PLATFORM;error=$_.Exception.Message}
+            [IO.File]::WriteAllText($resultPath, ($failure | ConvertTo-Json -Depth 6) + "`n", [Text.UTF8Encoding]::new($false))
+            throw
+          }
+
+      - name: Upload Unix Core aggregate evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: unix-core-${{ matrix.platform }}-aggregate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unix-core-aggregate/aggregate-result.json
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+      - name: Fail a cancelled Unix Core aggregate
+        if: cancelled()
+        shell: pwsh
+        run: |
+          throw 'Unix Core aggregate was cancelled and must not be treated as successful.'

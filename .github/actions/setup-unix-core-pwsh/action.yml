@@ -1,0 +1,94 @@
+name: Setup verified Unix Core PowerShell
+description: Restore, verify and select the reviewed PowerShell 7.6.6 Unix archive.
+inputs:
+  asset:
+    description: Official PowerShell release asset name.
+    required: true
+  sha256:
+    description: Reviewed SHA-256 for the release asset.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Restore verified PowerShell archive cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/pwsh-cache/${{ inputs.asset }}
+        key: pwsh-tar-${{ runner.os }}-7.6.6-${{ inputs.sha256 }}
+
+    - name: Install verified PowerShell 7.6.6
+      shell: pwsh
+      env:
+        SYP_UNIX_PWSH_ASSET: ${{ inputs.asset }}
+        SYP_UNIX_PWSH_SHA256: ${{ inputs.sha256 }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $version = '7.6.6'
+        $expectedSha256 = $env:SYP_UNIX_PWSH_SHA256.ToUpperInvariant()
+        if ($expectedSha256 -notmatch '^[0-9A-F]{64}$') { throw 'PowerShell archive SHA256 input is invalid.' }
+        if ($env:SYP_UNIX_PWSH_ASSET -notin @('powershell-7.6.6-linux-x64.tar.gz','powershell-7.6.6-osx-arm64.tar.gz')) {
+          throw "Unreviewed PowerShell asset '$env:SYP_UNIX_PWSH_ASSET'."
+        }
+        $archivePath = Join-Path $env:RUNNER_TEMP $env:SYP_UNIX_PWSH_ASSET
+        $installDirectory = Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6'
+        $cachePath = Join-Path $env:RUNNER_TEMP ('pwsh-cache/' + $env:SYP_UNIX_PWSH_ASSET)
+        $downloadUri = 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/' + $env:SYP_UNIX_PWSH_ASSET
+        if ((Test-Path -LiteralPath $archivePath) -or (Test-Path -LiteralPath $installDirectory)) {
+          throw 'PowerShell setup paths must be new within this job.'
+        }
+        $cacheIsVerified = $false
+        if (Test-Path -LiteralPath $cachePath) {
+          $cacheItem = Get-Item -Force -LiteralPath $cachePath -ErrorAction Stop
+          if ($cacheItem.PSIsContainer -or ($cacheItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'PowerShell cache path must be a regular non-reparse file.'
+          }
+          $cacheSha256 = (Get-FileHash -LiteralPath $cachePath -Algorithm SHA256).Hash.ToUpperInvariant()
+          if ($cacheSha256 -ceq $expectedSha256) {
+            Copy-Item -LiteralPath $cachePath -Destination $archivePath
+            $cacheIsVerified = $true
+          }
+          if (-not $cacheIsVerified) { Remove-Item -LiteralPath $cachePath -Force }
+        }
+        if (-not $cacheIsVerified) { Invoke-WebRequest -Uri $downloadUri -OutFile $archivePath }
+        $actualSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToUpperInvariant()
+        if ($actualSha256 -cne $expectedSha256) {
+          throw "PowerShell archive SHA256 mismatch: expected $expectedSha256, got $actualSha256."
+        }
+        if (-not $cacheIsVerified) {
+          [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($cachePath)) | Out-Null
+          Copy-Item -LiteralPath $archivePath -Destination $cachePath
+        }
+        [IO.Directory]::CreateDirectory($installDirectory) | Out-Null
+        & tar -xzf $archivePath -C $installDirectory
+        if ($LASTEXITCODE -ne 0) { throw 'Verified PowerShell archive extraction failed.' }
+        $powerShellExe = Join-Path $installDirectory 'pwsh'
+        if (-not (Test-Path -LiteralPath $powerShellExe -PathType Leaf)) { throw 'Verified PowerShell archive did not contain pwsh.' }
+        & chmod -- u+x $powerShellExe
+        if ($LASTEXITCODE -ne 0) { throw 'Could not mark the verified PowerShell executable as executable.' }
+        $archiveRuntimeVersion = (& $powerShellExe -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')
+        if ($LASTEXITCODE -ne 0 -or ([string]$archiveRuntimeVersion).Trim() -cne $version) {
+          throw "Verified archive launched unexpected PowerShell version '$archiveRuntimeVersion'."
+        }
+        [IO.File]::AppendAllText($env:GITHUB_PATH, $installDirectory + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        $githubEnvironment = 'SYP_REQUIRED_PWSH_VERSION=' + $version + [Environment]::NewLine +
+          'SYP_REQUIRED_PWSH_SHA256=' + $expectedSha256 + [Environment]::NewLine
+        [IO.File]::AppendAllText($env:GITHUB_ENV, $githubEnvironment, [Text.UTF8Encoding]::new($false))
+
+    - name: Verify the selected PowerShell runtime
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $expectedExecutable = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6/pwsh'))
+        $selectedExecutable = [IO.Path]::GetFullPath((Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source)
+        $processExecutable = [IO.Path]::GetFullPath([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
+        $homeExecutable = [IO.Path]::GetFullPath((Join-Path $PSHOME 'pwsh'))
+        foreach ($actual in @($selectedExecutable,$processExecutable,$homeExecutable)) {
+          if (-not [string]::Equals($actual, $expectedExecutable, [StringComparison]::Ordinal)) {
+            throw "The actual GitHub step shell is not the verified portable PowerShell: expected=$expectedExecutable actual=$actual PSHOME=$PSHOME"
+          }
+        }
+        if ($PSVersionTable.PSVersion.ToString() -cne $env:SYP_REQUIRED_PWSH_VERSION) {
+          throw "Expected PowerShell $env:SYP_REQUIRED_PWSH_VERSION, running $($PSVersionTable.PSVersion)."
+        }
+        if ($env:SYP_REQUIRED_PWSH_SHA256 -notmatch '^[0-9A-F]{64}$') { throw 'The verified PowerShell download hash binding is invalid.' }
+        Write-Host "PowerShell runtime verified: $($PSVersionTable.PSVersion) at $selectedExecutable"

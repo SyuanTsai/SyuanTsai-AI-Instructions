@@ -234,7 +234,8 @@ function Get-PesterShardChildEnvironment {
     # Cmdlet output (Join-Path/ConvertTo-Json) can retain a PSObject wrapper in a
     # hashtable. P3's native IDictionary contract requires actual CLR strings,
     # including values the supervisor adds after this function returns.
-    $comparer = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
+    $isWindowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    $comparer = if ($isWindowsHost) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
     $values = [Collections.Generic.Dictionary[string,string]]::new($comparer)
     foreach ($name in @('PATH','PATHEXT','COMSPEC','SYSTEMROOT','WINDIR','TEMP','TMP','TMPDIR','HOME','USERPROFILE','APPDATA','LOCALAPPDATA','LANG','LC_ALL','NUMBER_OF_PROCESSORS',
         'SYP154_PESTER_P02A_SELECTED_WITNESS','SYP154_PESTER_P02A_UNSELECTED_WITNESS','SYP154_PESTER_P02A_ALPHA_WITNESS','SYP154_PESTER_P02A_BETA_WITNESS','SYP154_PESTER_P02A_RUNTIME_PATH','SYP154_PESTER_P02A_EVIDENCE_ROOT')) {
@@ -242,6 +243,22 @@ function Get-PesterShardChildEnvironment {
         if ($null -ne $value) { $values[$name] = $value }
     }
     $values['PSModulePath'] = Join-Path $PSHOME 'Modules'
+    if (-not $isWindowsHost) {
+        # GitHub's macOS TMPDIR commonly traverses the /var -> /private/var
+        # alias. Retain the runner-owned canonical temporary boundary so tests
+        # and nested platform-runtime children do not fall back to that alias.
+        $runnerTemp = [Environment]::GetEnvironmentVariable('RUNNER_TEMP','Process')
+        if ($null -ne $runnerTemp) { $values['RUNNER_TEMP'] = $runnerTemp }
+        # Git automatic maintenance and detached gc can outlive their invoking Git
+        # process, escape the shard process group, and be adopted by the Linux
+        # subreaper without a surviving ancestry edge. Keep Git work synchronous;
+        # the owned process boundary still fails on every truly unattributed child.
+        $values['GIT_CONFIG_COUNT'] = '2'
+        $values['GIT_CONFIG_KEY_0'] = 'maintenance.auto'
+        $values['GIT_CONFIG_VALUE_0'] = 'false'
+        $values['GIT_CONFIG_KEY_1'] = 'gc.autoDetach'
+        $values['GIT_CONFIG_VALUE_1'] = 'false'
+    }
     return $values
 }
 
@@ -278,6 +295,83 @@ function Get-PesterShardStartupCleanupEvidence {
         $cause = $cause.InnerException
     }
     [pscustomobject][ordered]@{ cleanup=$cleanup; cleanupFailed=$cleanupFailed }
+}
+
+function Get-PesterShardUnixAdoptedProcessDiagnostics {
+    param([AllowNull()]$Cleanup)
+
+    $rows = [Collections.Generic.List[object]]::new()
+    try {
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -or $null -eq $Cleanup) {
+            return $rows.ToArray()
+        }
+        $adoptedChildMatches = [regex]::Matches([string]$Cleanup.Uncertainty, '(?:^|;\s*)unattributed-adopted-child:\s*(?<pid>[1-9][0-9]*)')
+        foreach ($adoptedChildMatch in $adoptedChildMatches) {
+            $processId = 0
+            if (-not [int]::TryParse($adoptedChildMatch.Groups['pid'].Value, [ref]$processId)) { continue }
+            $executable = $null
+            $executableAvailable = $false
+            $argumentCount = $null
+            $argumentCountAvailable = $false
+            $inputTruncated = $false
+            if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix -and (Test-Path -LiteralPath '/proc')) {
+                try {
+                    $buffer = [byte[]]::new(4097)
+                    $totalRead = 0
+                    $stream = [IO.File]::Open("/proc/$processId/cmdline", [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+                    try {
+                        while ($totalRead -lt $buffer.Length) {
+                            $readCount = $stream.Read($buffer, $totalRead, $buffer.Length - $totalRead)
+                            if ($readCount -le 0) { break }
+                            $totalRead += $readCount
+                        }
+                    }
+                    finally { $stream.Dispose() }
+                    $inputTruncated = $totalRead -gt 4096
+                    $capturedLength = [Math]::Min($totalRead, 4096)
+                    $executableEnd = -1
+                    $terminatorCount = 0
+                    for ($index = 0; $index -lt $capturedLength; $index++) {
+                        if ($buffer[$index] -eq 0) {
+                            $terminatorCount++
+                            if ($executableEnd -lt 0) { $executableEnd = $index }
+                        }
+                    }
+                    if ($executableEnd -lt 0 -and -not $inputTruncated) { $executableEnd = $capturedLength }
+                    if ($executableEnd -ge 0) {
+                        $executableBytes = [byte[]]::new($executableEnd)
+                        if ($executableEnd -gt 0) { [Array]::Copy($buffer, 0, $executableBytes, 0, $executableEnd) }
+                        $executable = [Text.UTF8Encoding]::new($false,$false).GetString($executableBytes)
+                        $executable = ConvertTo-PesterShardSanitizedDiagnosticText $executable
+                        if ($executable.Length -gt 1024) { $executable = $executable.Substring(0,1024) + '...' }
+                        $executableAvailable = -not [string]::IsNullOrWhiteSpace($executable)
+                    }
+                    if (-not $inputTruncated) {
+                        $argumentCount = [Math]::Max(0, $terminatorCount - 1)
+                        $argumentCountAvailable = $true
+                    }
+                }
+                catch {
+                    $executable = $null
+                    $executableAvailable = $false
+                    $argumentCount = $null
+                    $argumentCountAvailable = $false
+                }
+            }
+            $rows.Add([pscustomobject][ordered]@{
+                pid = $processId
+                executableAvailable = $executableAvailable
+                executable = $executable
+                argumentCountAvailable = $argumentCountAvailable
+                argumentCount = $argumentCount
+                inputTruncated = $inputTruncated
+            })
+        }
+    }
+    catch {
+        # Diagnostics must never replace the shard result or its cleanup evidence.
+    }
+    return $rows.ToArray()
 }
 
 function Format-PesterShardException {
@@ -372,6 +466,9 @@ function Invoke-PesterShardProcess {
             failureSummary=Get-PesterShardFailureSummary -Paths @($StderrPath,$StdoutPath) -OutputQuotaExceeded:$quota; error=$failure
             platformReceipt=$script:PesterShardCapabilities; artifactsRetained=$true
             caseDiagnosticsPath=($ResultPath+'.cases.json'); childScriptPath=$ChildScriptPath
+        }
+        if (-not [System.OperatingSystem]::IsWindows()) {
+            $diagnostic['unixAdoptedProcessDiagnostics'] = @(Get-PesterShardUnixAdoptedProcessDiagnostics -Cleanup $cleanup)
         }
         Write-PesterShardJson $ProcessEvidencePath $diagnostic
     }

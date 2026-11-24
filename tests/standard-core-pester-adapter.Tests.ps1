@@ -1327,6 +1327,102 @@ Describe 'grandchild' {
             }
         }
 
+        if ($IsLinux) {
+            # Scenario: A Git-using Pester child also leaves an ordinary same-group descendant alive when its root exits.
+            # Purpose: Disable detached Git maintenance while retaining positive proof that a legitimate descendant is attributed and reclaimed without recording its argument value.
+            It 'InterT81_disables_detached_Git_maintenance_and_reclaims_a_legitimate_descendant' {
+                $fixture=New-P02AFixture
+                $sensitiveArgumentValue='syp517-intert81-sensitive-argument'
+                $body=@'
+Describe 'Unix Git maintenance containment' {
+    It 'inherits synchronous Git maintenance policy and leaves an attributable descendant' {
+        (& git config --get maintenance.auto) | Should Be 'false'
+        (& git config --get gc.autoDetach) | Should Be 'false'
+        $start=[Diagnostics.ProcessStartInfo]::new()
+        $start.FileName=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $start.UseShellExecute=$false; $start.CreateNoWindow=$true
+        foreach ($argument in @('-NoProfile','-NonInteractive','-Command',"`$null='syp517-intert81-sensitive-argument'; Start-Sleep 90")) { $start.ArgumentList.Add($argument) }
+        $child=[Diagnostics.Process]::Start($start)
+        try { [IO.File]::WriteAllText($env:SYP154_PESTER_P02A_SELECTED_WITNESS,[string]$child.Id) }
+        finally { $child.Dispose() }
+        1 | Should Be 1
+    }
+}
+'@
+                Write-P02AText (Join-Path $fixture.TestRoot 'git-maintenance.Tests.ps1') $body
+                $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('git-maintenance.Tests.ps1')
+                $run=Invoke-P02AHiddenAdapter $invocation $fixture
+                Assert-P02AExpectedWithChildDiagnostics $run.ExitCode 0 $fixture 'Synchronous Git policy and legitimate descendant cleanup must pass.'
+                $evidenceText=Get-Content -LiteralPath (@(Get-P02AProcessEvidenceFiles $fixture)[0].FullName) -Raw
+                $evidenceText | Should Not Match ([regex]::Escape($sensitiveArgumentValue))
+                $evidence=$evidenceText | ConvertFrom-Json
+                $evidence.status | Should Be 'completed'
+                $evidence.cleanup.cleanedUp | Should Be $true
+                [int]$descendantId=[IO.File]::ReadAllText($fixture.SelectedWitness)
+                (Get-Process -Id $descendantId -ErrorAction SilentlyContinue) | Should BeNullOrEmpty
+            }
+
+            # Scenario: Linux reports a direct adopted PID without a surviving owned ancestry edge.
+            # Purpose: Preserve fail-closed handling while recording only bounded executable metadata, never argument values, for the unattributed process.
+            It 'UnitT82_keeps_an_unattributed_adopted_child_failed_without_recording_argument_values' {
+                . (Get-P02AExecutorFunction 'Remove-PesterShardTerminalControlSequences')
+                . (Get-P02AExecutorFunction 'ConvertTo-PesterShardSanitizedDiagnosticText')
+                . (Get-P02AExecutorFunction 'Get-PesterShardUnixAdoptedProcessDiagnostics')
+                . (Get-P02AExecutorFunction 'ConvertTo-PesterShardProcessState')
+                $legitimate=[pscustomobject]@{CleanedUp=$true;CaptureReadersStopped=$true;CaptureResourcesClosed=$true;Uncertainty=$null;RemainingPids=@()}
+                (ConvertTo-PesterShardProcessState $legitimate 0 '' $false $true $false) | Should Be 'completed'
+                $secretValues=@('syp517-unit-token-value','syp517-unit-password-value','syp517-unit-keyword-value')
+                $start=[Diagnostics.ProcessStartInfo]::new()
+                $start.FileName='/bin/sh'
+                $start.UseShellExecute=$false; $start.CreateNoWindow=$true
+                foreach($argument in @('-c','while :; do sleep 30; done','diagnostic-sh','--token',$secretValues[0],'--password',$secretValues[1],'-k',$secretValues[2])){
+                    $start.ArgumentList.Add($argument)
+                }
+                $child=[Diagnostics.Process]::Start($start)
+                try {
+                    Start-Sleep -Milliseconds 100
+                    $unattributed=[pscustomobject]@{CleanedUp=$false;CaptureReadersStopped=$true;CaptureResourcesClosed=$true;Uncertainty="unattributed-adopted-child: $($child.Id)";RemainingPids=@()}
+                    (ConvertTo-PesterShardProcessState $unattributed 0 '' $false $true $false) | Should Be 'cleanup-failed'
+                    $diagnostics=@(Get-PesterShardUnixAdoptedProcessDiagnostics $unattributed)
+                    $diagnostics.Count | Should Be 1
+                    $diagnostics[0].pid | Should Be $child.Id
+                    $diagnostics[0].executableAvailable | Should Be $true
+                    $diagnostics[0].executable | Should Match 'sh$'
+                    $diagnostics[0].argumentCountAvailable | Should Be $true
+                    $diagnostics[0].argumentCount | Should BeGreaterThan 0
+                    $diagnostics[0].inputTruncated | Should Be $false
+                    $diagnostics[0].PSObject.Properties.Name | Should Not Contain 'commandLine'
+                    $diagnosticJson=$diagnostics | ConvertTo-Json -Depth 5 -Compress
+                    foreach($secretValue in $secretValues){ $diagnosticJson | Should Not Match ([regex]::Escape($secretValue)) }
+                    $malformed=[pscustomobject]@{Uncertainty='unattributed-adopted-child: 999999999999999999999999'}
+                    { @(Get-PesterShardUnixAdoptedProcessDiagnostics $malformed).Count | Out-Null } | Should Not Throw
+                }
+                finally {
+                    if(-not $child.HasExited){ $child.Kill($true); $child.WaitForExit(5000) }
+                    $child.Dispose()
+                }
+            }
+        }
+
+        if (-not $IsWindows) {
+            # Scenario: A Unix Core job supplies its runner-owned temporary boundary while the ambient TMPDIR may be an alias.
+            # Purpose: Preserve the canonical runner boundary in the restricted child environment without changing Windows Core.
+            It 'InterT83_forwards_the_Unix_runner_temporary_boundary' {
+                $fixture=New-P02AFixture
+                $runnerTemp=Join-Path $fixture.Root 'runner-temp'
+                [void][IO.Directory]::CreateDirectory($runnerTemp)
+                $escapedRunnerTemp=$runnerTemp.Replace("'","''")
+                $body="Describe 'runner temporary boundary' { It 'inherits RUNNER_TEMP' { [Environment]::GetEnvironmentVariable('RUNNER_TEMP','Process') | Should Be '$escapedRunnerTemp' } }"
+                Write-P02AText (Join-Path $fixture.TestRoot 'runner-temp.Tests.ps1') $body
+                $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('runner-temp.Tests.ps1')
+                $config=Get-Content -LiteralPath $invocation.ConfigPath -Raw | ConvertFrom-Json
+                $config | Add-Member NoteProperty InjectedEnvironment ([pscustomobject]@{RUNNER_TEMP=$runnerTemp})
+                Write-P02AText $invocation.ConfigPath ($config | ConvertTo-Json -Depth 8)
+                $run=Invoke-P02AHiddenAdapter $invocation $fixture
+                Assert-P02AExpectedWithChildDiagnostics $run.ExitCode 0 $fixture 'Unix child must inherit the runner temporary boundary.'
+            }
+        }
+
         # Scenario: Two passing files are partitioned into two bulk shards and only partition 1 executes.
         # Purpose: Report exactly the paths in completed shards, excluding the unexecuted alpha shard.
         It 'InterT50_partition_summary_lists_only_executed_files' {

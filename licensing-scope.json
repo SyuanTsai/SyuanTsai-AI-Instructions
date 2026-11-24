@@ -153,6 +153,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": ".github/actions/setup-unix-core-pwsh/action.yml",
+      "license": "Apache-2.0"
+    },
+    {
       "path": ".github/workflows/pr8-powershell-validation.yml",
       "license": "Apache-2.0"
     },
@@ -166,6 +170,10 @@
     },
     {
       "path": ".github/workflows/syp86-production-lock.yml",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/workflows/unix-core.yml",
       "license": "Apache-2.0"
     },
     {
@@ -1523,6 +1531,10 @@
     },
     {
       "path": "tests/golden/syp101-production-smoke.yml.golden",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/golden/unix-core.yml.golden",
       "license": "Apache-2.0"
     },
     {
