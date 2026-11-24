@@ -6975,7 +6975,7 @@ Describe 'SYP537 repository-level secret protection contract' -Tag 'SYP537' {
 
         $testsSection | Should -Match '第 12\.4 節 repository-level secret protection'
         $approvalSection | Should -Match 'Human Release Approval \*\*MUST\*\* 先完成第 12\.4 節'
-        $conformanceSection | Should -Match '(?m)^19\. 第 12\.4 節 repository-level secret protection 的稽核紀錄。$'
+        $conformanceSection | Should -Match '(?m)^19\. 第 12\.4 節 repository-level secret protection 的稽核紀錄。\r?$'
     }
 
     # Scenario: A later edit rewords §12.4 so a keyword still matches but the requirement is weakened
