@@ -5,6 +5,19 @@ $script:ContractPath = Join-Path $script:RuntimeRoot 'skills-catalog-contract.ps
 $script:RuntimeContractPath = Join-Path $script:RuntimeRoot 'ai-instructions-runtime-contract.psm1'
 $script:TestPowerShellExecutable = (Get-Process -Id $PID).Path
 $script:SecondaryVolumeRoot = $null
+if(-not[Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)){
+    if($null-eq('AgentEnvironmentTestUnixMode'-as[type])){
+        Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class AgentEnvironmentTestUnixMode {
+    [DllImport("libc", EntryPoint = "umask")]
+    private static extern uint Umask(uint mask);
+    public static void RequirePrivateFixtures() { Umask(63); }
+}
+'@
+    }
+    [AgentEnvironmentTestUnixMode]::RequirePrivateFixtures()
+}
 if([Environment]::OSVersion.Platform-eq[PlatformID]::Win32NT){
     $primary=[IO.Path]::GetPathRoot([IO.Path]::GetFullPath([IO.Path]::GetTempPath()))
     $script:SecondaryVolumeRoot=@(Get-PSDrive -PSProvider FileSystem|Where-Object{$_.Root-and-not[string]::Equals([IO.Path]::GetPathRoot([IO.Path]::GetFullPath($_.Root)),$primary,[StringComparison]::OrdinalIgnoreCase)}|Select-Object -ExpandProperty Root -First 1)
@@ -13,6 +26,14 @@ if([Environment]::OSVersion.Platform-eq[PlatformID]::Win32NT){
 Import-Module $script:ContractPath -Force
 Import-Module $script:ModulePath -Force
 Import-Module $script:RuntimeContractPath -Force
+
+function New-TestPrivateDirectory {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    New-Item -ItemType Directory -Force -Path $Path|Out-Null
+    if(-not$IsWindows){
+        [IO.File]::SetUnixFileMode($Path,([IO.UnixFileMode]::UserRead-bor[IO.UnixFileMode]::UserWrite-bor[IO.UnixFileMode]::UserExecute))
+    }
+}
 
 function New-TestAiInstructionsRuntimeBundleV3 {
     param(
@@ -816,7 +837,7 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
     It 'InterT82_retains_the_only_durable_journal_prev_across_stage_flush_FailFast' {
         $transactionId=[guid]::NewGuid().ToString('N')
         $transactionPath=Join-Path $TestDrive ".ai-instructions-txn/$transactionId"
-        New-Item -ItemType Directory -Force -Path $transactionPath|Out-Null
+        New-TestPrivateDirectory -Path $transactionPath
         $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String
         $journal.transactionId=$transactionId;$journal.phase='prepared'
         foreach($operation in $journal.operations){$operation.state='pending'}
@@ -861,8 +882,10 @@ $module=Get-Module agent-environment-reconciler
     # Scenario: An attacker prepositions journal.stage as a hard link or directory junction.
     # Purpose: Reject the leaf through the transaction lease without truncating or changing the external target.
     It 'InterT95_rejects_unsafe_journal_stage_without_touching_external_bytes' {
-        foreach($kind in @('hard-link','junction')){
-            $transactionId=[guid]::NewGuid().ToString('N');$transactionPath=Join-Path $TestDrive "unsafe-stage-$kind/$transactionId";New-Item -ItemType Directory -Force -Path $transactionPath|Out-Null
+        $journalLeafKinds=@('hard-link')
+        if($IsWindows){$journalLeafKinds+='junction'}
+        foreach($kind in $journalLeafKinds){
+            $transactionId=[guid]::NewGuid().ToString('N');$transactionPath=Join-Path $TestDrive "unsafe-stage-$kind/$transactionId";New-TestPrivateDirectory -Path $transactionPath
             $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String;$journal.transactionId=$transactionId
             $outsideRoot=Join-Path $TestDrive "unsafe-stage-$kind-outside";New-Item -ItemType Directory -Force -Path $outsideRoot|Out-Null
             $outsideFile=Join-Path $outsideRoot 'sentinel.bin';[IO.File]::WriteAllBytes($outsideFile,[byte[]](1,3,5,7,9));$before=[Convert]::ToBase64String([IO.File]::ReadAllBytes($outsideFile))
@@ -951,8 +974,10 @@ $module=Get-Module agent-environment-reconciler
     # Scenario: journal.json is a hard link or a reparse-backed directory rather than one regular single-link file.
     # Purpose: Classify the transaction as malformed, retain it, and never read or mutate through the unsafe leaf.
     It 'InterT97_classifies_unsafe_journal_leaves_as_malformed_and_retains_evidence' {
-        foreach($kind in @('hard-link','junction')){
-            $caseHome=Join-Path $TestDrive "unsafe-journal-$kind-home";$transactionId=[guid]::NewGuid().ToString('N');$transactionPath=Join-Path $caseHome ".ai-instructions-txn/$transactionId";New-Item -ItemType Directory -Force -Path $transactionPath|Out-Null
+        $journalLeafKinds=@('hard-link')
+        if($IsWindows){$journalLeafKinds+='junction'}
+        foreach($kind in $journalLeafKinds){
+            $caseHome=Join-Path $TestDrive "unsafe-journal-$kind-home";$transactionId=[guid]::NewGuid().ToString('N');$transactionPath=Join-Path $caseHome ".ai-instructions-txn/$transactionId";New-TestPrivateDirectory -Path $transactionPath
             $outsideRoot=Join-Path $TestDrive "unsafe-journal-$kind-outside";New-Item -ItemType Directory -Force -Path $outsideRoot|Out-Null
             $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-user-reconciler-journal-v1.example.json');$outsideFile=Join-Path $outsideRoot 'journal.json';[IO.File]::WriteAllText($outsideFile,$journal,[Text.UTF8Encoding]::new($false));$before=[Convert]::ToBase64String([IO.File]::ReadAllBytes($outsideFile))
             $leaf=Join-Path $transactionPath 'journal.json';if($kind-ceq'hard-link'){New-Item -ItemType HardLink -Path $leaf -Target $outsideFile|Out-Null}else{New-Item -ItemType Junction -Path $leaf -Target $outsideRoot|Out-Null}
@@ -2184,13 +2209,41 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
         (Get-TestTreeSnapshot $userHome)|Should Be $before
     }
 
-    # Scenario: Catalog v3 is evaluated with Windows, Linux, and macOS capability receipts, while Catalog v2 is evaluated on Windows.
-    # Purpose: Keep production projection availability Windows-only and prevent a v2 Catalog from entering V3V5.
-    It 'UnitT40_enables_projection_runtime_only_for_Catalog_v3_on_Windows' {
-        (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 3 -CapabilityReceipt ([pscustomobject]@{os='windows'}))|Should Be $true
-        (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 3 -CapabilityReceipt ([pscustomobject]@{os='linux'}))|Should Be $false
-        (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 3 -CapabilityReceipt ([pscustomobject]@{os='macos'}))|Should Be $false
-        (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 2 -CapabilityReceipt ([pscustomobject]@{os='windows'}))|Should Be $false
+    # Scenario: Catalog v3 is evaluated with complete Windows, Linux, and macOS capability receipts, then one required capability is unavailable or absent.
+    # Purpose: Open V3V5 by proven projection capability on every supported native host while keeping Catalog v2 and incomplete receipts fail closed.
+    It 'UnitT40_enables_projection_runtime_by_complete_capability_receipt' {
+        $required=@('directory-lease','file-lease','file-identity','lock','publication','owned-file-removal','permissions','directory-publication')
+        foreach($platform in @('windows','linux','macos')){
+            $available=[pscustomobject]@{os=$platform;architecture='x64';capabilities=@($required|ForEach-Object{[pscustomobject]@{name=$_;status='available'}})}
+            (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 3 -CapabilityReceipt $available)|Should Be $true
+
+            $unavailable=$available|ConvertTo-Json -Depth 6|ConvertFrom-Json
+            ($unavailable.capabilities|Where-Object name -ceq 'directory-publication').status='unavailable'
+            (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 3 -CapabilityReceipt $unavailable)|Should Be $false
+
+            $missing=$available|ConvertTo-Json -Depth 6|ConvertFrom-Json
+            $missing.capabilities=@($missing.capabilities|Where-Object name -cne 'directory-publication')
+            (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 3 -CapabilityReceipt $missing)|Should Be $false
+        }
+        $v2=[pscustomobject]@{os='windows';architecture='x64';capabilities=@($required|ForEach-Object{[pscustomobject]@{name=$_;status='available'}})}
+        (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 2 -CapabilityReceipt $v2)|Should Be $false
+    }
+
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Linux)) {
+        # Scenario: A complete Linux capability receipt is evaluated while the process carries a WSL host marker, then after that marker is restored.
+        # Purpose: Keep WSL fail closed in the shared projection gate without disabling supported native Linux hosts.
+        It 'UnitT45_refuses_projection_runtime_on_WSL' {
+            $required=@('directory-lease','file-lease','file-identity','lock','publication','owned-file-removal','permissions','directory-publication')
+            $available=[pscustomobject]@{os='linux';architecture='x64';capabilities=@($required|ForEach-Object{[pscustomobject]@{name=$_;status='available'}})}
+            $saved=[Environment]::GetEnvironmentVariable('WSL_DISTRO_NAME')
+            try{
+                [Environment]::SetEnvironmentVariable('WSL_DISTRO_NAME','fixture-wsl')
+                (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 3 -CapabilityReceipt $available)|Should Be $false
+            }finally{[Environment]::SetEnvironmentVariable('WSL_DISTRO_NAME',$saved)}
+            if(-not(Test-AiInstructionsWslHost)){
+                (Test-AiInstructionsProjectionRuntimeAvailable -CatalogSchemaVersion 3 -CapabilityReceipt $available)|Should Be $true
+            }
+        }
     }
 }
 
@@ -2707,7 +2760,12 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
             @{schemaVersion=2;repository='https://github.com/example/ai-instructions.git';commit='89abcdef0123456789abcdef0123456789abcdef'}|ConvertTo-Json|Set-Content (Join-Path $runtime 'runtime-bundle.json') -Encoding UTF8
         }
         $processes=@();try{
-            for($i=0;$i-lt2;$i++){$out=Join-Path $TestDrive "dual-codex-$i.out";$err=Join-Path $TestDrive "dual-codex-$i.err";$processes+=,[pscustomobject]@{Process=(Start-Process -FilePath $script:TestPowerShellExecutable -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$entry,'-CodexHome',$codexHomes[$i],'-UserHome',$userHome,'-Apply','-OutputFormat','Json') -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru);Out=$out;Err=$err}}
+            for($i=0;$i-lt2;$i++){
+                $out=Join-Path $TestDrive "dual-codex-$i.out";$err=Join-Path $TestDrive "dual-codex-$i.err"
+                $startParameters=@{FilePath=$script:TestPowerShellExecutable;ArgumentList=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$entry,'-CodexHome',$codexHomes[$i],'-UserHome',$userHome,'-Apply','-OutputFormat','Json');RedirectStandardOutput=$out;RedirectStandardError=$err;PassThru=$true}
+                if($IsWindows){$startParameters.WindowStyle='Hidden'}
+                $processes+=,[pscustomobject]@{Process=(Start-Process @startParameters);Out=$out;Err=$err}
+            }
             $deadline=[DateTime]::UtcNow.AddSeconds(30);while(@(Get-ChildItem -LiteralPath $barrier -Filter '*.ready' -ErrorAction SilentlyContinue).Count-lt2){if(@($processes|Where-Object{$_.Process.HasExited}).Count-gt0){$diagnostics=@($processes|ForEach-Object{"stdout=$((Get-Content -Raw -LiteralPath $_.Out -ErrorAction SilentlyContinue)) stderr=$((Get-Content -Raw -LiteralPath $_.Err -ErrorAction SilentlyContinue))"})-join' | ';throw "entry exited before lock barrier: $diagnostics"};if([DateTime]::UtcNow-ge$deadline){throw 'entry lock barrier timeout'};Start-Sleep -Milliseconds 25}
             [IO.File]::WriteAllText((Join-Path $barrier 'go'),'go');foreach($item in $processes){$item.Process.WaitForExit(30000)|Should Be $true;$item.Process.HasExited|Should Be $true}
             $processResults=@($processes|ForEach-Object{[pscustomobject]@{Result=((Get-Content -Raw -LiteralPath $_.Out)|ConvertFrom-Json);ExitCode=$_.Process.ExitCode}})
@@ -2744,7 +2802,7 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
             [IO.File]::WriteAllText((Join-Path $agents 'update-agent-environment.lock'),'')
             if($Layout-in@('legacy-only','both')){[IO.File]::WriteAllText((Join-Path $agents 'update-agent-environment.recovery.json'),'{}')}
             if($Layout-in@('new-only','both')){
-                $name=if($Classification-ceq'invalid-name'){'invalid-name'}else{'0123456789abcdef0123456789abcdef'};$txn=Join-Path $MatrixUserHome ".ai-instructions-txn/$name";New-Item -ItemType Directory -Force -Path $txn|Out-Null
+                $name=if($Classification-ceq'invalid-name'){'invalid-name'}else{'0123456789abcdef0123456789abcdef'};$txn=Join-Path $MatrixUserHome ".ai-instructions-txn/$name";New-TestPrivateDirectory -Path $txn
                 if($Classification-ceq'malformed'){[IO.File]::WriteAllText((Join-Path $txn 'journal.json'),'{')}
                 elseif($Classification-ceq'valid'){$journal=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String;$journal.transactionId=$name;[IO.File]::WriteAllText((Join-Path $txn 'journal.json'),($journal|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))}
             }

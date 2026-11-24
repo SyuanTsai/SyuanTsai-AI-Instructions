@@ -2,8 +2,7 @@
 
 Describe 'AI instructions writer and reader gate' {
     BeforeAll {
-        $shortParent=Join-Path ([IO.Path]::GetTempPath()) 'p7e'
-        New-Item -ItemType Directory -Force -Path $shortParent|Out-Null
+        $shortParent=Get-P7eTestTempRoot
         $script:ExternalRoot=Join-Path $shortParent ([Guid]::NewGuid().ToString('N').Substring(0,8))
         New-Item -ItemType Directory -Path $script:ExternalRoot|Out-Null
         $script:V3Candidate=Join-Path $script:ExternalRoot 'src'
@@ -421,7 +420,7 @@ Describe 'AI instructions writer and reader gate' {
             $result=Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $source.ArchivePath -TargetRoot $target
             $result.ExitCode|Should Not Be 0
             (Get-AiInstructionsRefusalCode $result.Output)|Should Be closure-invalid
-            $result.Output|Should Match 'Project Skill transaction refused before remediation or project mutation'
+            (ConvertTo-P9cTestDiagnosticText $result.Output)|Should Match 'Project Skill transaction refused before remediation or project mutation'
             $result.Output|Should Match $(if($Case-like'*unmanaged'){'unmanaged'}else{$Case})
             (Get-P9bRepoSnapshot $target)|Should Be $before
             (& git -C $target rev-parse HEAD|Select-Object -First 1).Trim()|Should Be $headBefore

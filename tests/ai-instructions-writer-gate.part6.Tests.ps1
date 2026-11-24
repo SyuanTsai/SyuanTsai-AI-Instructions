@@ -2,8 +2,7 @@
 
 Describe 'AI instructions writer and reader gate' {
     BeforeAll {
-        $shortParent=Join-Path ([IO.Path]::GetTempPath()) 'p7e'
-        New-Item -ItemType Directory -Force -Path $shortParent|Out-Null
+        $shortParent=Get-P7eTestTempRoot
         $script:ExternalRoot=Join-Path $shortParent ([Guid]::NewGuid().ToString('N').Substring(0,8))
         New-Item -ItemType Directory -Path $script:ExternalRoot|Out-Null
         $script:V3Candidate=Join-Path $script:ExternalRoot 'src'
@@ -35,7 +34,7 @@ Describe 'AI instructions writer and reader gate' {
 
         $result.ExitCode|Should Not Be 0
         (Get-AiInstructionsRefusalCode $result.Output)|Should Be closure-invalid
-        $result.Output|Should Match 'final raw-byte verification failed'
+        (ConvertTo-P9cTestDiagnosticText $result.Output)|Should Match 'final raw-byte verification failed'
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))|Should Be $manifestBytes
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($skillFullPath))|Should Be `
             ([Convert]::ToBase64String([byte[]]($skillBytes+[Text.UTF8Encoding]::new($false).GetBytes("concurrent project edit`n"))))

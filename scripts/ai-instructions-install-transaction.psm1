@@ -873,8 +873,8 @@ function Remove-InstallTransactionArtifact {
             if ($null -eq $ExpectedDirectoryState -or -not (Test-InstallTransactionDirectoryStateEqual $state $ExpectedDirectoryState)) {
                 throw "Transaction directory artifact differs from the journal state: $Leaf"
             }
-            if ($TrashDirectory) {
-                if ($PlatformOs -cne 'windows') { throw 'Transaction directory trash publication requires the Windows directory-publication capability.' }
+            # Windows keeps the journaled trash publication path; Unix removes only the already identity- and inventory-bound owned tree.
+            if ($TrashDirectory -and $PlatformOs -ceq 'windows') {
                 $trashLeaf = "$Leaf.trash"
                 $trashPath = Join-Path $TransactionPath $trashLeaf
                 if ((Get-InstallTransactionEntryKind -LiteralPath $trashPath) -cne 'missing') { throw "Transaction cleanup trash already exists: $trashLeaf" }
