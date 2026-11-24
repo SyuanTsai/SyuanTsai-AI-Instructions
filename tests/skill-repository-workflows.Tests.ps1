@@ -803,7 +803,10 @@ jobs:
         Assert-Match $executor "-Filter '\*\.Tests\.ps1' -File -Recurse" 'Shard discovery must match recursive workflow discovery.'
         Assert-NotMatch $executor 'DllImport|CreateJobObject|AssignProcessToJobObject|Get-CimInstance|Stop-Process|\.Kill\(|setsid|ProcessStartInfo' 'The shard must not duplicate native containment or discovery backends.'
         Assert-Match $executor 'MainModule\.FileName' 'The bounded child must inherit the verified runner executable.'
-        Assert-NotMatch $executor 'PlatformID\]::Unix|PesterShardLinux|/proc|Pester 3\.4\.0|Windows PowerShell 5\.1' 'The bounded executor must not retain retired Unix process or legacy Pester paths.'
+        Assert-NotMatch $executor 'PesterShardLinux|Pester 3\.4\.0|Windows PowerShell 5\.1' 'The bounded executor must not retain a duplicated Unix backend or legacy Pester paths.'
+        Assert-Match $executor 'ReadAllBytes\("/proc/\$processId/cmdline"\)' 'Linux adopted-child diagnostics must read the attributed PID command line without adding a process-discovery backend.'
+        Assert-Match $executor '\$bytes\.Length -gt 4096' 'Linux adopted-child command-line evidence must remain bounded.'
+        Assert-Match $executor 'ConvertTo-PesterShardSanitizedDiagnosticText \$commandLine' 'Linux adopted-child command-line evidence must use the standard diagnostic sanitizer.'
         Assert-Match $smoke 'update-skills-catalog-lock\.ps1 -Check' 'Install Smoke must absorb production lock validation.'
         Assert-Match $smoke 'test-syp101-production-smoke\.ps1' 'Install Smoke must keep the real pinned-archive installation and idempotence exercise.'
 

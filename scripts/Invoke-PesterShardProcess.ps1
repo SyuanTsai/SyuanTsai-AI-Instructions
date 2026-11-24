@@ -234,7 +234,8 @@ function Get-PesterShardChildEnvironment {
     # Cmdlet output (Join-Path/ConvertTo-Json) can retain a PSObject wrapper in a
     # hashtable. P3's native IDictionary contract requires actual CLR strings,
     # including values the supervisor adds after this function returns.
-    $comparer = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
+    $isWindowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    $comparer = if ($isWindowsHost) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
     $values = [Collections.Generic.Dictionary[string,string]]::new($comparer)
     foreach ($name in @('PATH','PATHEXT','COMSPEC','SYSTEMROOT','WINDIR','TEMP','TMP','TMPDIR','HOME','USERPROFILE','APPDATA','LOCALAPPDATA','LANG','LC_ALL','NUMBER_OF_PROCESSORS',
         'SYP154_PESTER_P02A_SELECTED_WITNESS','SYP154_PESTER_P02A_UNSELECTED_WITNESS','SYP154_PESTER_P02A_ALPHA_WITNESS','SYP154_PESTER_P02A_BETA_WITNESS','SYP154_PESTER_P02A_RUNTIME_PATH','SYP154_PESTER_P02A_EVIDENCE_ROOT')) {
@@ -242,6 +243,17 @@ function Get-PesterShardChildEnvironment {
         if ($null -ne $value) { $values[$name] = $value }
     }
     $values['PSModulePath'] = Join-Path $PSHOME 'Modules'
+    if (-not $isWindowsHost) {
+        # Git automatic maintenance and detached gc can outlive their invoking Git
+        # process, escape the shard process group, and be adopted by the Linux
+        # subreaper without a surviving ancestry edge. Keep Git work synchronous;
+        # the owned process boundary still fails on every truly unattributed child.
+        $values['GIT_CONFIG_COUNT'] = '2'
+        $values['GIT_CONFIG_KEY_0'] = 'maintenance.auto'
+        $values['GIT_CONFIG_VALUE_0'] = 'false'
+        $values['GIT_CONFIG_KEY_1'] = 'gc.autoDetach'
+        $values['GIT_CONFIG_VALUE_1'] = 'false'
+    }
     return $values
 }
 
@@ -278,6 +290,39 @@ function Get-PesterShardStartupCleanupEvidence {
         $cause = $cause.InnerException
     }
     [pscustomobject][ordered]@{ cleanup=$cleanup; cleanupFailed=$cleanupFailed }
+}
+
+function Get-PesterShardUnixAdoptedProcessDiagnostics {
+    param([AllowNull()]$Cleanup)
+
+    $rows = [Collections.Generic.List[object]]::new()
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -or $null -eq $Cleanup) {
+        return $rows.ToArray()
+    }
+    $matches = [regex]::Matches([string]$Cleanup.Uncertainty, '(?:^|;\s*)unattributed-adopted-child:\s*(?<pid>[1-9][0-9]*)')
+    foreach ($match in $matches) {
+        $processId = [int]$match.Groups['pid'].Value
+        $commandLine = $null
+        $available = $false
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix -and (Test-Path -LiteralPath '/proc')) {
+            try {
+                $bytes = [IO.File]::ReadAllBytes("/proc/$processId/cmdline")
+                $truncated = $bytes.Length -gt 4096
+                if ($truncated) { $bytes = $bytes[0..4095] }
+                $commandLine = [Text.UTF8Encoding]::new($false,$false).GetString($bytes).Replace([char]0,' ').Trim()
+                $commandLine = ConvertTo-PesterShardSanitizedDiagnosticText $commandLine
+                if ($truncated) { $commandLine += ' [truncated]' }
+                $available = -not [string]::IsNullOrWhiteSpace($commandLine)
+            }
+            catch { $available = $false; $commandLine = $null }
+        }
+        $rows.Add([pscustomobject][ordered]@{
+            pid = $processId
+            commandLineAvailable = $available
+            commandLine = $commandLine
+        })
+    }
+    return $rows.ToArray()
 }
 
 function Format-PesterShardException {
@@ -372,6 +417,9 @@ function Invoke-PesterShardProcess {
             failureSummary=Get-PesterShardFailureSummary -Paths @($StderrPath,$StdoutPath) -OutputQuotaExceeded:$quota; error=$failure
             platformReceipt=$script:PesterShardCapabilities; artifactsRetained=$true
             caseDiagnosticsPath=($ResultPath+'.cases.json'); childScriptPath=$ChildScriptPath
+        }
+        if (-not [System.OperatingSystem]::IsWindows()) {
+            $diagnostic['unixAdoptedProcessDiagnostics'] = @(Get-PesterShardUnixAdoptedProcessDiagnostics -Cleanup $cleanup)
         }
         Write-PesterShardJson $ProcessEvidencePath $diagnostic
     }

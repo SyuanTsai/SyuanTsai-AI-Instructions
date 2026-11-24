@@ -1327,6 +1327,57 @@ Describe 'grandchild' {
             }
         }
 
+        if ($IsLinux) {
+            # Scenario: A Git-using Pester child also leaves an ordinary same-group descendant alive when its root exits.
+            # Purpose: Disable detached Git maintenance while retaining positive proof that a legitimate descendant is attributed and reclaimed.
+            It 'InterT81_disables_detached_Git_maintenance_and_reclaims_a_legitimate_descendant' {
+                $fixture=New-P02AFixture
+                $body=@'
+Describe 'Unix Git maintenance containment' {
+    It 'inherits synchronous Git maintenance policy and leaves an attributable descendant' {
+        (& git config --get maintenance.auto) | Should Be 'false'
+        (& git config --get gc.autoDetach) | Should Be 'false'
+        $start=[Diagnostics.ProcessStartInfo]::new()
+        $start.FileName=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $start.UseShellExecute=$false; $start.CreateNoWindow=$true
+        foreach ($argument in @('-NoProfile','-NonInteractive','-Command','Start-Sleep 90')) { $start.ArgumentList.Add($argument) }
+        $child=[Diagnostics.Process]::Start($start)
+        try { [IO.File]::WriteAllText($env:SYP154_PESTER_P02A_SELECTED_WITNESS,[string]$child.Id) }
+        finally { $child.Dispose() }
+        1 | Should Be 1
+    }
+}
+'@
+                Write-P02AText (Join-Path $fixture.TestRoot 'git-maintenance.Tests.ps1') $body
+                $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('git-maintenance.Tests.ps1')
+                $run=Invoke-P02AHiddenAdapter $invocation $fixture
+                Assert-P02AExpectedWithChildDiagnostics $run.ExitCode 0 $fixture 'Synchronous Git policy and legitimate descendant cleanup must pass.'
+                $evidence=Get-Content -LiteralPath (@(Get-P02AProcessEvidenceFiles $fixture)[0].FullName) -Raw | ConvertFrom-Json
+                $evidence.status | Should Be 'completed'
+                $evidence.cleanup.cleanedUp | Should Be $true
+                [int]$descendantId=[IO.File]::ReadAllText($fixture.SelectedWitness)
+                (Get-Process -Id $descendantId -ErrorAction SilentlyContinue) | Should BeNullOrEmpty
+            }
+
+            # Scenario: Linux reports a direct adopted PID without a surviving owned ancestry edge.
+            # Purpose: Preserve fail-closed handling and record a sanitized command line without ignoring or signalling the unattributed process.
+            It 'UnitT82_keeps_an_unattributed_adopted_child_failed_and_records_its_command_line' {
+                . (Get-P02AExecutorFunction 'Remove-PesterShardTerminalControlSequences')
+                . (Get-P02AExecutorFunction 'ConvertTo-PesterShardSanitizedDiagnosticText')
+                . (Get-P02AExecutorFunction 'Get-PesterShardUnixAdoptedProcessDiagnostics')
+                . (Get-P02AExecutorFunction 'ConvertTo-PesterShardProcessState')
+                $legitimate=[pscustomobject]@{CleanedUp=$true;CaptureReadersStopped=$true;CaptureResourcesClosed=$true;Uncertainty=$null;RemainingPids=@()}
+                (ConvertTo-PesterShardProcessState $legitimate 0 '' $false $true $false) | Should Be 'completed'
+                $unattributed=[pscustomobject]@{CleanedUp=$false;CaptureReadersStopped=$true;CaptureResourcesClosed=$true;Uncertainty="unattributed-adopted-child: $PID";RemainingPids=@()}
+                (ConvertTo-PesterShardProcessState $unattributed 0 '' $false $true $false) | Should Be 'cleanup-failed'
+                $diagnostics=@(Get-PesterShardUnixAdoptedProcessDiagnostics $unattributed)
+                $diagnostics.Count | Should Be 1
+                $diagnostics[0].pid | Should Be $PID
+                $diagnostics[0].commandLineAvailable | Should Be $true
+                $diagnostics[0].commandLine | Should Match 'pwsh'
+            }
+        }
+
         # Scenario: Two passing files are partitioned into two bulk shards and only partition 1 executes.
         # Purpose: Report exactly the paths in completed shards, excluding the unexecuted alpha shard.
         It 'InterT50_partition_summary_lists_only_executed_files' {
