@@ -106,7 +106,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
             if($mode-ceq'unborn'){
                 New-Item -ItemType Directory -Force -Path $target|Out-Null;& git -C $target init --quiet;& git -C $target config user.name 'P9c Test';& git -C $target config user.email 'p9c@example.test'
                 [IO.File]::WriteAllText((Join-Path $target 'AGENTS.md'),"tracked Agent`n",[Text.UTF8Encoding]::new($false));[IO.File]::WriteAllText((Join-Path $target 'product.txt'),"product`n",[Text.UTF8Encoding]::new($false));& git -C $target add -- AGENTS.md product.txt
-            }else{Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $target -Recurse;if($mode-ceq'detached'){& git -C $target checkout --detach --quiet}}
+            }else{Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $target -Recurse;if($mode-ceq'detached'){& git -C $target checkout --detach --quiet};Initialize-P9cRepositorySnapshotFixture -Repository $target}
             $before=Get-P9cPublicationStateSnapshot $target
             if($mode-ceq'unborn'){
                 $objectsRoot=Join-Path $target '.git/objects'
@@ -310,6 +310,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
     # Purpose: Preserve the external ref exactly, roll back every other operation through the shared applying-phase decision, and remove the successfully rolled-back transaction store.
     It 'InterT172_preserves_external_refs_stash_and_rolls_back_other_operations_on_durable_evidence_CAS_loss' {
         $target=Join-Path $script:ExternalRoot 'stash-durable-race';Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $target -Recurse
+        Initialize-P9cRepositorySnapshotFixture -Repository $target
         $stashBefore=(@(& git -C $target rev-parse --verify refs/stash)|Select-Object -First 1).Trim();$external=(@(& git -C $target rev-parse HEAD)|Select-Object -First 1).Trim();$stashBefore|Should -Not -BeExactly $external;$before=Get-P9cPublicationStateSnapshot $target
         $bootstrap=New-P9cStashCasRaceBootstrap -Root (Join-Path $script:ExternalRoot 'stash-durable-race-runtime') -ExternalObjectId $external
         $result=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap

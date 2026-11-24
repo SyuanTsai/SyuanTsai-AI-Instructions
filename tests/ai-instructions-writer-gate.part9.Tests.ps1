@@ -55,7 +55,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         }
         $failpointWorker={param($case)
             $caseParent=$case.CaseParent
-            $target=Join-Path $caseParent 'repo';Copy-Item -LiteralPath $case.Seed -Destination $target -Recurse;$before=Get-P9cPublicationStateSnapshot $target
+            $target=Join-Path $caseParent 'repo';Copy-Item -LiteralPath $case.Seed -Destination $target -Recurse;Initialize-P9cRepositorySnapshotFixture -Repository $target;$before=Get-P9cPublicationStateSnapshot $target
             $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $caseParent 'fp') -Failpoint $case.ActualFailpoint -RecoveryPath $case.RecoveryPath
             $failed=Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap
             $observation=[ordered]@{FailedExitCode=$failed.ExitCode;Before=$before}
@@ -89,6 +89,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         $tamperWorker={param($case)
             $caseParent=$case.CaseParent
             $target=Join-Path $caseParent 'repo';Copy-Item -LiteralPath $case.Seed -Destination $target -Recurse
+            Initialize-P9cRepositorySnapshotFixture -Repository $target
             Get-P9cPublicationStateSnapshot $target|Out-Null
             $index=(& git -C $target rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($index)){$index=Join-Path $target $index};$indexBefore=[IO.File]::ReadAllBytes($index)
             $bootstrap=New-P9cIndexLockTamperBootstrap -Root (Join-Path $caseParent 'fp') -TamperKind $case.TamperKind -RecoveryPath $case.RecoveryPath
@@ -109,6 +110,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
             }
         }
         $foreign=Join-Path $script:ExternalRoot 'index-foreign';Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $foreign -Recurse
+        Initialize-P9cRepositorySnapshotFixture -Repository $foreign
         $index=(& git -C $foreign rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($index)){$index=Join-Path $foreign $index};$indexBefore=[IO.File]::ReadAllBytes($index);$lockBytes=[byte[]](1,2,3,4);[IO.File]::WriteAllBytes(($index+'.lock'),$lockBytes)
         $result=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $foreign
         $result.ExitCode|Should -Not -Be 0;(Get-AiInstructionsRefusalCode $result.Output)|Should -Be interrupted-install
@@ -316,6 +318,7 @@ Describe 'repo v2 journal cache conditions' {
     # Purpose: Recompute the previous compact bytes for raw SHA/length comparison and keep the newly published generation compact.
     It 'InterT178_uses_compact_repo_v2_bytes_on_cache_miss_and_publication' {
         $target=Join-Path $script:ExternalRoot 'journal-cache-miss-format';Copy-Item -LiteralPath $script:JournalCacheSeed -Destination $target -Recurse
+        Set-P9cCopiedTransactionFixturePrivateDirectories -Repository $target
         $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$transaction.Count|Should -Be 1
         $transactionPath=$transaction[0].FullName;$journalPath=Join-Path $transactionPath 'journal.json'
         $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
@@ -337,6 +340,7 @@ Describe 'repo v2 journal cache conditions' {
     # Purpose: Keep the cache's trusted content and disk identity independent from every caller-owned journal object.
     It 'InterT156_keeps_trusted_journal_cache_content_isolated_from_the_caller' {
         $target=Join-Path $script:ExternalRoot 'journal-cache-caller';Copy-Item -LiteralPath $script:JournalCacheSeed -Destination $target -Recurse
+        Set-P9cCopiedTransactionFixturePrivateDirectories -Repository $target
         $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$transaction.Count|Should -Be 1
         $transactionPath=$transaction[0].FullName;$journalPath=Join-Path $transactionPath 'journal.json'
         $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
@@ -361,6 +365,7 @@ Describe 'repo v2 journal cache conditions' {
     # Purpose: Require both caller object identity and current raw SHA-256/length, clear the stale cache, and fail closed without overwriting external bytes.
     It 'InterT157_rejects_external_journal_bytes_and_clears_the_trusted_cache' {
         $target=Join-Path $script:ExternalRoot 'journal-cache-external';Copy-Item -LiteralPath $script:JournalCacheSeed -Destination $target -Recurse
+        Set-P9cCopiedTransactionFixturePrivateDirectories -Repository $target
         $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$transaction.Count|Should -Be 1
         $transactionPath=$transaction[0].FullName;$journalPath=Join-Path $transactionPath 'journal.json'
         $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
@@ -380,6 +385,7 @@ Describe 'repo v2 journal cache conditions' {
     # Purpose: Clear the prior trusted cache whenever expected readback bytes do not match the published journal.
     It 'InterT158_clears_the_trusted_cache_when_final_readback_bytes_differ' {
         $target=Join-Path $script:ExternalRoot 'journal-cache-readback';Copy-Item -LiteralPath $script:JournalCacheSeed -Destination $target -Recurse
+        Set-P9cCopiedTransactionFixturePrivateDirectories -Repository $target
         $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$transaction.Count|Should -Be 1
         $transactionPath=$transaction[0].FullName;$journalPath=Join-Path $transactionPath 'journal.json'
         $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly

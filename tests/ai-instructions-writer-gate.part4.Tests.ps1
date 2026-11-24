@@ -80,6 +80,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
     # Purpose: Prove index, ref, remediation files, manifest, and shared exclude are all pending in one write-ahead journal while the complete target state is unchanged.
     It 'InterT144_journals_each_remediation_substep_before_mutation' {
         $target=Join-Path $script:ExternalRoot 'write-ahead';Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $target -Recurse
+        Initialize-P9cRepositorySnapshotFixture -Repository $target
         $before=Get-P9cPublicationStateSnapshot $target
         $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'write-ahead-runtime') -Failpoint after-journal-prepared -RecoveryPath NextRun
         $failed=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap
@@ -111,6 +112,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         $worker={param($case)
             $caseParent=$case.CaseParent
             $target=Join-Path $caseParent 'repo';Copy-Item -LiteralPath $case.Seed -Destination $target -Recurse
+            Initialize-P9cRepositorySnapshotFixture -Repository $target
             $before=Get-P9cPublicationStateSnapshot $target
             $appliedBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $caseParent 'ap') -Failpoint before-committed-journal-write -RecoveryPath NextRun
             $appliedResult=Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $target -BootstrapPath $appliedBootstrap

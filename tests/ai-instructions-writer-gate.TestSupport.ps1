@@ -38,6 +38,16 @@ function New-P7ePrivateDirectory {
         [IO.File]::SetUnixFileMode($Path,([IO.UnixFileMode]::UserRead-bor[IO.UnixFileMode]::UserWrite-bor[IO.UnixFileMode]::UserExecute))
     }
 }
+
+function Set-P9cCopiedTransactionFixturePrivateDirectories {
+    param([Parameter(Mandatory=$true)][string]$Repository)
+    $transactionRoot=Get-P9cRepositoryTransactionRoot -Repository $Repository
+    if(-not(Test-Path -LiteralPath $transactionRoot -PathType Container)){throw "Copied transaction fixture root does not exist: $transactionRoot"}
+    New-P7ePrivateDirectory -Path $transactionRoot
+    foreach($transaction in @(Get-ChildItem -LiteralPath $transactionRoot -Directory -Force)){
+        New-P7ePrivateDirectory -Path $transaction.FullName
+    }
+}
 Import-Module (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Force
 Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-catalog-contract.psm1') -Force
 Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-source-composition.psm1') -Force
@@ -590,6 +600,25 @@ function Get-P9cFileEvidence {
     }finally{if($null-ne$fileLease){$fileLease.Dispose()};$parentLease.Dispose()}
 }
 
+function Initialize-P9cRepositorySnapshotFixture {
+    param([Parameter(Mandatory=$true)][string]$Repository)
+    $settledMtime=[DateTime]::UtcNow.AddSeconds(-5)
+    foreach($relative in @(& git --no-optional-locks -C $Repository ls-files)){
+        $path=Join-Path $Repository ([string]$relative)
+        if(Test-Path -LiteralPath $path -PathType Leaf){[IO.File]::SetLastWriteTimeUtc($path,$settledMtime)}
+    }
+    $indexPath=(& git --no-optional-locks -C $Repository rev-parse --git-path index|Select-Object -First 1).Trim()
+    if(-not[IO.Path]::IsPathRooted($indexPath)){$indexPath=Join-Path $Repository $indexPath}
+    $previousIndexRaw=$null
+    foreach($attempt in 1..4){
+        $null=@(& git -C $Repository status --porcelain=v1 --untracked-files=all)
+        $indexRaw=if(Test-Path -LiteralPath $indexPath -PathType Leaf){(Get-FileHash -Algorithm SHA256 -LiteralPath $indexPath).Hash.ToLowerInvariant()}else{'absent'}
+        if($null-ne$previousIndexRaw-and$indexRaw-ceq$previousIndexRaw){return}
+        $previousIndexRaw=$indexRaw
+    }
+    throw 'Git index stat-cache fixture did not stabilize after tracked mtimes were made non-racy.'
+}
+
 function Get-P9cPublicationStateSnapshot {
     param([Parameter(Mandatory=$true)][string]$Repository)
     $manifestPath=Join-Path $Repository '.codex/ai-instructions.manifest.json'
@@ -609,14 +638,10 @@ function Get-P9cPublicationStateSnapshot {
     $headPath=(& git --no-optional-locks -C $Repository rev-parse --git-path HEAD|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($headPath)){$headPath=Join-Path $Repository $headPath}
     $indexRows=@(& git --no-optional-locks -C $Repository ls-files --stage)|Sort-Object -CaseSensitive
     $indexEntryBytes=[Text.UTF8Encoding]::new($false).GetBytes((($indexRows-join"`n")+"`n"));$sha=[Security.Cryptography.SHA256]::Create();try{$indexEntrySha=([BitConverter]::ToString($sha.ComputeHash($indexEntryBytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
-    $previousIndexRaw=$null;$indexRaw=$null;$indexStable=$false
-    foreach($attempt in 1..4){
-        $status=(@(& git -C $Repository status --porcelain=v1 --untracked-files=all)-join"`n")
-        $indexRaw=if(Test-Path -LiteralPath $indexPath -PathType Leaf){(Get-FileHash -Algorithm SHA256 -LiteralPath $indexPath).Hash.ToLowerInvariant()}else{'absent'}
-        if($null-ne$previousIndexRaw-and$indexRaw-ceq$previousIndexRaw){$indexStable=$true;break}
-        $previousIndexRaw=$indexRaw
-    }
-    if(-not$indexStable){throw 'Git index stat-cache observation did not stabilize.'}
+    # Snapshot observation must not rewrite the raw index bytes that the recovery assertions compare.
+    # This also avoids Unix racy-clean stat-cache refreshes caused by the observer itself.
+    $status=(@(& git --no-optional-locks -C $Repository status --porcelain=v1 --untracked-files=all)-join"`n")
+    $indexRaw=if(Test-Path -LiteralPath $indexPath -PathType Leaf){(Get-FileHash -Algorithm SHA256 -LiteralPath $indexPath).Hash.ToLowerInvariant()}else{'absent'}
     $refsWithoutStash=(@(& git --no-optional-locks -C $Repository for-each-ref '--format=%(refname)%09%(objectname)'|Where-Object{[string]$_-cnotmatch'^refs/stash(?:\s|$)'}|Sort-Object -CaseSensitive)-join"`n")
     $transactionRoot=Get-P9cRepositoryTransactionRoot -Repository $Repository;$transactionResidue=if((Test-Path -LiteralPath $transactionRoot -PathType Container)-and@(Get-ChildItem -Force -LiteralPath $transactionRoot).Count-gt0){Get-P7eTreeSnapshot $transactionRoot}else{''}
     return ([ordered]@{
@@ -675,6 +700,7 @@ function Invoke-P9cInterT140FailpointMatrix {
     $worker={param($case)
         $caseParent=$case.CaseParent
         $caseRoot=Join-Path $caseParent 'repo';Copy-Item -LiteralPath $case.Seed -Destination $caseRoot -Recurse
+        Initialize-P9cRepositorySnapshotFixture -Repository $caseRoot
         $before=Get-P9cPublicationStateSnapshot $caseRoot
         $failpointBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $caseParent 'fp') -Failpoint $case.Failpoint -RecoveryPath $case.RecoveryPath
         $failed=Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.ArchivePath -TargetRoot $caseRoot -BootstrapPath $failpointBootstrap
@@ -854,15 +880,18 @@ function Invoke-P9cJournalDurabilityRecoveryMatrix {
     if($expectedResult.ExitCode-ne0){throw "Could not create journal durability after-state: $($expectedResult.Output)"}
     $expectedAfter=&$normalize (Get-P9cPublicationStateSnapshot $expectedTarget)
     $cases=@(
-        [pscustomobject]@{Phase='prepared';Failpoint='after-journal-stage-flush';DurablePhase=$null;Expected='refused'},
-        [pscustomobject]@{Phase='prepared';Failpoint='after-journal-publish-before-parent-flush';DurablePhase='prepared';Expected='before'},
-        [pscustomobject]@{Phase='applying';Failpoint='after-journal-stage-flush';DurablePhase='applying';Expected='before'},
-        [pscustomobject]@{Phase='applying';Failpoint='after-journal-publish-before-parent-flush';DurablePhase='applying';Expected='before'},
-        [pscustomobject]@{Phase='applied';Failpoint='after-journal-stage-flush';DurablePhase='applying';Expected='before'},
-        [pscustomobject]@{Phase='applied';Failpoint='after-journal-publish-before-parent-flush';DurablePhase='applied';Expected='before'},
-        [pscustomobject]@{Phase='committed';Failpoint='after-journal-stage-flush';DurablePhase='applied';Expected='before'},
-        [pscustomobject]@{Phase='committed';Failpoint='after-journal-publish-before-parent-flush';DurablePhase='committed';Expected='after'}
+        [pscustomobject]@{Phase='prepared';Failpoint='after-journal-stage-flush';DurablePhase=$null;Expected='refused';WindowsOnly=$false},
+        [pscustomobject]@{Phase='prepared';Failpoint='after-journal-publish-before-parent-flush';DurablePhase='prepared';Expected='before';WindowsOnly=$true},
+        [pscustomobject]@{Phase='applying';Failpoint='after-journal-stage-flush';DurablePhase='applying';Expected='before';WindowsOnly=$false},
+        [pscustomobject]@{Phase='applying';Failpoint='after-journal-publish-before-parent-flush';DurablePhase='applying';Expected='before';WindowsOnly=$true},
+        [pscustomobject]@{Phase='applied';Failpoint='after-journal-stage-flush';DurablePhase='applying';Expected='before';WindowsOnly=$false},
+        [pscustomobject]@{Phase='applied';Failpoint='after-journal-publish-before-parent-flush';DurablePhase='applied';Expected='before';WindowsOnly=$true},
+        [pscustomobject]@{Phase='committed';Failpoint='after-journal-stage-flush';DurablePhase='applied';Expected='before';WindowsOnly=$false},
+        [pscustomobject]@{Phase='committed';Failpoint='after-journal-publish-before-parent-flush';DurablePhase='committed';Expected='after';WindowsOnly=$true}
     )
+    # The publish-before-parent-flush injection hook is a Windows native-publication mechanism.
+    # Unix keeps the per-phase stage-flush cases as its equivalent durable-boundary coverage.
+    if(-not$IsWindows){$cases=@($cases|Where-Object{-not[bool]$_.WindowsOnly})}
     $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $ExternalRoot 'r179') -Failpoint RecoveryOnly
     $parallelCases=@(for($index=0;$index-lt$cases.Count;$index++){$caseParent=Join-Path $ExternalRoot ("c"+$index);New-Item -ItemType Directory -Path $caseParent|Out-Null;[pscustomobject]@{
         Index=$index;ExternalRoot=$ExternalRoot;Seed=$Seed;Context=$Context;ArchivePath=$ArchivePath;Recovery=$recovery
