@@ -6854,3 +6854,88 @@ Describe 'SYP354 trust-anchor rotation approval boundary' {
         $matrix | Should Match 'Trust-anchor rotation.*approval boundary.*\*\*MUST\*\* merge only after the user verifies proposed fingerprints with an independent tool'
     }
 }
+
+Describe 'SYP537 repository-level secret protection contract' -Tag 'SYP537' {
+    # Scenario: The repository-level secret protection section is missing or placed outside the release-approval boundary.
+    # Purpose: Keep the new normative control between the central CI requirements and Human Release Approval.
+    It 'UnitT10_places_repository_secret_protection_between_sections_12_3_and_13' {
+        $standardPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/skill-repository-standard.md'
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardPath
+        $sectionMatch = [regex]::Match($standard, '(?ms)^### 12\.4 Repository-level secret protection\r?\n(?<body>.*?)(?=^## |^### )')
+
+        $sectionMatch.Success | Should -Be $true
+        $standard.IndexOf('### 12.3 Central reference implementation ownership and CI', [StringComparison]::Ordinal) | Should -BeLessThan $sectionMatch.Index
+        $sectionMatch.Index | Should -BeLessThan $standard.IndexOf('## 13. AI Review and Human Release Approval', [StringComparison]::Ordinal)
+    }
+
+    # Scenario: Secret scanning or push protection is enabled only as guidance rather than a repository requirement.
+    # Purpose: Require both GitHub security_and_analysis statuses to be enabled.
+    It 'UnitT20_requires_both_GitHub_secret_protection_statuses_to_be_enabled' {
+        $standardPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/skill-repository-standard.md'
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardPath
+        $section = [regex]::Match($standard, '(?ms)^### 12\.4 Repository-level secret protection\r?\n(?<body>.*?)(?=^## |^### )').Groups['body'].Value
+        $mustPattern = '(?s)Skill source repository.*\*\*MUST\*\*.*`secret_scanning`.*`secret_scanning_push_protection`.*`status`.*`enabled`'
+
+        $section | Should -Match $mustPattern
+        $section.Replace('**MUST**', '**SHOULD**') | Should -Not -Match $mustPattern
+    }
+
+    # Scenario: Approval evidence is produced without reading the repository settings or open secret-scanning alerts.
+    # Purpose: Bind approval to both read-only GitHub REST queries.
+    It 'UnitT30_requires_the_repository_and_open_alert_REST_queries' {
+        $standardPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/skill-repository-standard.md'
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardPath
+        $section = [regex]::Match($standard, '(?ms)^### 12\.4 Repository-level secret protection\r?\n(?<body>.*?)(?=^## |^### )').Groups['body'].Value
+
+        $section | Should -Match ([regex]::Escape('GET /repos/{owner}/{repo}'))
+        $section | Should -Match ([regex]::Escape('GET /repos/{owner}/{repo}/secret-scanning/alerts?state=open'))
+    }
+
+    # Scenario: A failed repository audit can still be approved or its result is omitted from the release record.
+    # Purpose: Fail approval closed and preserve the required audit evidence.
+    It 'UnitT40_blocks_approval_on_audit_failure_and_records_release_evidence' {
+        $standardPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/skill-repository-standard.md'
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardPath
+        $section = [regex]::Match($standard, '(?ms)^### 12\.4 Repository-level secret protection\r?\n(?<body>.*?)(?=^## |^### )').Groups['body'].Value
+
+        $section | Should -Match 'release candidate \*\*MUST NOT\*\* 取得 Human Release Approval'
+        $section | Should -Match '稽核結果.*\*\*MUST\*\* 記入該次 release approval evidence'
+    }
+
+    # Scenario: Repository secret protection is reinterpreted as a new validation gate or tool integration.
+    # Purpose: Keep this repository-level control outside the formal gate-stage architecture.
+    It 'UnitT50_keeps_repository_secret_protection_outside_the_gate_stage' {
+        $standardPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/skill-repository-standard.md'
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardPath
+        $section = [regex]::Match($standard, '(?ms)^### 12\.4 Repository-level secret protection\r?\n(?<body>.*?)(?=^## |^### )').Groups['body'].Value
+
+        $section | Should -Match '不是第 8\.3 節的 gate stage'
+        foreach ($boundary in @('formal baseline tool', 'resolver adapter', 'consumer mode', 'required context')) {
+            $section | Should -Match ("不新增.*{0}" -f [regex]::Escape($boundary))
+        }
+    }
+
+    # Scenario: The repository-level control can be waived as an ordinary release exception.
+    # Purpose: Preserve the non-exception-capable security boundary.
+    It 'UnitT60_makes_repository_secret_protection_non_exception_capable' {
+        $standardPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/skill-repository-standard.md'
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardPath
+        $section = [regex]::Match($standard, '(?ms)^### 12\.4 Repository-level secret protection\r?\n(?<body>.*?)(?=^## |^### )').Groups['body'].Value
+
+        $section | Should -Match '本要求不是 exception-capable'
+    }
+
+    # Scenario: Cross-references omit the audit from approval, conformance evidence, or authority regression coverage.
+    # Purpose: Keep sections 12.2, 13.2, and 17 aligned with the new normative requirement.
+    It 'UnitT70_updates_release_approval_conformance_and_regression_cross_references' {
+        $standardPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/skill-repository-standard.md'
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardPath
+        $testsSection = [regex]::Match($standard, '(?ms)^### 12\.2 Tests\r?\n(?<body>.*?)(?=^### 12\.3)').Groups['body'].Value
+        $approvalSection = [regex]::Match($standard, '(?ms)^### 13\.2 Release Approval\r?\n(?<body>.*?)(?=^## |^### )').Groups['body'].Value
+        $conformanceSection = [regex]::Match($standard, '(?ms)^## 17\. Conformance levels\r?\n(?<body>.*?)(?=^## )').Groups['body'].Value
+
+        $testsSection | Should -Match '第 12\.4 節 repository-level secret protection'
+        $approvalSection | Should -Match 'Human Release Approval \*\*MUST\*\* 先完成第 12\.4 節'
+        $conformanceSection | Should -Match '(?m)^19\. 第 12\.4 節 repository-level secret protection 的稽核紀錄。$'
+    }
+}
