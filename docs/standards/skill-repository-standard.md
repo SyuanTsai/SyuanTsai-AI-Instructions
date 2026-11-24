@@ -864,10 +864,14 @@ Tests **MUST NOT** 因 migration 而弱化既有 integrity/security/regression g
 
 Human Release Approval（第 13.2 節）前，approver **MUST** 以唯讀 GitHub REST API 確認：
 
-- `GET /repos/{owner}/{repo}` 回應中的 `security_and_analysis.secret_scanning.status` 與 `security_and_analysis.secret_scanning_push_protection.status` 皆為 `enabled`；
-- `GET /repos/{owner}/{repo}/secret-scanning/alerts?state=open` 沒有任何 open alert。
+- `GET /repos/{owner}/{repo}` 回應中的 `security_and_analysis.secret_scanning.status` **MUST** 為 `enabled`，且 `security_and_analysis.secret_scanning_push_protection.status` **MUST** 為 `enabled`；
+- `GET /repos/{owner}/{repo}/secret-scanning/alerts?state=open&hide_secret=true&per_page=100` 依回應 `Link` header 走完所有分頁後，open alert 總數為 0。查詢 **MUST** 帶 `hide_secret=true`；稽核 **MUST NOT** 輸出、記錄或保存 alert 原始內容或 secret 值，只保存衍生的筆數與 `status` 值。
 
-任一欄位缺少或不是 `enabled`、API 無法讀取，或仍有 open alert 時，該 release candidate **MUST NOT** 取得 Human Release Approval；open alert 必須先撤銷外洩的憑證，再依 GitHub 流程關閉。稽核結果（查詢時間、repository、兩個 `status` 值與 open alert 數）**MUST** 記入該次 release approval evidence。本要求不是 exception-capable。
+讀取上述欄位需要 repository administrator 權限；alerts 端點另需 `Secret scanning alerts: read`（fine-grained token）或 `security_events`／`repo`（classic token）。
+
+Open alert **MUST** 先 triage：確認為有效外洩時，**MUST** 先撤銷或輪替該憑證，再以 `revoked` 關閉；確認為 false positive 或測試資料時，依 GitHub 對應的 resolution（`false_positive`、`used_in_tests`）關閉並在 resolution comment 記錄理由。`wont_fix` **MUST NOT** 用來放行有效外洩。
+
+任一 `status` 欄位缺少或不是 `enabled`、API 無法讀取，或 open alert 總數不為 0 時，該 release candidate **MUST NOT** 取得 Human Release Approval。稽核結果（查詢時間、repository、兩個 `status` 值與 open alert 總數）**MUST** 記入該次 release 的人工核准紀錄，例如 release PR 或 tracking issue。這份紀錄不屬於第 8.3 節 Human Approval stage 的 machine-readable evidence；`validation-security-gate.json` 與 runner 的 human-approval evidence contract 不因本節改變。本要求不是 exception-capable，第 14.2 節 exception 不得豁免。
 
 已知限制：GitHub secret scanning 以 provider pattern 為主，可能漏掉 generic 或高 entropy 的 secret。依 SYP-509 評估，本期不核准 Gitleaks 或其他第三方 secrets scanner；日後新增任何 secrets scanner 都依第 8.2 節與第 19 節處理。
 
