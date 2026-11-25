@@ -114,6 +114,17 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
             & git -C $Root -c user.name=setup-test -c user.email=setup-test@example.invalid -c core.autocrlf=false commit -q -m fixture 2>$null | Out-Null
             return [string](& git -C $Root rev-parse HEAD)
         }
+
+        function Get-SetupTestEntryFunctionSource {
+            param([Parameter(Mandatory=$true)][string]$Name,[switch]$AllowMissing)
+            $tokens=$null;$parseErrors=$null
+            $ast=[Management.Automation.Language.Parser]::ParseFile($script:SetupEntryPath,[ref]$tokens,[ref]$parseErrors)
+            if(@($parseErrors).Count-ne0){throw 'The setup entry could not be parsed for a behavioral unit test.'}
+            $functions=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$Name},$true))
+            if($functions.Count-eq0-and$AllowMissing){return $null}
+            if($functions.Count-ne1){throw "Expected exactly one setup entry function named '$Name'."}
+            return [string]$functions[0].Extent.Text
+        }
     }
 
     AfterAll { Remove-Module agent-environment-setup -Force -ErrorAction SilentlyContinue }
@@ -738,7 +749,6 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         $entry | Should Match "'-WriterSchema','V3V5'"
         $entry | Should Match "update-agent-environment\.ps1"
         $entry | Should Match 'Invoke-SetupCoordinatorChild.*?-Mode Apply'
-        $entry | Should Match ([regex]::Escape("'Apply'{& `$entry @arguments -Apply 6>`$null}"))
         $entry | Should Match "'user-agents','user-claude'"
     }
 
@@ -750,7 +760,7 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         $entry | Should Match "-ForceCheck\s+-InstallApproved"
         $cloudFunction = [regex]::Match($entry,'(?s)function Invoke-SetupLinuxCloudWiring \{.*?(?=\r?\n\$modeName =)').Value
         $cloudFunction | Should Not Match 'Import-Module\s+\$updaterPath'
-        $entry | Should Match '(?s)\$childScript=@''.*Import-Module \$updaterPath.*''@.*''-EncodedCommand'',\$encoded'
+        $entry | Should Match 'Invoke-SetupLinuxUpdaterChild'
         $entry | Should Match 'Linux updater workflow child'
         $entry | Should Match "(?s)bootstrap-ai-instructions\.ps1.*?-ValidateOnly"
         $entry | Should Match "'-ExpectedCurrentCommit'"
@@ -767,8 +777,6 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         $module | Should Match 'unmanaged-collision'
         $entry | Should Match 'Invoke-SetupCoordinatorChild.*?-Mode VerifyOnly'
         $entry | Should Match 'Invoke-SetupCoordinatorChild.*?-Mode WhatIf'
-        $entry | Should Match ([regex]::Escape("'VerifyOnly'{& `$entry @arguments -VerifyOnly 6>`$null}"))
-        $entry | Should Match ([regex]::Escape("'WhatIf'{& `$entry @arguments -Apply -WhatIf 6>`$null}"))
         $entry | Should Match '(?s)Invoke-SetupProjectionCollisionPreflight.*?if\(\$cloudPlan\.action-ceq''install''\)'
         $entry | Should Match 'Invoke-PlatformPreparationCommand'
         $entry | Should Match 'projection-collision'
@@ -821,12 +829,13 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
     # Scenario: The public USER coordinator returns current, applied, concurrent, unmanaged collision, or another failure.
     # Purpose: Translate existing coordinator evidence into stable setup actions and typed exit codes without weakening its assertions.
     It 'UnitT47_maps_existing_projection_results_to_setup_actions_and_typed_refusals' {
-        (Resolve-AgentEnvironmentSetupProjectionResult ([pscustomobject]@{outcome='current';exitCode=0;failureDetails=@()})).action | Should BeExactly 'current'
-        (Resolve-AgentEnvironmentSetupProjectionResult ([pscustomobject]@{outcome='applied';exitCode=0;failureDetails=@()})).action | Should BeExactly 'applied'
-        (Resolve-AgentEnvironmentSetupProjectionResult ([pscustomobject]@{outcome='planned';exitCode=0;failureDetails=@()})).action | Should BeExactly 'planned'
-        (Resolve-AgentEnvironmentSetupProjectionResult ([pscustomobject]@{outcome='failed';exitCode=1;failureDetails=@([pscustomobject]@{code='unmanaged-collision'})})).code | Should BeExactly 'projection-collision'
-        (Resolve-AgentEnvironmentSetupProjectionResult ([pscustomobject]@{outcome='concurrent';exitCode=3;failureDetails=@()})).code | Should BeExactly 'concurrent'
-        (Resolve-AgentEnvironmentSetupProjectionResult ([pscustomobject]@{outcome='failed';exitCode=1;failureDetails=@([pscustomobject]@{code='mutation-failure'})})).code | Should BeExactly 'projection-failed'
+        (Resolve-AgentEnvironmentSetupProjectionResult ([pscustomobject]@{outcome='current';exitCode=0;failureDetails=@()}) -AllowedActions current).action | Should BeExactly 'current'
+        (Resolve-AgentEnvironmentSetupProjectionResult ([pscustomobject]@{outcome='applied';exitCode=0;failureDetails=@()}) -AllowedActions @('applied','current')).action | Should BeExactly 'applied'
+        (Resolve-AgentEnvironmentSetupProjectionResult ([pscustomobject]@{outcome='planned';exitCode=0;failureDetails=@()}) -AllowedActions @('planned','current')).action | Should BeExactly 'planned'
+        (Resolve-AgentEnvironmentSetupProjectionResult ([pscustomobject]@{outcome='planned';exitCode=0;failureDetails=@()}) -AllowedActions @('applied','current')).code | Should BeExactly 'projection-failed'
+        (Resolve-AgentEnvironmentSetupProjectionResult ([pscustomobject]@{outcome='failed';exitCode=1;failureDetails=@([pscustomobject]@{code='unmanaged-collision'})}) -AllowedActions @('planned','current')).code | Should BeExactly 'projection-collision'
+        (Resolve-AgentEnvironmentSetupProjectionResult ([pscustomobject]@{outcome='concurrent';exitCode=3;failureDetails=@()}) -AllowedActions @('planned','current')).code | Should BeExactly 'concurrent'
+        (Resolve-AgentEnvironmentSetupProjectionResult ([pscustomobject]@{outcome='failed';exitCode=1;failureDetails=@([pscustomobject]@{code='mutation-failure'})}) -AllowedActions @('planned','current')).code | Should BeExactly 'projection-failed'
     }
 
     # Scenario: A verified config excludes one default Skill, while a descendant Catalog retires an installed Skill in favor of its replacement.
@@ -861,22 +870,22 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         finally { [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_CAPABILITY_EVIDENCE',$savedEvidence) }
     }
 
-    # Scenario: WhatIf writes host diagnostics before its JSON result, and coordinator/updater children report concurrency or a multi-line error.
-    # Purpose: Keep stdout bound to the machine-readable result, map both normal contention outcomes to 26, and surface only the sanitized first child error line.
-    It 'UnitT49_isolates_child_machine_output_and_preserves_typed_diagnostics' {
-        $entry = [IO.File]::ReadAllText($script:SetupEntryPath)
-        $preflight = [regex]::Match($entry,'(?s)function Invoke-SetupProjectionCollisionPreflight \{.*?(?=\r?\nfunction Invoke-SetupLinuxUpdaterChild)').Value
-        $updater = [regex]::Match($entry,'(?s)function Invoke-SetupLinuxUpdaterChild \{.*?(?=\r?\nfunction Invoke-SetupLinuxCloudWiring)').Value
-        $collision = [regex]::Match($entry,'(?s)function Test-SetupExpectedProjectionCollision \{.*?(?=\r?\nfunction Invoke-SetupProjectionCollisionPreflight)').Value
-        $entry | Should Match 'Resolve-AgentEnvironmentSetupSkillIds'
-        $entry | Should Match '6>\$null'
-        $preflight | Should Match 'Resolve-AgentEnvironmentSetupProjectionResult'
-        $updater | Should Match 'Resolve-AgentEnvironmentSetupProjectionResult'
-        $collision | Should Not Match 'Where-Object\{\$_.default-eq\$true\}'
-        $entry | Should Match 'Get-AgentEnvironmentSetupChildErrorLine'
+    # Scenario: Child stderr is serialized CLIXML and stdout contains multiple unexpected lines including HOME and a long payload.
+    # Purpose: Decode the first human-readable record and report a sanitized, bounded stdout summary without weakening the one-JSON-line contract.
+    It 'UnitT49_decodes_serialized_child_errors_and_bounds_unexpected_stdout_diagnostics' {
         $diagnosticHome = Join-Path $TestDrive 'diagnostic-home'
         [void][IO.Directory]::CreateDirectory($diagnosticHome)
-        (Get-AgentEnvironmentSetupChildErrorLine -Stderr ("`nfirst $diagnosticHome failure`nsecond failure") -UserHome $diagnosticHome) | Should BeExactly 'first ~ failure'
+        $record=[Management.Automation.ErrorRecord]::new([InvalidOperationException]::new("first $diagnosticHome failure"),'fixture-child',[Management.Automation.ErrorCategory]::InvalidOperation,$null)
+        $clixml="#< CLIXML`n"+[Management.Automation.PSSerializer]::Serialize($record)
+        (Get-AgentEnvironmentSetupChildErrorLine -Stderr $clixml -UserHome $diagnosticHome) | Should BeExactly 'first ~ failure'
+
+        . ([scriptblock]::Create((Get-SetupTestEntryFunctionSource ConvertFrom-SetupOwnedJsonResult)))
+        $run=[pscustomobject]@{stdout="unexpected $diagnosticHome line`n$((('x'*900)))`n{`"outcome`":`"planned`",`"exitCode`":0}";stderr=''}
+        $failure=$null
+        try{ConvertFrom-SetupOwnedJsonResult $run projection-failed 'fixture child' $diagnosticHome|Out-Null}catch{$failure=$_}
+        $failure|Should Not BeNullOrEmpty
+        $failure.Exception.Message|Should Match 'Child stdout summary: unexpected ~ line'
+        $failure.Exception.Message.Length|Should BeLessOrEqual 900
     }
 
     # Scenario: A clean same-pin rerun has no changes, while a missing manifest-owned file is managed drift and personal bytes coexist outside the managed inventory.
@@ -885,6 +894,49 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         $readme = [IO.File]::ReadAllText((Join-Path $script:SetupRepositoryRoot 'README.md'))
         $readme | Should Match 'clean same-pin rerun.*byte-identical.*managed drift.*repairs'
         $readme | Should Match '乾淨的相同 pin 重跑.*byte-identical.*受管 drift.*修復'
+    }
+
+    # Scenario: A real ShouldProcess-aware cmdlet writes WhatIf through the host, while an Apply-mode error uses PowerShell's error stream.
+    # Purpose: Exercise the production encoded child launch so every mode emits exactly one JSON success line, host UI cannot pollute stdout, and stderr is text rather than CLIXML.
+    It 'UnitT51_runs_the_coordinator_in_a_hostless_text_child_for_every_mode' {
+        function Invoke-SetupOwnedCommand {
+            param([string]$RuntimeExecutable,[string[]]$Arguments,[Collections.IDictionary]$Environment,[string]$WorkingDirectory,[string]$FailureCode,[string]$Context,[switch]$AllowNonZero)
+            $start=[Diagnostics.ProcessStartInfo]::new($RuntimeExecutable)
+            $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true;$start.WorkingDirectory=$WorkingDirectory
+            foreach($argument in $Arguments){[void]$start.ArgumentList.Add($argument)}
+            foreach($key in $Environment.Keys){$start.Environment[[string]$key]=[string]$Environment[$key]}
+            $process=[Diagnostics.Process]::new();$process.StartInfo=$start
+            try{
+                if(-not$process.Start()){throw 'fixture child could not start'}
+                $process.StandardInput.Close()
+                $stdoutTask=$process.StandardOutput.ReadToEndAsync();$stderrTask=$process.StandardError.ReadToEndAsync();$process.WaitForExit()
+                return [pscustomobject]@{exitCode=$process.ExitCode;stdout=$stdoutTask.Result;stderr=$stderrTask.Result}
+            }finally{$process.Dispose()}
+        }
+
+        $encodedSource=Get-SetupTestEntryFunctionSource Invoke-SetupEncodedChild -AllowMissing
+        if($null-ne$encodedSource){. ([scriptblock]::Create($encodedSource))}
+        . ([scriptblock]::Create((Get-SetupTestEntryFunctionSource Invoke-SetupCoordinatorChild)))
+        $probePath=Join-Path $TestDrive 'whatif-must-not-exist'
+        $fixturePath=Join-Path $TestDrive 'fixture-coordinator.ps1'
+        [IO.File]::WriteAllText($fixturePath,@'
+[CmdletBinding(SupportsShouldProcess=$true)]param([string]$CodexHome,[string]$UserHome,[switch]$Apply,[switch]$VerifyOnly,[string]$OutputFormat)
+if($WhatIfPreference){New-Item -ItemType Directory -Path ([string]$env:AI_SETUP_TEST_WHATIF_PATH)|Out-Null}
+if($Apply-and-not$WhatIfPreference){Write-Error 'fixture apply diagnostic' -ErrorAction Continue}
+$outcome=if($WhatIfPreference){'planned'}elseif($Apply){'applied'}else{'current'}
+[pscustomobject]@{outcome=$outcome;exitCode=0;failureDetails=@()}|ConvertTo-Json -Compress
+exit 0
+'@,[Text.UTF8Encoding]::new($false))
+        $environment=[ordered]@{HOME=$TestDrive;AI_SETUP_TEST_WHATIF_PATH=$probePath}
+        foreach($case in @(@{Mode='WhatIf';Outcome='planned'},@{Mode='Apply';Outcome='applied'},@{Mode='VerifyOnly';Outcome='current'})){
+            $run=Invoke-SetupCoordinatorChild -RuntimeExecutable ([Environment]::ProcessPath) -EntryPath $fixturePath -CodexHome (Join-Path $TestDrive '.codex') -UserHome $TestDrive -Mode $case.Mode -Environment $environment -WorkingDirectory $TestDrive
+            $run.exitCode|Should Be 0
+            $lines=@(([string]$run.stdout).Split("`n")|ForEach-Object{$_.Trim()}|Where-Object{$_.Length-gt0})
+            $lines.Count|Should Be 1
+            ($lines[0]|ConvertFrom-Json).outcome|Should BeExactly $case.Outcome
+            if($case.Mode-ceq'Apply'){$run.stderr|Should Match 'fixture apply diagnostic';$run.stderr|Should Not Match '^#< CLIXML'}
+        }
+        Test-Path -LiteralPath $probePath|Should Be $false
     }
 }
 
@@ -1859,14 +1911,14 @@ foreach ($file in $desiredFiles) {
     if ((Test-Path -LiteralPath $full) -and -not $owned.ContainsKey([string]$file.targetPath)) { $collision = $true }
 }
 if (Test-Path -LiteralPath (Join-Path $UserHome '.agents/fixture-coordinator-concurrent')) {
-    if ($WhatIfPreference) { Write-Host 'What if: fixture coordinator would acquire the USER projection lock.' }
+    if ($WhatIfPreference) { New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) 'fixture-coordinator-concurrent-never-created') | Out-Null }
     [pscustomobject]@{ outcome='concurrent'; exitCode=3; failureDetails=@() } | ConvertTo-Json -Compress
     exit 3
 }
 if ($WhatIfPreference) {
-    # Production WhatIf emits host/information records before its JSON success
-    # record because WhatIfPreference reaches ShouldProcess-aware cmdlets.
-    Write-Host 'What if: fixture coordinator would reconcile USER projections.'
+    # Match production: ShouldProcess writes through the host UI rather than
+    # information stream 6 when WhatIfPreference reaches New-Item.
+    New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) 'fixture-coordinator-whatif-never-created') | Out-Null
     if ($collision) {
         [pscustomobject]@{ outcome='failed'; exitCode=1; failureDetails=@([pscustomobject]@{code='unmanaged-collision'}) } | ConvertTo-Json -Compress -Depth 5
         exit 1

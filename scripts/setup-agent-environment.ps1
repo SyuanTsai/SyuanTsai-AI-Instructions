@@ -219,10 +219,11 @@ function ConvertFrom-SetupOwnedJsonResult {
         [Parameter(Mandatory=$true)][string]$UserHome
     )
     $detail=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$Run.stderr) -UserHome $UserHome
+    $stdoutSummary=Get-AgentEnvironmentSetupChildOutputSummary -Stdout ([string]$Run.stdout) -UserHome $UserHome
     $lines=@(([string]$Run.stdout).Split("`n")|ForEach-Object{$_.TrimEnd("`r")}|Where-Object{$_.Length-gt0})
-    if($lines.Count-ne1){throw (New-AgentEnvironmentSetupRefusal $FailureCode "$Context did not return exactly one JSON line. Child stderr: $detail")}
+    if($lines.Count-ne1){throw (New-AgentEnvironmentSetupRefusal $FailureCode "$Context did not return exactly one JSON line. Child stdout summary: $stdoutSummary. Child stderr: $detail")}
     try{return $lines[0]|ConvertFrom-Json -ErrorAction Stop}
-    catch{throw (New-AgentEnvironmentSetupRefusal $FailureCode "$Context returned invalid JSON. Child stderr: $detail")}
+    catch{throw (New-AgentEnvironmentSetupRefusal $FailureCode "$Context returned invalid JSON. Child stdout summary: $stdoutSummary. Child stderr: $detail")}
 }
 
 function Get-SetupExpectedCommitText {
@@ -358,6 +359,20 @@ function Test-SetupExpectedProjectionCollision {
     return $false
 }
 
+function Invoke-SetupEncodedChild {
+    param(
+        [Parameter(Mandatory=$true)][string]$RuntimeExecutable,
+        [Parameter(Mandatory=$true)][string]$Script,
+        [Parameter(Mandatory=$true)][Collections.IDictionary]$Environment,
+        [Parameter(Mandatory=$true)][string]$WorkingDirectory,
+        [Parameter(Mandatory=$true)][string]$FailureCode,
+        [Parameter(Mandatory=$true)][string]$Context,
+        [switch]$AllowNonZero
+    )
+    $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Script))
+    return Invoke-SetupOwnedCommand -RuntimeExecutable $RuntimeExecutable -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-OutputFormat','Text','-EncodedCommand',$encoded) -Environment $Environment -WorkingDirectory $WorkingDirectory -FailureCode $FailureCode -Context $Context -AllowNonZero:$AllowNonZero
+}
+
 function Invoke-SetupCoordinatorChild {
     param(
         [Parameter(Mandatory=$true)][string]$RuntimeExecutable,
@@ -375,17 +390,41 @@ function Invoke-SetupCoordinatorChild {
     $childEnvironment['AI_SETUP_COORDINATOR_MODE']=$Mode
     $childEnvironment['AI_SETUP_COORDINATOR_USER_HOME']=$UserHome
     $childScript=@'
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
 $entry=[string]$env:AI_SETUP_COORDINATOR_ENTRY
-$arguments=@('-CodexHome',[string]$env:AI_SETUP_COORDINATOR_CODEX_HOME,'-UserHome',[string]$env:AI_SETUP_COORDINATOR_USER_HOME,'-OutputFormat','Json')
-switch([string]$env:AI_SETUP_COORDINATOR_MODE){
-    'WhatIf'{& $entry @arguments -Apply -WhatIf 6>$null}
-    'Apply'{& $entry @arguments -Apply 6>$null}
-    'VerifyOnly'{& $entry @arguments -VerifyOnly 6>$null}
-    default{throw 'Unsupported setup coordinator child mode.'}
+$powerShell=[powershell]::Create()
+$childExitCode=1
+try{
+    [void]$powerShell.AddCommand($entry)
+    [void]$powerShell.AddParameter('CodexHome',[string]$env:AI_SETUP_COORDINATOR_CODEX_HOME)
+    [void]$powerShell.AddParameter('UserHome',[string]$env:AI_SETUP_COORDINATOR_USER_HOME)
+    [void]$powerShell.AddParameter('OutputFormat','Json')
+    switch([string]$env:AI_SETUP_COORDINATOR_MODE){
+        'WhatIf'{[void]$powerShell.AddParameter('Apply',$true);[void]$powerShell.AddParameter('WhatIf',$true)}
+        'Apply'{[void]$powerShell.AddParameter('Apply',$true)}
+        'VerifyOnly'{[void]$powerShell.AddParameter('VerifyOnly',$true)}
+        default{throw 'Unsupported setup coordinator child mode.'}
+    }
+    $output=@($powerShell.Invoke())
+    if($powerShell.Streams.Error.Count-gt0){[Console]::Error.WriteLine([string]$powerShell.Streams.Error[0])}
+    foreach($item in $output){Write-Output ([string]$item)}
+    if($output.Count-ne1){[Console]::Error.WriteLine("Coordinator success stream contained $($output.Count) records; exactly one JSON result is required.")}
+    else{
+        try{$result=[string]$output[0]|ConvertFrom-Json -ErrorAction Stop}
+        catch{[Console]::Error.WriteLine('Coordinator success stream did not contain valid JSON.');$result=$null}
+        if($null-ne$result-and$null-ne$result.PSObject.Properties['exitCode']){$childExitCode=[int]$result.exitCode}
+        elseif($null-ne$result){[Console]::Error.WriteLine('Coordinator JSON result did not contain exitCode.')}
+    }
 }
+catch{
+    if($powerShell.Streams.Error.Count-gt0){[Console]::Error.WriteLine([string]$powerShell.Streams.Error[0])}
+    else{[Console]::Error.WriteLine([string]$_.Exception.Message)}
+}
+finally{$powerShell.Dispose()}
+exit $childExitCode
 '@
-    $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
-    return Invoke-SetupOwnedCommand -RuntimeExecutable $RuntimeExecutable -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -Environment $childEnvironment -WorkingDirectory $WorkingDirectory -FailureCode projection-failed -Context "USER projection $Mode" -AllowNonZero
+    return Invoke-SetupEncodedChild -RuntimeExecutable $RuntimeExecutable -Script $childScript -Environment $childEnvironment -WorkingDirectory $WorkingDirectory -FailureCode projection-failed -Context "USER projection $Mode" -AllowNonZero
 }
 
 function Invoke-SetupProjectionCollisionPreflight {
@@ -438,7 +477,7 @@ function Invoke-SetupProjectionCollisionPreflight {
     if(-not$hasInstalledCoordinator){return}
     $preflightRun=Invoke-SetupCoordinatorChild -RuntimeExecutable $RuntimeExecutable -EntryPath $environmentEntry -CodexHome $CodexHome -UserHome $UserHome -Mode WhatIf -Environment $Environment -WorkingDirectory $RepositoryRoot
     $preflight=ConvertFrom-SetupOwnedJsonResult $preflightRun projection-failed 'USER projection WhatIf' $UserHome
-    $preflightDecision=Resolve-AgentEnvironmentSetupProjectionResult $preflight
+    $preflightDecision=Resolve-AgentEnvironmentSetupProjectionResult $preflight -AllowedActions @('planned','current')
     $childError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$preflightRun.stderr) -UserHome $UserHome
     if([string]$preflightDecision.code-ceq'projection-collision'){
         throw (New-AgentEnvironmentSetupRefusal projection-collision "USER projection WhatIf refused unmanaged target bytes before runtime mutation. Child stderr: $childError")
@@ -521,10 +560,9 @@ $installCandidate={
 $workflow=& $updater.ExportedCommands['Invoke-AiInstructionsUpdateWorkflow'] -CodexHome $codexHome -ForceCheck -InstallApproved -ResolveCandidate $resolveCandidate -AcquireCandidate $acquireCandidate -InstallCandidate $installCandidate
 $workflow|ConvertTo-Json -Depth 8 -Compress
 '@
-    $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
-    $run=Invoke-SetupOwnedCommand -RuntimeExecutable $RuntimeExecutable -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -Environment $childEnvironment -WorkingDirectory $RepositoryRoot -FailureCode update-failed -Context 'Linux updater workflow child'
+    $run=Invoke-SetupEncodedChild -RuntimeExecutable $RuntimeExecutable -Script $childScript -Environment $childEnvironment -WorkingDirectory $RepositoryRoot -FailureCode update-failed -Context 'Linux updater workflow child'
     $workflow=ConvertFrom-SetupOwnedJsonResult $run update-failed 'Linux updater workflow child' ([string]$Environment['HOME'])
-    $workflowDecision=Resolve-AgentEnvironmentSetupProjectionResult $workflow
+    $workflowDecision=Resolve-AgentEnvironmentSetupProjectionResult $workflow -AllowedActions installed
     $childError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$run.stderr) -UserHome ([string]$Environment['HOME'])
     if([string]$workflowDecision.code-ceq'concurrent'){throw (New-AgentEnvironmentSetupRefusal concurrent "Linux updater workflow was concurrent. Child stderr: $childError")}
     if([string]$workflow.outcome-cne'installed'){throw (New-AgentEnvironmentSetupRefusal update-failed "Linux updater outcome '$($workflow.outcome)' was refused. Child stderr: $childError")}
@@ -578,13 +616,13 @@ function Invoke-SetupLinuxCloudWiring {
     # collision checks continue to preserve unmanaged bytes.
     $applyRun=Invoke-SetupCoordinatorChild -RuntimeExecutable $RuntimeExecutable -EntryPath $environmentEntry -CodexHome $CodexHome -UserHome $UserHome -Mode Apply -Environment $Environment -WorkingDirectory $RepositoryRoot
     $apply=ConvertFrom-SetupOwnedJsonResult $applyRun projection-failed 'USER projection Apply' $UserHome
-    $applyDecision=Resolve-AgentEnvironmentSetupProjectionResult $apply
+    $applyDecision=Resolve-AgentEnvironmentSetupProjectionResult $apply -AllowedActions @('applied','current')
     $applyError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$applyRun.stderr) -UserHome $UserHome
     if([string]$applyDecision.code-ceq'projection-collision'){throw (New-AgentEnvironmentSetupRefusal projection-collision "USER projection Apply refused unmanaged target bytes after the pre-mutation preflight. Child stderr: $applyError")}
     if($null-ne$applyDecision.code){throw (New-AgentEnvironmentSetupRefusal ([string]$applyDecision.code) "USER projection Apply was refused. Child stderr: $applyError")}
     $verifyRun=Invoke-SetupCoordinatorChild -RuntimeExecutable $RuntimeExecutable -EntryPath $environmentEntry -CodexHome $CodexHome -UserHome $UserHome -Mode VerifyOnly -Environment $Environment -WorkingDirectory $RepositoryRoot
     $verify=ConvertFrom-SetupOwnedJsonResult $verifyRun projection-failed 'USER projection VerifyOnly' $UserHome
-    $verifyDecision=Resolve-AgentEnvironmentSetupProjectionResult $verify
+    $verifyDecision=Resolve-AgentEnvironmentSetupProjectionResult $verify -AllowedActions current
     $verifyError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$verifyRun.stderr) -UserHome $UserHome
     if($null-ne$verifyDecision.code-or$verifyDecision.action-cne'current'){throw (New-AgentEnvironmentSetupRefusal $(if($null-ne$verifyDecision.code){[string]$verifyDecision.code}else{'projection-failed'}) "USER projection readiness verification was refused. Child stderr: $verifyError")}
     return [pscustomobject][ordered]@{runtimeCommit=[string]$activeBundle.commit;installAction=$installAction;projectionAction=[string]$applyDecision.action}

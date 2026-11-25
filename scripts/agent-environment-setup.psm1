@@ -106,10 +106,13 @@ function Get-AgentEnvironmentSetupCloudPlan {
 }
 
 function Resolve-AgentEnvironmentSetupProjectionResult {
-    param([Parameter(Mandatory = $true)] $Result)
+    param(
+        [Parameter(Mandatory = $true)] $Result,
+        [Parameter(Mandatory = $true)][ValidateSet('applied','current','planned','installed')][string[]] $AllowedActions
+    )
     $outcome = if ($null -ne $Result.PSObject.Properties['outcome']) { [string]$Result.outcome } else { '' }
     $exitCode = if ($null -ne $Result.PSObject.Properties['exitCode']) { [int]$Result.exitCode } else { 1 }
-    if ($exitCode -eq 0 -and $outcome -cin @('applied','current','planned')) {
+    if ($exitCode -eq 0 -and $outcome -cin $AllowedActions) {
         return [pscustomobject][ordered]@{ action=$outcome.ToLowerInvariant(); code=$null }
     }
     if ($exitCode -eq 3 -or $outcome -ceq 'concurrent') {
@@ -345,10 +348,51 @@ function ConvertTo-AgentEnvironmentSetupSanitizedText {
 
 function Get-AgentEnvironmentSetupChildErrorLine {
     param([AllowNull()][string] $Stderr, [Parameter(Mandatory = $true)][string] $UserHome)
-    $sanitized = ConvertTo-AgentEnvironmentSetupSanitizedText $Stderr $UserHome
+    $diagnostic = $Stderr
+    if (-not [string]::IsNullOrWhiteSpace($diagnostic) -and $diagnostic.TrimStart().StartsWith('#< CLIXML',[StringComparison]::Ordinal)) {
+        $serialized = [regex]::Replace($diagnostic,'^\s*#< CLIXML\s*','',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
+        try {
+            $records = @([Management.Automation.PSSerializer]::Deserialize($serialized))
+            $recordText = foreach ($record in $records) {
+                if ($null -eq $record) { continue }
+                $candidate = $null
+                $exceptionProperty = $record.PSObject.Properties['Exception']
+                if ($null -ne $exceptionProperty -and $null -ne $exceptionProperty.Value) {
+                    $messageProperty = $exceptionProperty.Value.PSObject.Properties['Message']
+                    if ($null -ne $messageProperty) { $candidate = [string]$messageProperty.Value }
+                }
+                if ([string]::IsNullOrWhiteSpace($candidate)) {
+                    $messageProperty = $record.PSObject.Properties['Message']
+                    if ($null -ne $messageProperty) { $candidate = [string]$messageProperty.Value }
+                }
+                if ([string]::IsNullOrWhiteSpace($candidate)) { $candidate = [string]$record }
+                if (-not [string]::IsNullOrWhiteSpace($candidate)) { $candidate }
+            }
+            $diagnostic = if (@($recordText).Count -eq 0) { '<unreadable serialized child stderr>' } else { @($recordText) -join "`n" }
+        }
+        catch { $diagnostic = '<unreadable serialized child stderr>' }
+    }
+    $sanitized = ConvertTo-AgentEnvironmentSetupSanitizedText $diagnostic $UserHome
     $line = @(([string]$sanitized).Split("`n") | ForEach-Object { $_.TrimEnd("`r").Trim() } | Where-Object { $_.Length -gt 0 } | Select-Object -First 1)
     if ($line.Count -eq 0) { return '<empty>' }
     return [string]$line[0]
+}
+
+function Get-AgentEnvironmentSetupChildOutputSummary {
+    param([AllowNull()][string] $Stdout, [Parameter(Mandatory = $true)][string] $UserHome)
+    $sanitized = ConvertTo-AgentEnvironmentSetupSanitizedText $Stdout $UserHome
+    $lines = @(([string]$sanitized).Split("`n") | ForEach-Object { $_.TrimEnd("`r").Trim() } | Where-Object { $_.Length -gt 0 })
+    if ($lines.Count -eq 0) { return '<empty>' }
+    $parts = [Collections.Generic.List[string]]::new()
+    foreach ($line in @($lines | Select-Object -First 3)) {
+        $normalized = [regex]::Replace([string]$line,'\s+',' ',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
+        if ($normalized.Length -gt 160) { $normalized = $normalized.Substring(0,157) + '...' }
+        $parts.Add($normalized)
+    }
+    if ($lines.Count -gt 3) { $parts.Add("... (+$($lines.Count-3) lines)") }
+    $summary = $parts -join ' | '
+    if ($summary.Length -gt 512) { $summary = $summary.Substring(0,509) + '...' }
+    return $summary
 }
 
 # Runtime receipt persistence: Resolve-PlatformPowerShell returns absolute paths.
@@ -1228,7 +1272,7 @@ Export-ModuleMember -Function @(
     'Assert-AgentEnvironmentSetupPolicyTsv','Get-AgentEnvironmentSetupRid','Get-AgentEnvironmentSetupPolicyAsset',
     'Get-AgentEnvironmentSetupLayout','ConvertTo-AgentEnvironmentSetupHomePath','ConvertFrom-AgentEnvironmentSetupHomePath',
     'New-AgentEnvironmentSetupRuntimeAttemptLayout',
-    'ConvertTo-AgentEnvironmentSetupSanitizedText','Get-AgentEnvironmentSetupChildErrorLine','ConvertTo-AgentEnvironmentSetupStoredRuntimeReceipt',
+    'ConvertTo-AgentEnvironmentSetupSanitizedText','Get-AgentEnvironmentSetupChildErrorLine','Get-AgentEnvironmentSetupChildOutputSummary','ConvertTo-AgentEnvironmentSetupStoredRuntimeReceipt',
     'ConvertFrom-AgentEnvironmentSetupStoredRuntimeReceipt','Assert-AgentEnvironmentSetupRuntimeReceiptLayout','Get-AgentEnvironmentSetupPlan',
     'Assert-AgentEnvironmentSetupPhysicalPath','Get-AgentEnvironmentSetupUserHome','Assert-AgentEnvironmentSetupCodexHome',
     'Assert-AgentEnvironmentSetupCommit','Test-AgentEnvironmentSetupSameFile','Get-AgentEnvironmentSetupChildEnvironment','Read-AgentEnvironmentSetupFile',
