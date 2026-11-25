@@ -1923,3 +1923,14 @@ Describe 'SYP354 trust-anchor tool workflow isolation' {
         }
     }
 }
+
+Describe 'SYP536 Unicode check required-context guard' -Tag 'SYP536' {
+    # Scenario: a central native PowerShell package check is added without changing formal tool routing.
+    # Purpose: preserve the three reviewed required contexts and prevent an accidental Unicode context.
+    It 'UnitT10_preserves_the_existing_required_contexts' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $interface=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'consumer/consumer-gate-interface.json')|ConvertFrom-Json
+
+        (@($interface.requiredContexts)-join '|')|Should -BeExactly 'repository-contract|skill-validator|skill-tools'
+    }
+}

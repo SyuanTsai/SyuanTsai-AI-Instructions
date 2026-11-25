@@ -1752,3 +1752,25 @@ Describe 'Revoked production validation trust anchors' {
         (Test-Path -LiteralPath $artifacts) | Should Be $false
     }
 }
+
+Describe 'SYP536 package-adapter finding release gate' -Tag 'SYP536' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot 'Initialize-SourceGateFixture.ps1')
+    }
+
+    # Scenario: the package-adapter envelope returns one high-severity Unicode finding.
+    # Purpose: keep the existing runner severity policy release-blocking for the new central check.
+    It 'InterT10_fails_release_when_package_adapter_returns_a_high_finding' {
+        $report=New-SourceGateFixture
+        Set-SourceGateEnvelope $report 0 {
+            param($envelope)
+            $envelope.findings=@([pscustomobject][ordered]@{
+                severity='high';fingerprint=('a'*64);ruleId='unicode-hidden-character'
+                message='Hidden or control character U+200B (zero-width) at line 1, column 1.'
+                path='SKILL.md';skillId='example'
+            })
+        }
+
+        {Invoke-SourceGateFixture $report}|Should -Throw 'FAILED|source report findings contains a high finding.'
+    }
+}
