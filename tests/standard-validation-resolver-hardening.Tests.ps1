@@ -2587,3 +2587,17 @@ Describe 'SYP354 PR-K1 trust-anchor admission boundary' {
         $standard | Should Match 'Trusted frozen mode|Trusted frozen 模式'
     }
 }
+
+Describe 'SYP536 Unicode check resolver boundary' -Tag 'SYP536' {
+    # Scenario: the package-adapter child gains a native central check while formal tool policy remains frozen.
+    # Purpose: prevent a resolver tool or dispatch mode from being added for the embedded check.
+    It 'UnitT10_does_not_add_a_unicode_tool_or_child_mode' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $toolchain=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/validation-toolchain.json')|ConvertFrom-Json
+        $toolIds=@($toolchain.tools.PSObject.Properties.Name)
+        $child=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'scripts/consumer/Invoke-ConsumerValidationChild.ps1')
+
+        @($toolIds|Where-Object{$_ -match '(?i)unicode'}).Count|Should -Be 0
+        $child|Should -Match ([regex]::Escape("[ValidateSet('package-adapter', 'skill-validator', 'skill-tools', 'static')][string] `$Mode"))
+    }
+}

@@ -7025,3 +7025,32 @@ Describe 'SYP537 repository-level secret protection contract' -Tag 'SYP537' {
         }
     }
 }
+
+Describe 'SYP536 Unicode hidden-character check contract' -Tag 'SYP536' {
+    BeforeAll {
+        $root=Split-Path -Parent $PSScriptRoot
+        $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        $section=[regex]::Match($standard,'(?ms)^### 8\.3[^\r\n]*\r?\n(?<body>.*?)(?=^### |\z)')
+        $section.Success|Should -BeTrue
+        $script:Syp536SectionLines=@($section.Groups['body'].Value -split '\r?\n')
+    }
+
+    # Scenario: Gate 1 documentation names the embedded check alongside the existing adapter and formal tools.
+    # Purpose: make the central check part of the normative package-validation contract.
+    It 'UnitT10_names_the_central_check_in_Gate_1' {
+        ($script:Syp536SectionLines -join "`n")|Should -Match ([regex]::Escape('Gate 1 Package Validation 包含 conditional upstream adapter、central Unicode hidden-character check、`skill-validator` 與 `skill-tools check`'))
+    }
+
+    # Scenario: the normative bullet and threat model are reviewed as exact single-line additions.
+    # Purpose: prevent silent weakening of scope, severity, exceptions, or log-safety requirements.
+    It 'UnitT80_pins_the_unicode_check_and_threat_model_verbatim' {
+        $expected=@(
+            '- central Unicode hidden-character check：由 canonical consumer validation child 的 package-adapter 步驟，以原生 PowerShell 對每個 active Skill package 的每個文字檔逐 Unicode scalar value 檢查；它不是 formal baseline tool，不需要 resolver、receipt、dispatch slot 或 required context。只有副檔名屬於 central 已知二進位清單且檔首 magic 相符的檔案可視為二進位而略過；其他檔案都視為文字檔，**MUST** 以嚴格 UTF-8 解碼，無法解碼或含 NUL byte 時 **MUST** 回報 High finding。Tag characters（U+E0000–U+E007F）、bidi controls（U+061C、U+200E–U+200F、U+202A–U+202E、U+2066–U+2069）、deprecated format controls（U+206A–U+206F）、invisible operators（U+2061–U+2064）、zero-width characters（U+200B–U+200D、U+2060、U+180E、U+034F）與檔首以外的 U+FEFF **MUST** 回報 High finding，依第 9.4 節 BLOCK；唯一例外是前後都是 emoji 的 U+200D。Variation selectors 與 confusable spaces 不在本檢查範圍。Finding **MUST NOT** 在 message 中輸出命中字元或其周圍原文。此檢查只保證 canonical consumer validation route；其他可注入的 package adapter 不因本條自動取得相同保證。',
+            'Unicode hidden-character check 的 threat model：Skill 文字由 AI agent 讀取，tag characters 與 bidi／zero-width controls 可以夾帶人類審查看不到、但模型會讀到的指令，或讓顯示順序與實際順序不同。SkillSpector 的 Unicode 偵測受密度與語意條件限制，因此本檢查以固定範圍、零容忍的方式補足。自然語言中合法的 ZWJ／ZWNJ（例如波斯文或印度系文字）目前不在 owned Skills 的使用範圍內，因此不設例外；若日後需要，**MUST** 依第 19 節新增精確例外。'
+        )
+        $actual=@($script:Syp536SectionLines|Where-Object{$_ -ceq $expected[0] -or $_ -ceq $expected[1]})
+
+        $actual.Count|Should -Be $expected.Count
+        for($i=0;$i-lt $expected.Count;$i++){$actual[$i]|Should -BeExactly $expected[$i]}
+    }
+}

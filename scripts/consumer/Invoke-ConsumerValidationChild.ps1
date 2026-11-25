@@ -168,6 +168,197 @@ function Get-TextSha256 {
     try { return ([BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))) -replace '-', '').ToLowerInvariant() }
     finally { $hasher.Dispose() }
 }
+function Test-KnownTextPath {
+    param([Parameter(Mandatory = $true)][string] $RelativePath)
+    $knownExtensions = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($extension in @(
+            '.md', '.markdown', '.txt', '.yaml', '.yml', '.json', '.jsonc', '.toml', '.ini', '.cfg', '.csv', '.tsv',
+            '.xml', '.html', '.htm', '.css', '.js', '.mjs', '.cjs', '.ts', '.ps1', '.psm1', '.psd1', '.py', '.sh',
+            '.bash', '.zsh', '.rb', '.lua', '.sql', '.cs', '.go', '.rs', '.java', '.kt', '.bat', '.cmd')) {
+        [void]$knownExtensions.Add($extension)
+    }
+    $knownNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in @('SKILL.md', 'LICENSE', 'README', 'NOTICE')) { [void]$knownNames.Add($name) }
+    $fileName = [IO.Path]::GetFileName($RelativePath)
+    $extension = [IO.Path]::GetExtension($fileName)
+    return [string]::IsNullOrEmpty($extension) -or $knownNames.Contains($fileName) -or $knownExtensions.Contains($extension)
+}
+function Test-KnownBinaryMagic {
+    param(
+        [Parameter(Mandatory = $true)][string] $RelativePath,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes
+    )
+    $extension = [IO.Path]::GetExtension([IO.Path]::GetFileName($RelativePath)).ToLowerInvariant()
+    switch ($extension) {
+        '.png' {
+            return $Bytes.Length -ge 8 -and $Bytes[0] -eq 0x89 -and $Bytes[1] -eq 0x50 -and
+                $Bytes[2] -eq 0x4E -and $Bytes[3] -eq 0x47 -and $Bytes[4] -eq 0x0D -and
+                $Bytes[5] -eq 0x0A -and $Bytes[6] -eq 0x1A -and $Bytes[7] -eq 0x0A
+        }
+        { $_ -in @('.jpg', '.jpeg') } {
+            return $Bytes.Length -ge 3 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xD8 -and $Bytes[2] -eq 0xFF
+        }
+        '.gif' {
+            return $Bytes.Length -ge 6 -and $Bytes[0] -eq 0x47 -and $Bytes[1] -eq 0x49 -and
+                $Bytes[2] -eq 0x46 -and $Bytes[3] -eq 0x38 -and $Bytes[4] -in @(0x37, 0x39) -and $Bytes[5] -eq 0x61
+        }
+        '.webp' {
+            return $Bytes.Length -ge 12 -and $Bytes[0] -eq 0x52 -and $Bytes[1] -eq 0x49 -and
+                $Bytes[2] -eq 0x46 -and $Bytes[3] -eq 0x46 -and $Bytes[8] -eq 0x57 -and
+                $Bytes[9] -eq 0x45 -and $Bytes[10] -eq 0x42 -and $Bytes[11] -eq 0x50
+        }
+        '.ico' { return $Bytes.Length -ge 4 -and $Bytes[0] -eq 0x00 -and $Bytes[1] -eq 0x00 -and $Bytes[2] -eq 0x01 -and $Bytes[3] -eq 0x00 }
+        '.pdf' { return $Bytes.Length -ge 5 -and $Bytes[0] -eq 0x25 -and $Bytes[1] -eq 0x50 -and $Bytes[2] -eq 0x44 -and $Bytes[3] -eq 0x46 -and $Bytes[4] -eq 0x2D }
+        '.zip' {
+            return $Bytes.Length -ge 4 -and $Bytes[0] -eq 0x50 -and $Bytes[1] -eq 0x4B -and
+                $Bytes[2] -in @(0x03, 0x05) -and $Bytes[3] -in @(0x04, 0x06) -and
+                (($Bytes[2] -eq 0x03 -and $Bytes[3] -eq 0x04) -or ($Bytes[2] -eq 0x05 -and $Bytes[3] -eq 0x06))
+        }
+        '.gz' { return $Bytes.Length -ge 2 -and $Bytes[0] -eq 0x1F -and $Bytes[1] -eq 0x8B }
+        '.woff' { return $Bytes.Length -ge 4 -and $Bytes[0] -eq 0x77 -and $Bytes[1] -eq 0x4F -and $Bytes[2] -eq 0x46 -and $Bytes[3] -eq 0x46 }
+        '.woff2' { return $Bytes.Length -ge 4 -and $Bytes[0] -eq 0x77 -and $Bytes[1] -eq 0x4F -and $Bytes[2] -eq 0x46 -and $Bytes[3] -eq 0x32 }
+        '.ttf' { return $Bytes.Length -ge 4 -and $Bytes[0] -eq 0x00 -and $Bytes[1] -eq 0x01 -and $Bytes[2] -eq 0x00 -and $Bytes[3] -eq 0x00 }
+        '.otf' { return $Bytes.Length -ge 4 -and $Bytes[0] -eq 0x4F -and $Bytes[1] -eq 0x54 -and $Bytes[2] -eq 0x54 -and $Bytes[3] -eq 0x4F }
+        default { return $false }
+    }
+}
+function Test-KnownBinaryExtension {
+    param([Parameter(Mandatory = $true)][string] $RelativePath)
+    return [IO.Path]::GetExtension([IO.Path]::GetFileName($RelativePath)) -in
+        @('.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.pdf', '.zip', '.gz', '.woff', '.woff2', '.ttf', '.otf')
+}
+function Test-EmojiScalar {
+    param([Parameter(Mandatory = $true)][int] $Value)
+    return ($Value -ge 0x2600 -and $Value -le 0x27BF) -or
+        ($Value -ge 0x2B00 -and $Value -le 0x2BFF) -or
+        ($Value -ge 0x1F000 -and $Value -le 0x1FAFF)
+}
+function Get-HiddenUnicodeCategory {
+    param([Parameter(Mandatory = $true)][int] $Value, [Parameter(Mandatory = $true)][bool] $IsLeadingBom)
+    if ($Value -ge 0xE0000 -and $Value -le 0xE007F) { return 'tag' }
+    if ($Value -eq 0x061C -or ($Value -ge 0x200E -and $Value -le 0x200F) -or
+        ($Value -ge 0x202A -and $Value -le 0x202E) -or ($Value -ge 0x2066 -and $Value -le 0x2069)) { return 'bidi' }
+    if ($Value -ge 0x206A -and $Value -le 0x206F) { return 'deprecated-format' }
+    if ($Value -ge 0x2061 -and $Value -le 0x2064) { return 'invisible-operator' }
+    if (($Value -ge 0x200B -and $Value -le 0x200D) -or $Value -eq 0x2060 -or $Value -eq 0x180E -or $Value -eq 0x034F) {
+        return 'zero-width'
+    }
+    if ($Value -eq 0xFEFF -and -not $IsLeadingBom) { return 'bom-not-at-start' }
+    return $null
+}
+function New-UnicodePackageFinding {
+    param(
+        [Parameter(Mandatory = $true)][string] $SkillId,
+        [Parameter(Mandatory = $true)][string] $RelativePath,
+        [Parameter(Mandatory = $true)][string] $RuleId,
+        [Parameter(Mandatory = $true)][string] $Message,
+        [Parameter(Mandatory = $true)][string] $FingerprintSource
+    )
+    return [ordered]@{
+        severity = 'high'
+        fingerprint = Get-TextSha256 -Text $FingerprintSource
+        ruleId = $RuleId
+        message = $Message
+        path = $RelativePath
+        skillId = $SkillId
+    }
+}
+function Get-UnicodePackageFindings {
+    param(
+        [Parameter(Mandatory = $true)][string] $SkillId,
+        [Parameter(Mandatory = $true)][string] $SkillRoot,
+        [Parameter(Mandatory = $true)][string[]] $Inventory
+    )
+    $findings = @()
+    $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+    foreach ($relativePath in $Inventory) {
+        $fullPath = Join-Path $SkillRoot $relativePath
+        $bytes = [IO.File]::ReadAllBytes($fullPath)
+        $knownText = Test-KnownTextPath -RelativePath $relativePath
+        $knownBinary = Test-KnownBinaryExtension -RelativePath $relativePath
+        $containsNul = $bytes -contains [byte]0
+        if ($knownBinary -and (Test-KnownBinaryMagic -RelativePath $relativePath -Bytes $bytes)) { continue }
+        if (-not $knownText -and -not $knownBinary -and $containsNul) {
+            $ruleId = 'unicode-unrecognized-binary'
+            $findings += New-UnicodePackageFinding -SkillId $SkillId -RelativePath $relativePath -RuleId $ruleId `
+                -Message 'File contains a NUL byte but is not a recognized binary format.' -FingerprintSource "$SkillId|$relativePath|$ruleId"
+            continue
+        }
+        if ($knownText -and $containsNul) {
+            $ruleId = 'unicode-nul-in-text'
+            $findings += New-UnicodePackageFinding -SkillId $SkillId -RelativePath $relativePath -RuleId $ruleId `
+                -Message 'Known text file contains a NUL byte.' -FingerprintSource "$SkillId|$relativePath|$ruleId"
+        }
+        elseif ($knownBinary -and $containsNul) {
+            $ruleId = 'unicode-unrecognized-binary'
+            $findings += New-UnicodePackageFinding -SkillId $SkillId -RelativePath $relativePath -RuleId $ruleId `
+                -Message 'File contains a NUL byte but does not match its binary format magic.' -FingerprintSource "$SkillId|$relativePath|$ruleId"
+        }
+        try { $text = $strictUtf8.GetString($bytes) }
+        catch {
+            $ruleId = 'unicode-invalid-utf8'
+            $findings += New-UnicodePackageFinding -SkillId $SkillId -RelativePath $relativePath -RuleId $ruleId `
+                -Message 'Text file is not valid UTF-8.' -FingerprintSource "$SkillId|$relativePath|$ruleId"
+            continue
+        }
+        $hasLeadingBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+        # Fast path: skip the per-scalar walk when no candidate code unit exists. Tag characters
+        # U+E0000-U+E007F are the surrogate pair \uDB40 followed by \uDC00-\uDC7F.
+        $candidatePattern = '[͏؜᠎​-‏‪-‮⁠-⁤⁦-⁯﻿]|\uDB40[\uDC00-\uDC7F]'
+        if (-not [regex]::IsMatch($text, $candidatePattern)) { continue }
+        $hiddenCount = 0
+        $line = 1
+        $column = 1
+        $previousRelevantValue = -1
+        for ($offset = 0; $offset -lt $text.Length;) {
+            $firstValue = [int]$text[$offset]
+            if ([char]::IsHighSurrogate([char]$firstValue) -and $offset + 1 -lt $text.Length -and
+                [char]::IsLowSurrogate($text[$offset + 1])) {
+                $value = [char]::ConvertToUtf32([char]$firstValue, $text[$offset + 1])
+                $width = 2
+            }
+            else {
+                $value = $firstValue
+                $width = 1
+            }
+            $category = Get-HiddenUnicodeCategory -Value $value -IsLeadingBom ($hasLeadingBom -and $offset -eq 0)
+            if ($null -ne $category) {
+                $isEmojiZwJ = $false
+                if ($value -eq 0x200D -and $offset + $width -lt $text.Length) {
+                    $nextOffset = $offset + $width
+                    $nextFirstValue = [int]$text[$nextOffset]
+                    if ([char]::IsHighSurrogate([char]$nextFirstValue) -and $nextOffset + 1 -lt $text.Length -and
+                        [char]::IsLowSurrogate($text[$nextOffset + 1])) {
+                        $nextValue = [char]::ConvertToUtf32([char]$nextFirstValue, $text[$nextOffset + 1])
+                    }
+                    else { $nextValue = $nextFirstValue }
+                    $isEmojiZwJ = (Test-EmojiScalar -Value $previousRelevantValue) -and (Test-EmojiScalar -Value $nextValue)
+                }
+                if (-not $isEmojiZwJ) {
+                    $hiddenCount++
+                    if ($hiddenCount -le 50) {
+                        $hex = '{0:X4}' -f $value
+                        $ruleId = 'unicode-hidden-character'
+                        $message = "Hidden or control character U+$hex ($category) at line $line, column $column."
+                        $fingerprintSource = "$SkillId|$relativePath|$ruleId|U+$hex|$line|$column"
+                        $findings += New-UnicodePackageFinding -SkillId $SkillId -RelativePath $relativePath -RuleId $ruleId `
+                            -Message $message -FingerprintSource $fingerprintSource
+                    }
+                }
+            }
+            if ($value -ne 0xFE0F -and ($value -lt 0x1F3FB -or $value -gt 0x1F3FF)) { $previousRelevantValue = $value }
+            if ($value -eq 0x0A) { $line++; $column = 1 } else { $column++ }
+            $offset += $width
+        }
+        if ($hiddenCount -gt 50) {
+            $ruleId = 'unicode-hidden-character-truncated'
+            $message = "Hidden or control character findings truncated after 50 of $hiddenCount matches."
+            $findings += New-UnicodePackageFinding -SkillId $SkillId -RelativePath $relativePath -RuleId $ruleId `
+                -Message $message -FingerprintSource "$SkillId|$relativePath|$ruleId|$hiddenCount"
+        }
+    }
+    return ,$findings
+}
 function ConvertTo-CanonicalSeverity {
     param([Parameter(Mandatory = $true)] $Value, [Parameter(Mandatory = $true)][string] $Context)
     $severity = [string]$Value
@@ -463,7 +654,13 @@ try {
             $decision = [string](Get-Property -Object $report -Name 'decision' -Context 'upstream adapter report')
             if (($status -eq 'passed' -and $decision -ne 'PASS') -or ($status -eq 'not-applicable' -and $decision -ne 'NOT_APPLICABLE') -or `
                 $status -notin @('passed', 'not-applicable')) { throw 'Upstream adapter report did not pass or prove not-applicable.' }
-            New-Envelope -ActiveSkills $activeSkills -Additional @{ adapterStatus = $status
+            $findings = @()
+            foreach ($skillId in $activeSkills) {
+                $skillRoot = Get-SkillRoot -SkillId $skillId
+                $inventory = Get-InventoryPaths -SkillRoot $skillRoot
+                $findings += Get-UnicodePackageFindings -SkillId $skillId -SkillRoot $skillRoot -Inventory $inventory
+            }
+            New-Envelope -ActiveSkills $activeSkills -Findings $findings -Additional @{ adapterStatus = $status
              adapterSurfaces = @($report.surfaces)
              semanticRequired = $false }
         }

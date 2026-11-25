@@ -295,3 +295,293 @@ $global:LASTEXITCODE=0
         @($result.Envelope.findings).Count|Should -Be 0
     }
 }
+
+Describe 'Consumer package-adapter Unicode hidden-character check' -Tag 'SYP536' {
+    BeforeAll {
+        $repositoryRoot=Split-Path -Parent $PSScriptRoot
+        $childPath=Join-Path $repositoryRoot 'scripts/consumer/Invoke-ConsumerValidationChild.ps1'
+        $pwshPath=(Get-Process -Id $PID).Path
+        $utf8NoBom=[Text.UTF8Encoding]::new($false)
+
+        function ConvertFrom-Syp536CodePoint {
+            param([Parameter(Mandatory=$true)][int]$Value)
+            [char]::ConvertFromUtf32($Value)
+        }
+
+        function New-Syp536PackageAdapterFixture {
+            param([string[]]$SkillIds=@('example'))
+            $root=Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            $skillsRoot=Join-Path $root 'skills'
+            [void][IO.Directory]::CreateDirectory($skillsRoot)
+            foreach($skillId in $SkillIds){[void][IO.Directory]::CreateDirectory((Join-Path $skillsRoot $skillId))}
+            $validatorPath=Join-Path $root 'fake-upstream-adapter-validator.ps1'
+            @'
+param(
+    [string]$PackageRoot,[string]$PolicyPath,[string]$SourceRepository,
+    [string]$SourceRevision,[string]$ArchiveSha256,[string]$OutputPath
+)
+[ordered]@{status='passed';decision='PASS';surfaces=@()}|ConvertTo-Json|Set-Content -LiteralPath $OutputPath -Encoding UTF8
+'@ | Set-Content -LiteralPath $validatorPath -Encoding UTF8
+            $policyPath=Join-Path $root 'upstream-policy.json'
+            [IO.File]::WriteAllText($policyPath,'{}',$utf8NoBom)
+            $toolchainPath=Join-Path $root 'toolchain.json'
+            [ordered]@{
+                upstreamAdapterValidatorPath=$validatorPath
+                upstreamAdapterValidatorSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $validatorPath).Hash.ToLowerInvariant()
+                upstreamPolicyPath=$policyPath
+                upstreamPolicySha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $policyPath).Hash.ToLowerInvariant()
+            }|ConvertTo-Json|Set-Content -LiteralPath $toolchainPath -Encoding UTF8
+            [pscustomobject]@{Root=$root;SkillsRoot=$skillsRoot;SkillIds=$SkillIds;ToolchainPath=$toolchainPath}
+        }
+
+        function Write-Syp536Text {
+            param($Fixture,[string]$SkillId,[string]$RelativePath,[string]$Text,[switch]$Bom)
+            $path=Join-Path (Join-Path $Fixture.SkillsRoot $SkillId) $RelativePath
+            [void][IO.Directory]::CreateDirectory((Split-Path -Parent $path))
+            $bytes=$utf8NoBom.GetBytes($Text)
+            if($Bom){$bytes=[byte[]](@(0xEF,0xBB,0xBF)+@($bytes))}
+            [IO.File]::WriteAllBytes($path,$bytes)
+            $path
+        }
+
+        function Invoke-Syp536PackageAdapterFixture {
+            param($Fixture)
+            $stderrPath=Join-Path $Fixture.Root 'child.stderr'
+            $saved=@{
+                CandidateRoot=$env:STANDARD_VALIDATION_CANDIDATE_ROOT
+                CandidateId=$env:STANDARD_VALIDATION_CANDIDATE_ID
+                ActiveSkills=$env:STANDARD_VALIDATION_ACTIVE_SKILLS
+                SkillsRoot=$env:STANDARD_VALIDATION_SKILLS_ROOT
+            }
+            try{
+                $env:STANDARD_VALIDATION_CANDIDATE_ROOT=$Fixture.Root
+                $env:STANDARD_VALIDATION_CANDIDATE_ID='syp536-fixture-candidate'
+                $env:STANDARD_VALIDATION_ACTIVE_SKILLS=$Fixture.SkillIds -join ';'
+                $env:STANDARD_VALIDATION_SKILLS_ROOT=$Fixture.SkillsRoot
+                Push-Location $Fixture.Root
+                try{
+                    $stdout=@(& $pwshPath -NoProfile -NonInteractive -File $childPath -Mode package-adapter `
+                        -ToolchainPath $Fixture.ToolchainPath `
+                        -ToolchainSha256 ((Get-FileHash -Algorithm SHA256 -LiteralPath $Fixture.ToolchainPath).Hash.ToLowerInvariant()) `
+                        -SourceRepository 'https://example.test/syp536.git' -SourceRevision ('a'*40) -ArchiveSha256 ('b'*64) 2> $stderrPath)
+                    $exitCode=$LASTEXITCODE
+                }finally{Pop-Location}
+            }finally{
+                $env:STANDARD_VALIDATION_CANDIDATE_ROOT=$saved.CandidateRoot
+                $env:STANDARD_VALIDATION_CANDIDATE_ID=$saved.CandidateId
+                $env:STANDARD_VALIDATION_ACTIVE_SKILLS=$saved.ActiveSkills
+                $env:STANDARD_VALIDATION_SKILLS_ROOT=$saved.SkillsRoot
+            }
+            $stderr=if(Test-Path -LiteralPath $stderrPath){Get-Content -Raw -LiteralPath $stderrPath}else{''}
+            $envelope=if($exitCode-eq 0){($stdout -join "`n")|ConvertFrom-Json -Depth 100}else{$null}
+            [pscustomobject]@{ExitCode=$exitCode;Stderr=$stderr;Envelope=$envelope}
+        }
+    }
+
+    # Scenario: normal Chinese, full-width space, emoji sequences, a leading BOM, and a valid PNG are present.
+    # Purpose: preserve legitimate text and emoji while ignoring a known binary file with matching magic.
+    It 'UnitT10_returns_no_findings_for_allowed_text_emoji_BOM_and_binary_NUL' {
+        $fixture=New-Syp536PackageAdapterFixture
+        $fullWidthSpace=ConvertFrom-Syp536CodePoint 0x3000
+        $man=ConvertFrom-Syp536CodePoint 0x1F468
+        $woman=ConvertFrom-Syp536CodePoint 0x1F469
+        $girl=ConvertFrom-Syp536CodePoint 0x1F467
+        $zwj=ConvertFrom-Syp536CodePoint 0x200D
+        $variation=ConvertFrom-Syp536CodePoint 0xFE0F
+        $skinTone=ConvertFrom-Syp536CodePoint 0x1F3FB
+        [void](Write-Syp536Text $fixture example 'SKILL.md' "一般中文${fullWidthSpace}內容`n${man}${zwj}${woman}${zwj}${girl}`n${man}${variation}${skinTone}${zwj}${woman}`n" -Bom)
+        [void](Write-Syp536Text $fixture example 'empty.txt' '')
+        [IO.File]::WriteAllBytes((Join-Path $fixture.SkillsRoot 'example/image.png'),[byte[]]@(0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,0x00))
+
+        $result=Invoke-Syp536PackageAdapterFixture $fixture
+
+        $result.ExitCode|Should -Be 0
+        $result.Stderr|Should -BeNullOrEmpty
+        @($result.Envelope.findings).Count|Should -Be 0
+    }
+
+    # Scenario: an unknown NUL-bearing payload, a spoofed PNG, and a valid PNG are scanned together.
+    # Purpose: reject unknown binary bypasses, scan mismatched known-binary extensions as text, and skip only verified binary magic.
+    It 'UnitT15_rejects_unknown_NUL_payloads_and_scans_spoofed_binary_extensions' {
+        $fixture=New-Syp536PackageAdapterFixture
+        $tagBytes=$utf8NoBom.GetBytes((ConvertFrom-Syp536CodePoint 0xE0041))
+        [void][IO.Directory]::CreateDirectory((Join-Path $fixture.SkillsRoot 'example/references'))
+        [IO.File]::WriteAllBytes(
+            (Join-Path $fixture.SkillsRoot 'example/references/payload.bin'),
+            [byte[]](@(0x00)+@($tagBytes)))
+        [void](Write-Syp536Text $fixture example 'spoofed.png' ('text'+(ConvertFrom-Syp536CodePoint 0x202E)))
+        [IO.File]::WriteAllBytes(
+            (Join-Path $fixture.SkillsRoot 'example/valid.png'),
+            [byte[]]@(0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,0x00))
+
+        $findings=@((Invoke-Syp536PackageAdapterFixture $fixture).Envelope.findings)
+
+        @($findings).Count|Should -Be 2
+        @($findings|Where-Object path -CEQ 'references/payload.bin').ruleId|Should -BeExactly 'unicode-unrecognized-binary'
+        @($findings|Where-Object path -CEQ 'spoofed.png').ruleId|Should -BeExactly 'unicode-hidden-character'
+        @($findings|Where-Object path -CEQ 'valid.png').Count|Should -Be 0
+    }
+
+    # Scenario: one representative from every blocked category appears at line 2, column 2 in separate files.
+    # Purpose: project deterministic high findings with the canonical path and location for every category.
+    It 'UnitT20_reports_each_hidden_character_category_with_exact_location' {
+        $fixture=New-Syp536PackageAdapterFixture
+        $cases=[ordered]@{
+            'nested/tag.txt'=@(0xE0041,'tag')
+            'bidi.txt'=@(0x202E,'bidi')
+            'deprecated.txt'=@(0x206A,'deprecated-format')
+            'operator.txt'=@(0x2062,'invisible-operator')
+            'zero-width.txt'=@(0x200B,'zero-width')
+            'bom.txt'=@(0xFEFF,'bom-not-at-start')
+            'zwj.txt'=@(0x200D,'zero-width')
+        }
+        foreach($entry in $cases.GetEnumerator()){
+            [void](Write-Syp536Text $fixture example $entry.Key ("first`nA"+(ConvertFrom-Syp536CodePoint $entry.Value[0])+'B'))
+        }
+
+        $result=Invoke-Syp536PackageAdapterFixture $fixture
+
+        $result.ExitCode|Should -Be 0
+        @($result.Envelope.findings).Count|Should -Be $cases.Count
+        foreach($entry in $cases.GetEnumerator()){
+            $finding=@($result.Envelope.findings|Where-Object path -CEQ $entry.Key)
+            $finding.Count|Should -Be 1
+            $finding[0].severity|Should -BeExactly 'high'
+            $finding[0].ruleId|Should -BeExactly 'unicode-hidden-character'
+            $hex='U+{0:X4}' -f $entry.Value[0]
+            $finding[0].message|Should -BeExactly "Hidden or control character $hex ($($entry.Value[1])) at line 2, column 2."
+            $finding[0].fingerprint|Should -Match '^[a-f0-9]{64}$'
+            $finding[0].skillId|Should -BeExactly 'example'
+        }
+    }
+
+    # Scenario: every owned range endpoint and each requested neighboring scalar are scanned.
+    # Purpose: lock the exact inclusive range boundaries without expanding the zero-tolerance set.
+    It 'UnitT25_matches_all_range_boundaries_without_matching_neighbors' {
+        $fixture=New-Syp536PackageAdapterFixture
+        $blocked=@(
+            0xE0000,0xE007F,
+            0x061C,0x200E,0x200F,0x202A,0x202E,0x2066,0x2069,
+            0x206A,0x206F,0x2061,0x2064,
+            0x200B,0x200D,0x2060,0x180E,0x034F)
+        for($index=0;$index-lt $blocked.Count;$index++){
+            [void](Write-Syp536Text $fixture example ("blocked-$index.txt") (ConvertFrom-Syp536CodePoint $blocked[$index]))
+        }
+        $allowed=0xE0080,0x2065,0x2070,0x200A,0x2029,0x180D,0x034E
+        [void](Write-Syp536Text $fixture example 'allowed-neighbors.txt' (($allowed|ForEach-Object { ConvertFrom-Syp536CodePoint $_ })-join ''))
+
+        $findings=@((Invoke-Syp536PackageAdapterFixture $fixture).Envelope.findings)
+
+        @($findings).Count|Should -Be $blocked.Count
+        @($findings|Where-Object path -CEQ 'allowed-neighbors.txt').Count|Should -Be 0
+        for($index=0;$index-lt $blocked.Count;$index++){
+            $finding=@($findings|Where-Object path -CEQ "blocked-$index.txt")
+            $finding.Count|Should -Be 1
+            $finding[0].message|Should -Match ([regex]::Escape(('U+{0:X4}' -f $blocked[$index])))
+        }
+    }
+
+    # Scenario: a bidi control is embedded between visible sentinel text.
+    # Purpose: keep the blocked character and surrounding source text out of log-safe messages.
+    It 'UnitT30_does_not_echo_the_hidden_character_or_source_context' {
+        $fixture=New-Syp536PackageAdapterFixture
+        $hidden=ConvertFrom-Syp536CodePoint 0x202E
+        [void](Write-Syp536Text $fixture example 'leak.txt' ("before${hidden}after"))
+
+        $finding=(Invoke-Syp536PackageAdapterFixture $fixture).Envelope.findings[0]
+
+        $finding.message.Contains($hidden)|Should -BeFalse
+        $finding.message|Should -Not -Match 'before|after'
+    }
+
+    # Scenario: known and inferred text files contain invalid UTF-8, while a known text file contains NUL.
+    # Purpose: fail closed on malformed text without treating an unknown non-NUL file as binary.
+    It 'UnitT40_reports_invalid_UTF8_and_NUL_in_known_text' {
+        $fixture=New-Syp536PackageAdapterFixture
+        [IO.File]::WriteAllBytes((Join-Path $fixture.SkillsRoot 'example/known.md'),[byte[]]@(0xC3,0x28))
+        [IO.File]::WriteAllBytes((Join-Path $fixture.SkillsRoot 'example/inferred.bin'),[byte[]]@(0xC3,0x28))
+        [IO.File]::WriteAllBytes((Join-Path $fixture.SkillsRoot 'example/nul.md'),[byte[]]@(0x41,0x00,0x42))
+
+        $findings=@((Invoke-Syp536PackageAdapterFixture $fixture).Envelope.findings)
+
+        @($findings|Where-Object ruleId -CEQ 'unicode-invalid-utf8').Count|Should -Be 2
+        @($findings|Where-Object ruleId -CEQ 'unicode-nul-in-text').Count|Should -Be 1
+        @($findings|Where-Object path -CEQ 'known.md').ruleId|Should -BeExactly 'unicode-invalid-utf8'
+        @($findings|Where-Object path -CEQ 'inferred.bin').ruleId|Should -BeExactly 'unicode-invalid-utf8'
+        @($findings|Where-Object path -CEQ 'nul.md').ruleId|Should -BeExactly 'unicode-nul-in-text'
+    }
+
+    # Scenario: one file contains more than fifty blocked scalar values.
+    # Purpose: bound detailed findings while preserving an explicit total-count truncation signal.
+    It 'UnitT50_caps_details_at_fifty_and_adds_one_truncation_finding' {
+        $fixture=New-Syp536PackageAdapterFixture
+        $hidden=ConvertFrom-Syp536CodePoint 0x200B
+        [void](Write-Syp536Text $fixture example 'many.txt' ($hidden*55))
+
+        $findings=@((Invoke-Syp536PackageAdapterFixture $fixture).Envelope.findings)
+
+        @($findings|Where-Object ruleId -CEQ 'unicode-hidden-character').Count|Should -Be 50
+        @($findings|Where-Object ruleId -CEQ 'unicode-hidden-character-truncated').Count|Should -Be 1
+        @($findings|Where-Object ruleId -CEQ 'unicode-hidden-character-truncated')[0].message|Should -Match '55'
+    }
+
+    # Scenario: a supplementary emoji precedes a supplementary tag character on the same line.
+    # Purpose: count Unicode scalar values rather than UTF-16 code units when calculating columns.
+    It 'UnitT60_counts_surrogate_pairs_as_one_column' {
+        $fixture=New-Syp536PackageAdapterFixture
+        $emoji=ConvertFrom-Syp536CodePoint 0x1F600
+        $tag=ConvertFrom-Syp536CodePoint 0xE0041
+        [void](Write-Syp536Text $fixture example 'scalar.txt' ("${emoji}${tag}"))
+
+        $finding=(Invoke-Syp536PackageAdapterFixture $fixture).Envelope.findings[0]
+
+        $finding.message|Should -Match 'U\+E0041 \(tag\) at line 1, column 2\.'
+    }
+
+    # Scenario: a blocked zero-width character appears after two CRLF line endings and one visible scalar.
+    # Purpose: keep one-based line and code-point column reporting correct for Windows line endings.
+    It 'UnitT65_reports_CRLF_location_at_line_three_column_two' {
+        $fixture=New-Syp536PackageAdapterFixture
+        $hidden=ConvertFrom-Syp536CodePoint 0x200B
+        [void](Write-Syp536Text $fixture example 'crlf.txt' ("first`r`nsecond`r`nA${hidden}"))
+
+        $finding=(Invoke-Syp536PackageAdapterFixture $fixture).Envelope.findings[0]
+
+        $finding.message|Should -Match 'at line 3, column 2\.'
+    }
+
+    # Scenario: two active Skills each contain a blocked zero-width character.
+    # Purpose: scan every active package instead of only the first active Skill.
+    It 'UnitT70_scans_every_active_skill' {
+        $fixture=New-Syp536PackageAdapterFixture -SkillIds @('alpha','beta')
+        $hidden=ConvertFrom-Syp536CodePoint 0x200B
+        [void](Write-Syp536Text $fixture alpha 'SKILL.md' ("alpha${hidden}"))
+        [void](Write-Syp536Text $fixture beta 'SKILL.md' ("beta${hidden}"))
+
+        $findings=@((Invoke-Syp536PackageAdapterFixture $fixture).Envelope.findings)
+
+        @($findings).Count|Should -Be 2
+        (@($findings.skillId|Sort-Object)-join '|')|Should -BeExactly 'alpha|beta'
+    }
+
+    # Scenario: roughly two MiB of valid emoji ZWJ sequences precede one blocked scalar.
+    # Purpose: require a bounded-memory streaming scalar walk with a generous subprocess time ceiling.
+    It 'UnitT80_scans_two_MiB_of_emoji_ZWJ_text_within_sixty_seconds' {
+        $fixture=New-Syp536PackageAdapterFixture
+        $man=ConvertFrom-Syp536CodePoint 0x1F468
+        $woman=ConvertFrom-Syp536CodePoint 0x1F469
+        $zwj=ConvertFrom-Syp536CodePoint 0x200D
+        $hidden=ConvertFrom-Syp536CodePoint 0x200B
+        $sequence="${man}${zwj}${woman}"
+        $chunk=($sequence*1000)-join ''
+        $text=(($chunk*191)-join '')+$hidden
+        [void](Write-Syp536Text $fixture example 'large.txt' $text)
+
+        $result=$null
+        $duration=Measure-Command { $result=Invoke-Syp536PackageAdapterFixture $fixture }
+
+        @($result.Envelope.findings).Count|Should -Be 1
+        $result.Envelope.findings[0].ruleId|Should -BeExactly 'unicode-hidden-character'
+        $duration.TotalSeconds|Should -BeLessThan 60
+    }
+}
