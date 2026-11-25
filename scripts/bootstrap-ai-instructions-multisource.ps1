@@ -15,7 +15,6 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Import-Module (Join-Path $scriptRoot 'skills-catalog-contract.psm1') -Force
@@ -403,7 +402,7 @@ try {
 finally {
     $resolvedWorkingRoot = [System.IO.Path]::GetFullPath($workingRoot)
     $expectedPrefix = $tempRoot + [System.IO.Path]::DirectorySeparatorChar
-    if (-not $resolvedWorkingRoot.StartsWith($expectedPrefix, $pathComparison)) {
+    if (-not $resolvedWorkingRoot.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Unsafe multi-source temporary cleanup path: $resolvedWorkingRoot"
     }
 

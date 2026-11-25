@@ -465,8 +465,7 @@ function Assert-InstalledRuntime {
     foreach ($url in @($configuration.excludedRepositoryUrls)) {
         if (-not $normalizedExcludedUrls.Add(([string]$url).Trim())) { throw 'AI instruction excludedRepositoryUrls contains duplicates.' }
     }
-    $excludedPathComparer = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [System.StringComparer]::OrdinalIgnoreCase } else { [System.StringComparer]::Ordinal }
-    $normalizedExcludedPaths = New-Object 'System.Collections.Generic.HashSet[string]' ($excludedPathComparer)
+    $normalizedExcludedPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($path in @($configuration.excludedRepositoryPaths)) {
         $normalizedPath = ([string]$path).Trim().Replace('\','/').Trim('/')
         if ([string]::IsNullOrWhiteSpace($normalizedPath) -or [System.IO.Path]::IsPathRooted([string]$path) -or $normalizedPath -match '^[A-Za-z]:' -or
@@ -616,7 +615,7 @@ function Resolve-InstalledPowerShellEnginePath {
     $enginePath = ''
     if ($null -ne $CapabilityReceipt) {
         $powerShellCapabilities = @($CapabilityReceipt.capabilities | Where-Object {
-            [StringComparer]::Ordinal.Equals([string]$_.name,'powershell-runtime')
+            [string]$_.name -ceq 'powershell-runtime'
         })
         $enginePath = [string]$CapabilityReceipt.runtime.powerShellExecutablePath
     }

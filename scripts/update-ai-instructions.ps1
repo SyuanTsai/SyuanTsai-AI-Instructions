@@ -8,7 +8,6 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
 
 function Get-LocalAiInstructionsUpdateFailureDisposition {
     param([Parameter(Mandatory = $true)][string] $Message)
@@ -151,7 +150,7 @@ finally {
         $resolvedSnapshotRoot = [System.IO.Path]::GetFullPath($runtimeSnapshotRoot)
         $resolvedTempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char[]]@('\','/'))
         $expectedPrefix = $resolvedTempRoot + [System.IO.Path]::DirectorySeparatorChar + 'ai-instructions-updater-runtime-'
-        if (-not $resolvedSnapshotRoot.StartsWith($expectedPrefix,$pathComparison)) {
+        if (-not $resolvedSnapshotRoot.StartsWith($expectedPrefix,[System.StringComparison]::OrdinalIgnoreCase)) {
             throw "Unsafe updater runtime snapshot cleanup path: $resolvedSnapshotRoot"
         }
         $snapshotItem = Get-Item -Force -LiteralPath $resolvedSnapshotRoot

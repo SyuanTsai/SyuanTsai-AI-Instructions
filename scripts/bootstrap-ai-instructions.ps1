@@ -20,7 +20,6 @@ if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -l
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$script:BootstrapPathComparison = if ($IsWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
 # Read-only Git inspection must not opportunistically refresh the live index;
 # the journaled index operation is the only permitted index writer.
 $env:GIT_OPTIONAL_LOCKS = '0'
@@ -1215,7 +1214,7 @@ function Get-FullPathWithoutTrailingSeparator {
     $fullPath = [System.IO.Path]::GetFullPath($Path)
     $rootPath = [System.IO.Path]::GetPathRoot($fullPath)
     if (-not [string]::IsNullOrWhiteSpace($rootPath) -and
-        $fullPath.Equals($rootPath,$script:BootstrapPathComparison)) {
+        $fullPath.Equals($rootPath,[System.StringComparison]::OrdinalIgnoreCase)) {
         return $rootPath
     }
     return $fullPath.TrimEnd([char[]]@('\', '/'))
@@ -1310,8 +1309,8 @@ function Test-RepositoryDirectoryMatches {
     )
 
     foreach ($configuredRepositoryPath in $ConfiguredRepositoryPaths) {
-        if ($RepositoryRelativePath.Equals($configuredRepositoryPath, $script:BootstrapPathComparison) -or
-            $RepositoryRelativePath.StartsWith("$configuredRepositoryPath/", $script:BootstrapPathComparison)) {
+        if ($RepositoryRelativePath.Equals($configuredRepositoryPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $RepositoryRelativePath.StartsWith("$configuredRepositoryPath/", [System.StringComparison]::OrdinalIgnoreCase)) {
             return $true
         }
     }
@@ -1760,7 +1759,7 @@ function Assert-GitInfoExcludeMutationPath {
     $commonGitDirectory = [System.IO.Path]::GetFullPath($commonGitDirectory).TrimEnd([char[]]@('\','/'))
     $resolvedPath = [System.IO.Path]::GetFullPath($Path)
     $expectedPath = [System.IO.Path]::GetFullPath((Join-Path (Join-Path $commonGitDirectory 'info') 'exclude'))
-    if (-not $resolvedPath.Equals($expectedPath,$script:BootstrapPathComparison)) {
+    if (-not $resolvedPath.Equals($expectedPath,[System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Unsafe shared Git exclude mutation path '$resolvedPath': expected '$expectedPath'."
     }
 
@@ -1768,14 +1767,14 @@ function Assert-GitInfoExcludeMutationPath {
     while ($true) {
         if (Test-Path -LiteralPath $inspectionPath) {
             $item = Get-Item -Force -LiteralPath $inspectionPath
-            $isLeaf = $inspectionPath.Equals($resolvedPath,$script:BootstrapPathComparison)
+            $isLeaf = $inspectionPath.Equals($resolvedPath,[System.StringComparison]::OrdinalIgnoreCase)
             if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or ($isLeaf -and $item.PSIsContainer) -or (-not $isLeaf -and -not $item.PSIsContainer)) {
                 throw "Unsafe shared Git exclude mutation path '$resolvedPath': '$inspectionPath' must be a non-reparse $($(if ($isLeaf) { 'file' } else { 'directory' }))."
             }
         }
-        if ($inspectionPath.Equals($commonGitDirectory,$script:BootstrapPathComparison)) { break }
+        if ($inspectionPath.Equals($commonGitDirectory,[System.StringComparison]::OrdinalIgnoreCase)) { break }
         $parent = Split-Path -Parent $inspectionPath
-        if ([string]::IsNullOrWhiteSpace($parent) -or -not $parent.StartsWith($commonGitDirectory,$script:BootstrapPathComparison)) {
+        if ([string]::IsNullOrWhiteSpace($parent) -or -not $parent.StartsWith($commonGitDirectory,[System.StringComparison]::OrdinalIgnoreCase)) {
             throw "Unsafe shared Git exclude mutation path '$resolvedPath': parent traversal escaped the common Git directory."
         }
         $inspectionPath = $parent
@@ -1919,7 +1918,7 @@ function Get-RepositoryIndexTransactionPath {
     if (-not [System.IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $Repository $indexPath }
     $indexPath = [System.IO.Path]::GetFullPath($indexPath)
     $expectedIndexPath = [System.IO.Path]::GetFullPath((Join-Path $gitDirectory 'index'))
-    if (-not $indexPath.Equals($expectedIndexPath,$script:BootstrapPathComparison)) {
+    if (-not $indexPath.Equals($expectedIndexPath,[System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Git index path is outside the active worktree Git directory: $indexPath"
     }
     if (-not (Test-Path -LiteralPath $indexPath -PathType Leaf)) { throw "Git index file is missing: $indexPath" }
@@ -1972,9 +1971,9 @@ function Assert-ManagedPathDoesNotCrossReparsePoint {
     $resolvedRoot = Get-FullPathWithoutTrailingSeparator -Path $Root
     $rootPrefix = $resolvedRoot.TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar
     $resolvedPath = [System.IO.Path]::GetFullPath($Path)
-    if (-not $resolvedPath.StartsWith($rootPrefix,$script:BootstrapPathComparison)) { throw "$Context is outside its worktree: $resolvedPath" }
+    if (-not $resolvedPath.StartsWith($rootPrefix,[System.StringComparison]::OrdinalIgnoreCase)) { throw "$Context is outside its worktree: $resolvedPath" }
     $inspectionPath = $resolvedPath
-    while ($inspectionPath.StartsWith($rootPrefix,$script:BootstrapPathComparison)) {
+    while ($inspectionPath.StartsWith($rootPrefix,[System.StringComparison]::OrdinalIgnoreCase)) {
         if (Test-Path -LiteralPath $inspectionPath) {
             $item = Get-Item -Force -LiteralPath $inspectionPath
             if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -2893,12 +2892,12 @@ function New-TargetMutationSnapshot {
             $codePoints = @([char[]][string]$relativePath | ForEach-Object { ([int]$_).ToString('x4') }) -join ' '
             throw "Invalid target mutation path '$relativePath' (UTF-16: $codePoints): $($_.Exception.Message)"
         }
-        if (-not $targetPath.StartsWith($targetPrefix, $script:BootstrapPathComparison)) {
+        if (-not $targetPath.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw "Unsafe target mutation snapshot path: $relativePath"
         }
 
         $inspectionPath = $targetPath
-        while ($inspectionPath.StartsWith($targetPrefix, $script:BootstrapPathComparison)) {
+        while ($inspectionPath.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
             if (Test-Path -LiteralPath $inspectionPath) {
                 $inspectionItem = Get-Item -LiteralPath $inspectionPath -Force
                 if (($inspectionItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -3331,7 +3330,7 @@ function Add-TargetMutationCreatedDirectories {
     if ($null -eq $CreateContext) { return }
     foreach ($createdDirectory in @($CreateContext.CreatedDirectories)) {
         $alreadyRecorded = @($Snapshot.CreatedDirectories | Where-Object {
-            ([string]$_.FullPath).Equals([string]$createdDirectory.FullPath,$script:BootstrapPathComparison)
+            ([string]$_.FullPath).Equals([string]$createdDirectory.FullPath,[System.StringComparison]::OrdinalIgnoreCase)
         }).Count -gt 0
         if (-not $alreadyRecorded) {
             $Snapshot.CreatedDirectories.Add([pscustomobject][ordered]@{
@@ -4920,7 +4919,7 @@ function Restore-SkillMigrationJournal {
     $journalPath = [IO.Path]::GetFullPath($Path)
     $backupRoot = Split-Path -Parent $journalPath
     $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([char[]]@('\','/')) + [IO.Path]::DirectorySeparatorChar
-    if (-not $backupRoot.StartsWith($tempPrefix,$script:BootstrapPathComparison) -or
+    if (-not $backupRoot.StartsWith($tempPrefix,[StringComparison]::OrdinalIgnoreCase) -or
         (Split-Path -Leaf $backupRoot) -cne 'target-backup' -or (Split-Path -Leaf $journalPath) -cne 'skill-migration.json') { throw 'Unsafe Skill migration recovery location.' }
     Assert-ManagedPathDoesNotCrossReparsePoint -Root $tempPrefix.TrimEnd([char[]]@('\','/')) -Path $journalPath -Context 'Skill migration recovery'
     $journal = Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
@@ -5113,7 +5112,7 @@ function Restore-SkillMigrationJournal {
             }
             $fullDirectory = [IO.Path]::GetFullPath((Join-Path $Repository $relativeDirectory.Replace('/',[IO.Path]::DirectorySeparatorChar)))
             $repositoryPrefix=[IO.Path]::GetFullPath($Repository).TrimEnd([char[]]@('\','/'))+[IO.Path]::DirectorySeparatorChar
-            if (-not $fullDirectory.StartsWith($repositoryPrefix,$script:BootstrapPathComparison) -or
+            if (-not $fullDirectory.StartsWith($repositoryPrefix,[StringComparison]::OrdinalIgnoreCase) -or
                 $fullDirectory -cne [IO.Path]::GetFullPath([string]$directory.fullPath) -or
                 $seenCreatedDirectories.ContainsKey($relativeDirectory)) { throw 'Invalid schema-v2 created-directory path.' }
             $seenCreatedDirectories[$relativeDirectory]=$true
@@ -6151,10 +6150,10 @@ function Invoke-RepositoryInstallTransaction {
 $targetRootPath = Get-FullPathWithoutTrailingSeparator -Path $TargetRoot
 Assert-RepoAndUserRootsDistinct -Repository $targetRootPath -UserHome $UserHome | Out-Null
 $syncStartRelativePath = ''
-if ($syncStartPath.Equals($targetRootPath, $script:BootstrapPathComparison)) {
+if ($syncStartPath.Equals($targetRootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
     $syncStartRelativePath = ''
 }
-elseif ($syncStartPath.StartsWith($targetRootPath.TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar, $script:BootstrapPathComparison)) {
+elseif ($syncStartPath.StartsWith($targetRootPath.TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
     $syncStartRelativePath = Get-RepositoryRelativePath -RepositoryRoot $targetRootPath -FullPath $syncStartPath
 }
 
@@ -6379,7 +6378,7 @@ try {
     Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -AllowV4:($repoManifestWriter -ceq 'v4')
     $claudeProjectOwnedWorktrees = @(Get-ClaudeProjectOwnedWorktreeRoots -Repository $targetRootPath)
     $currentClaudeProjectOwned = @($claudeProjectOwnedWorktrees | Where-Object {
-        [System.IO.Path]::GetFullPath([string]$_).TrimEnd([char[]]@('\','/')).Equals($targetRootPath,$script:BootstrapPathComparison)
+        [System.IO.Path]::GetFullPath([string]$_).TrimEnd([char[]]@('\','/')).Equals($targetRootPath,[System.StringComparison]::OrdinalIgnoreCase)
     }).Count -gt 0
     $activeWorktreeProtectedClaudeFamilyPaths = @(if ($currentClaudeProjectOwned) {
         @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses')
@@ -6399,7 +6398,7 @@ try {
         Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -AllowV4:($repoManifestWriter -ceq 'v4') -Strict
         $claudeProjectOwnedWorktrees = @(Get-ClaudeProjectOwnedWorktreeRoots -Repository $targetRootPath -Strict)
         $currentClaudeProjectOwned = @($claudeProjectOwnedWorktrees | Where-Object {
-            [System.IO.Path]::GetFullPath([string]$_).TrimEnd([char[]]@('\','/')).Equals($targetRootPath,$script:BootstrapPathComparison)
+            [System.IO.Path]::GetFullPath([string]$_).TrimEnd([char[]]@('\','/')).Equals($targetRootPath,[System.StringComparison]::OrdinalIgnoreCase)
         }).Count -gt 0
         $activeWorktreeProtectedClaudeFamilyPaths = @(if ($currentClaudeProjectOwned) {
             @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses')
@@ -7381,7 +7380,7 @@ finally {
     $resolvedWorkingPath = [System.IO.Path]::GetFullPath($workingPath)
     $script:SkillMigrationJournalContext = $null
     $expectedPrefix = $tempRootPath.TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar
-    if (-not $resolvedWorkingPath.StartsWith($expectedPrefix, $script:BootstrapPathComparison)) {
+    if (-not $resolvedWorkingPath.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Unsafe temporary cleanup path: $resolvedWorkingPath"
     }
 

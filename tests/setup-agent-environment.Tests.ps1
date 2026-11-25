@@ -2267,6 +2267,24 @@ $configuration = [pscustomobject][ordered]@{schemaVersion=5;catalog=$catalogSele
         $setup = Invoke-UnixSetup $userHome @()
         Assert-SetupTestExitCode $setup 0
         $setup.Json.result | Should BeExactly 'completed'
+        $runtimeReceiptPath = Join-Path $userHome ".local/share/ai-instructions-setup/receipts/runtime-$($script:UnixVersion)-$($script:UnixRid).json"
+        $runtimeReceipt = Get-Content -Raw -LiteralPath $runtimeReceiptPath | ConvertFrom-Json
+        $physicalPowerShellPath = ConvertFrom-AgentEnvironmentSetupHomePath ([string]$runtimeReceipt.executablePath) $userHome
+        $renderReceipt = [pscustomobject]@{
+            os = 'linux'
+            runtime = [pscustomobject]@{ powerShellExecutablePath = $physicalPowerShellPath }
+            capabilities = @([pscustomobject]@{
+                name = 'powershell-runtime'
+                status = 'available'
+                evidence = @("Physical pwsh identity and version probe passed: $physicalPowerShellPath")
+            })
+        }
+        $runtimeContract = Import-Module (Join-Path $script:UnixRepositoryRoot 'scripts/ai-instructions-runtime-contract.psm1') -Force -PassThru
+        [byte[]]$renderedSection = & $runtimeContract {
+            param([byte[]]$template,[object]$receipt)
+            Get-AiInstructionsBootstrapSectionBytes -TemplateBytes $template -CapabilityReceipt $receipt
+        } ([IO.File]::ReadAllBytes((Join-Path $userHome '.codex/hooks/ai-instructions-runtime/bootstrap-section.md'))) $renderReceipt
+        [IO.File]::WriteAllBytes((Join-Path $userHome '.claude/CLAUDE.md'),$renderedSection)
 
         $candidateRoot = Join-Path $script:UnixRoot 'installed-bootstrap-candidate'
         [void][IO.Directory]::CreateDirectory($candidateRoot)

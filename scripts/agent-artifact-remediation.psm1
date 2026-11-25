@@ -288,7 +288,7 @@ function Get-RemediationLegacyManifestPaths {
     )
 
     $paths = New-Object 'System.Collections.Generic.HashSet[string]' $Comparer
-    $manifestPath = Join-Path $Repository '.codex\ai-instructions.manifest.json'
+    $manifestPath = Join-Path (Join-Path $Repository '.codex') 'ai-instructions.manifest.json'
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return ,$paths }
     Assert-RemediationPathHasNoReparsePoint -Repository $Repository -RelativePath '.codex/ai-instructions.manifest.json'
     try { $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json }
@@ -336,7 +336,7 @@ function Get-RemediationFullPath {
     param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string] $RelativePath)
 
     $root = [System.IO.Path]::GetFullPath($Repository).TrimEnd([char[]]@('\','/'))
-    $fullPath = [System.IO.Path]::GetFullPath((Join-Path $root $RelativePath.Replace('/','\')))
+    $fullPath = [System.IO.Path]::GetFullPath((Join-Path $root $RelativePath.Replace('/',[System.IO.Path]::DirectorySeparatorChar)))
     $prefix = $root + [System.IO.Path]::DirectorySeparatorChar
     if (-not $fullPath.StartsWith($prefix,[System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Agent artifact path resolves outside the Repository: $RelativePath"
@@ -439,7 +439,7 @@ function New-AgentArtifactRemediationBackup {
         $sourcePath = Get-RemediationFullPath -Repository $Repository -RelativePath $relativePath
         $exists = Test-Path -LiteralPath $sourcePath -PathType Leaf
         if ($exists) {
-            $destinationPath = Join-Path (Join-Path $backupRoot 'files') $relativePath.Replace('/','\')
+            $destinationPath = Join-Path (Join-Path $backupRoot 'files') $relativePath.Replace('/',[System.IO.Path]::DirectorySeparatorChar)
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destinationPath) | Out-Null
             [System.IO.File]::Copy($sourcePath,$destinationPath,$false)
             $backupFile = Get-Item -Force -LiteralPath $destinationPath
@@ -488,7 +488,7 @@ function Get-RemediationGitInfoExcludePath {
     $path = ((Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('rev-parse','--git-path','info/exclude')) | Select-Object -First 1).Trim()
     if (-not [System.IO.Path]::IsPathRooted($path)) { $path = Join-Path $Repository $path }
     $path = [System.IO.Path]::GetFullPath($path)
-    $expected = [System.IO.Path]::GetFullPath((Join-Path $CommonGitDirectory 'info\exclude'))
+    $expected = [System.IO.Path]::GetFullPath((Join-Path (Join-Path $CommonGitDirectory 'info') 'exclude'))
     if (-not $path.Equals($expected,[System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Shared Git exclude path is outside the Git common directory: $path"
     }

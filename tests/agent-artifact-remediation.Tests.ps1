@@ -525,7 +525,9 @@ if(-not(Get-Command ConvertFrom-GitWorktreePorcelainZ -ErrorAction SilentlyConti
             Set-Item -Path Function:script:Get-RemediationGitExitCode -Value $exitCodeWrapper -Force
         } $Token $FailurePoint
         $headBefore=(@(& git -C $repository rev-parse HEAD)|Select-Object -First 1).Trim()
-        $indexBefore=(Get-FileHash -Algorithm SHA256 -LiteralPath ((& git -C $repository rev-parse --git-path index|Select-Object -First 1).Trim())).Hash
+        $indexPath=((& git -C $repository rev-parse --git-path index|Select-Object -First 1).Trim())
+        if(-not[IO.Path]::IsPathRooted($indexPath)){$indexPath=Join-Path $repository $indexPath}
+        $indexBefore=(Get-FileHash -Algorithm SHA256 -LiteralPath $indexPath).Hash
         $statusBefore=@(& git -C $repository status --porcelain=v2 --untracked-files=all)
         $backupParent=Join-Path ([IO.Path]::GetTempPath()) 'codex-agent-artifact-backups'
         $backupsBefore=@(if(Test-Path -LiteralPath $backupParent){Get-ChildItem -LiteralPath $backupParent -Directory|ForEach-Object{$_.Name}})
@@ -536,7 +538,7 @@ if(-not(Get-Command ConvertFrom-GitWorktreePorcelainZ -ErrorAction SilentlyConti
 
             $failure|Should Match "injected $FailurePoint git failure"
             ((@(& git -C $repository rev-parse HEAD)|Select-Object -First 1).Trim())|Should Be $headBefore
-            (Get-FileHash -Algorithm SHA256 -LiteralPath ((& git -C $repository rev-parse --git-path index|Select-Object -First 1).Trim())).Hash|Should Be $indexBefore
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $indexPath).Hash|Should Be $indexBefore
             (@(& git -C $repository status --porcelain=v2 --untracked-files=all)-join"`n")|Should Be ($statusBefore-join"`n")
             (Get-Content -Raw -LiteralPath (Join-Path $repository 'AGENTS.md')).Trim()|Should Be 'tracked Agent'
             $backupsAfter=@(if(Test-Path -LiteralPath $backupParent){Get-ChildItem -LiteralPath $backupParent -Directory|ForEach-Object{$_.Name}})

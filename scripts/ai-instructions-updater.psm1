@@ -472,8 +472,7 @@ function Resolve-AiInstructionsCandidatePowerShellPath {
     $executableName = if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' }
     $powerShellPath = [IO.Path]::GetFullPath((Join-Path $resolvedPSHome $executableName))
     $rootWithSeparator = $resolvedPSHome.TrimEnd([char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)) + [IO.Path]::DirectorySeparatorChar
-    $pathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
-    if (-not $powerShellPath.StartsWith($rootWithSeparator, $pathComparison)) {
+    if (-not $powerShellPath.StartsWith($rootWithSeparator, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Candidate installer PowerShell executable must be located under PSHOME.'
     }
     if (-not [IO.File]::Exists($powerShellPath)) {
