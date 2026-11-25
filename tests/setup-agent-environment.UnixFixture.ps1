@@ -116,6 +116,7 @@ $runtime=Join-Path $CodexHome 'hooks/ai-instructions-runtime';[void][IO.Director
 [IO.File]::WriteAllText((Join-Path $script:UnixRepo 'scripts/install-ai-instructions-bootstrap.ps1'),$fixtureInstaller,[Text.UTF8Encoding]::new($false))
 [void][IO.Directory]::CreateDirectory((Join-Path $script:UnixRepo 'catalog'))
 Copy-Item (Join-Path $script:UnixRepositoryRoot 'catalog/skills-catalog.json') (Join-Path $script:UnixRepo 'catalog/skills-catalog.json')
+Copy-Item (Join-Path $script:UnixRepositoryRoot 'scripts/skills-selection.psm1') (Join-Path $script:UnixRepo 'scripts/skills-selection.psm1')
 [void][IO.Directory]::CreateDirectory((Join-Path $script:UnixRepo 'instructions/common'))
 Copy-Item (Join-Path $script:UnixRepositoryRoot 'instructions/common/bootstrap-section.md') (Join-Path $script:UnixRepo 'instructions/common/bootstrap-section.md')
 & git -C $script:UnixRepo init -q 2>$null | Out-Null

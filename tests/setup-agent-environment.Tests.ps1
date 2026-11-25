@@ -879,6 +879,14 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         $clixml="#< CLIXML`n"+[Management.Automation.PSSerializer]::Serialize($record)
         (Get-AgentEnvironmentSetupChildErrorLine -Stderr $clixml -UserHome $diagnosticHome) | Should BeExactly 'first ~ failure'
 
+        $textError = "`e[31;1mOperationStopped: $diagnosticHome/install.ps1:825`e[0m`nLine |`n 825 | throw 'fixture'`n     | ~~~~~~~~~~~~~~~`n     | closure-invalid token=fixture-secret"
+        $textDiagnostic = Get-AgentEnvironmentSetupChildErrorLine -Stderr $textError -UserHome $diagnosticHome
+        $textDiagnostic | Should Match 'OperationStopped: ~/install.ps1:825'
+        $textDiagnostic | Should Match 'closure-invalid token=\[REDACTED\]'
+        $textDiagnostic | Should Not Match ([regex]::Escape([string][char]27))
+        $textDiagnostic | Should Not Match 'fixture-secret'
+        $textDiagnostic.Length | Should BeLessOrEqual 512
+
         . ([scriptblock]::Create((Get-SetupTestEntryFunctionSource ConvertFrom-SetupOwnedJsonResult)))
         $run=[pscustomobject]@{stdout="unexpected $diagnosticHome line`n$((('x'*900)))`n{`"outcome`":`"planned`",`"exitCode`":0}";stderr=''}
         $failure=$null
@@ -896,8 +904,8 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         $readme | Should Match '乾淨的相同 pin 重跑.*byte-identical.*受管 drift.*修復'
     }
 
-    # Scenario: A real ShouldProcess-aware cmdlet writes WhatIf through the host, while an Apply-mode error uses PowerShell's error stream.
-    # Purpose: Exercise the production encoded child launch so every mode emits exactly one JSON success line, host UI cannot pollute stdout, and stderr is text rather than CLIXML.
+    # Scenario: A real ShouldProcess-aware cmdlet writes WhatIf through the host, while an Apply-mode error uses PowerShell's error stream and a direct encoded child throws.
+    # Purpose: Exercise the production encoded child launch so host UI cannot pollute stdout, error records fail closed with matching JSON/process exits, and raw stderr stays Text rather than CLIXML.
     It 'UnitT51_runs_the_coordinator_in_a_hostless_text_child_for_every_mode' {
         function Invoke-SetupOwnedCommand {
             param([string]$RuntimeExecutable,[string[]]$Arguments,[Collections.IDictionary]$Environment,[string]$WorkingDirectory,[string]$FailureCode,[string]$Context,[switch]$AllowNonZero)
@@ -928,15 +936,25 @@ $outcome=if($WhatIfPreference){'planned'}elseif($Apply){'applied'}else{'current'
 exit 0
 '@,[Text.UTF8Encoding]::new($false))
         $environment=[ordered]@{HOME=$TestDrive;AI_SETUP_TEST_WHATIF_PATH=$probePath}
-        foreach($case in @(@{Mode='WhatIf';Outcome='planned'},@{Mode='Apply';Outcome='applied'},@{Mode='VerifyOnly';Outcome='current'})){
+        foreach($case in @(@{Mode='WhatIf';Outcome='planned';ExitCode=0},@{Mode='Apply';Outcome='applied';ExitCode=1},@{Mode='VerifyOnly';Outcome='current';ExitCode=0})){
             $run=Invoke-SetupCoordinatorChild -RuntimeExecutable ([Environment]::ProcessPath) -EntryPath $fixturePath -CodexHome (Join-Path $TestDrive '.codex') -UserHome $TestDrive -Mode $case.Mode -Environment $environment -WorkingDirectory $TestDrive
-            $run.exitCode|Should Be 0
+            $run.exitCode|Should Be $case.ExitCode
             $lines=@(([string]$run.stdout).Split("`n")|ForEach-Object{$_.Trim()}|Where-Object{$_.Length-gt0})
             $lines.Count|Should Be 1
-            ($lines[0]|ConvertFrom-Json).outcome|Should BeExactly $case.Outcome
-            if($case.Mode-ceq'Apply'){$run.stderr|Should Match 'fixture apply diagnostic';$run.stderr|Should Not Match '^#< CLIXML'}
+            $json=$lines[0]|ConvertFrom-Json
+            $json.outcome|Should BeExactly $case.Outcome
+            [int]$json.exitCode|Should Be $case.ExitCode
+            if($case.Mode-ceq'Apply'){
+                $run.stderr|Should Match 'fixture apply diagnostic'
+                (Resolve-AgentEnvironmentSetupProjectionResult $json -AllowedActions @('applied','current')).code|Should BeExactly 'projection-failed'
+            }
         }
         Test-Path -LiteralPath $probePath|Should Be $false
+
+        $directError=Invoke-SetupEncodedChild -RuntimeExecutable ([Environment]::ProcessPath) -Script "throw [InvalidOperationException]::new('fixture encoded diagnostic')" -Environment $environment -WorkingDirectory $TestDrive -FailureCode projection-failed -Context 'fixture encoded child' -AllowNonZero
+        $directError.exitCode|Should Not Be 0
+        $directError.stderr|Should Match 'fixture encoded diagnostic'
+        $directError.stderr|Should Not Match '^#< CLIXML'
     }
 }
 
@@ -1986,6 +2004,7 @@ $configuration = [pscustomobject][ordered]@{schemaVersion=5;catalog=$catalogSele
         [IO.File]::WriteAllText((Join-Path $script:UnixRepo 'scripts/install-ai-instructions-bootstrap.ps1'),$fixtureInstaller,[Text.UTF8Encoding]::new($false))
         [void][IO.Directory]::CreateDirectory((Join-Path $script:UnixRepo 'catalog'))
         Copy-Item -LiteralPath (Join-Path $script:UnixRepositoryRoot 'catalog/skills-catalog.json') -Destination (Join-Path $script:UnixRepo 'catalog/skills-catalog.json')
+        Copy-Item -LiteralPath (Join-Path $script:UnixRepositoryRoot 'scripts/skills-selection.psm1') -Destination (Join-Path $script:UnixRepo 'scripts/skills-selection.psm1')
         [void][IO.Directory]::CreateDirectory((Join-Path $script:UnixRepo 'instructions/common'))
         Copy-Item -LiteralPath (Join-Path $script:UnixRepositoryRoot 'instructions/common/bootstrap-section.md') -Destination (Join-Path $script:UnixRepo 'instructions/common/bootstrap-section.md')
         & git -C $script:UnixRepo init -q 2>$null | Out-Null

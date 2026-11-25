@@ -343,6 +343,12 @@ function ConvertTo-AgentEnvironmentSetupSanitizedText {
     $options = if ($IsWindows) { [Text.RegularExpressions.RegexOptions]::IgnoreCase } else { [Text.RegularExpressions.RegexOptions]::None }
     $result = $Text
     foreach ($variant in @($homePath,$homePath.Replace('\','/'))) { $result = [regex]::Replace($result,[regex]::Escape($variant),'~',$options) }
+    $cultureInvariant = [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    $result = [regex]::Replace($result,'\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\))','',$cultureInvariant)
+    $result = [regex]::Replace($result,'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]','',$cultureInvariant)
+    $result = [regex]::Replace($result,'(?im)\b(authorization|proxy-authorization|token|secret|password|passwd|api[_-]?key|credential)(\s*[:=]\s*)([^\s;]+)','$1$2[REDACTED]',$cultureInvariant)
+    $result = [regex]::Replace($result,'(?i)\bBearer\s+[^\s;]+','Bearer [REDACTED]',$cultureInvariant)
+    $result = [regex]::Replace($result,'(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^@/\s]+@','$1[REDACTED]@',$cultureInvariant)
     return $result
 }
 
@@ -373,9 +379,18 @@ function Get-AgentEnvironmentSetupChildErrorLine {
         catch { $diagnostic = '<unreadable serialized child stderr>' }
     }
     $sanitized = ConvertTo-AgentEnvironmentSetupSanitizedText $diagnostic $UserHome
-    $line = @(([string]$sanitized).Split("`n") | ForEach-Object { $_.TrimEnd("`r").Trim() } | Where-Object { $_.Length -gt 0 } | Select-Object -First 1)
-    if ($line.Count -eq 0) { return '<empty>' }
-    return [string]$line[0]
+    $lines = @(([string]$sanitized).Split("`n") | ForEach-Object { $_.TrimEnd("`r").Trim() } | Where-Object { $_.Length -gt 0 })
+    if ($lines.Count -eq 0) { return '<empty>' }
+    $selected = if ($lines.Count -le 4) { @($lines) } else { @($lines[0]) + @($lines | Select-Object -Last 3) }
+    $parts = [Collections.Generic.List[string]]::new()
+    foreach ($line in $selected) {
+        $normalized = [regex]::Replace([string]$line,'\s+',' ',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
+        if ($normalized.Length -gt 160) { $normalized = $normalized.Substring(0,157) + '...' }
+        $parts.Add($normalized)
+    }
+    $summary = $parts -join ' | '
+    if ($summary.Length -gt 512) { $summary = $summary.Substring(0,509) + '...' }
+    return $summary
 }
 
 function Get-AgentEnvironmentSetupChildOutputSummary {

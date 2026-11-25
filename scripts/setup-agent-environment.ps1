@@ -407,14 +407,22 @@ try{
         default{throw 'Unsupported setup coordinator child mode.'}
     }
     $output=@($powerShell.Invoke())
-    if($powerShell.Streams.Error.Count-gt0){[Console]::Error.WriteLine([string]$powerShell.Streams.Error[0])}
-    foreach($item in $output){Write-Output ([string]$item)}
-    if($output.Count-ne1){[Console]::Error.WriteLine("Coordinator success stream contained $($output.Count) records; exactly one JSON result is required.")}
+    $hasChildError=$powerShell.Streams.Error.Count-gt0
+    if($hasChildError){[Console]::Error.WriteLine([string]$powerShell.Streams.Error[0])}
+    if($output.Count-ne1){
+        foreach($item in $output){Write-Output ([string]$item)}
+        [Console]::Error.WriteLine("Coordinator success stream contained $($output.Count) records; exactly one JSON result is required.")
+    }
     else{
         try{$result=[string]$output[0]|ConvertFrom-Json -ErrorAction Stop}
-        catch{[Console]::Error.WriteLine('Coordinator success stream did not contain valid JSON.');$result=$null}
-        if($null-ne$result-and$null-ne$result.PSObject.Properties['exitCode']){$childExitCode=[int]$result.exitCode}
-        elseif($null-ne$result){[Console]::Error.WriteLine('Coordinator JSON result did not contain exitCode.')}
+        catch{Write-Output ([string]$output[0]);[Console]::Error.WriteLine('Coordinator success stream did not contain valid JSON.');$result=$null}
+        if($null-ne$result-and$null-ne$result.PSObject.Properties['exitCode']){
+            $reportedExitCode=[int]$result.exitCode
+            if($hasChildError-and$reportedExitCode-eq0){$reportedExitCode=1;$result.exitCode=$reportedExitCode}
+            $childExitCode=$reportedExitCode
+            Write-Output ($result|ConvertTo-Json -Compress -Depth 100)
+        }
+        elseif($null-ne$result){Write-Output ([string]$output[0]);[Console]::Error.WriteLine('Coordinator JSON result did not contain exitCode.')}
     }
 }
 catch{
