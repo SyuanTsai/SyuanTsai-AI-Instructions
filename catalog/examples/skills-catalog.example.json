@@ -33,6 +33,7 @@
       "description": "Code delegation and pull-request collaboration workflows.",
       "default": false,
       "includes": [
+        "orchestrate-ai-delivery",
         "review-bitbucket-pull-request",
         "write-implementation-prompt"
       ],
@@ -182,6 +183,30 @@
       },
       "profiles": [
         "ai-memory"
+      ],
+      "compatibility": {
+        "platforms": [
+          "any"
+        ],
+        "shells": [],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      }
+    },
+    {
+      "id": "orchestrate-ai-delivery",
+      "group": "code-collaboration",
+      "source": {
+        "sourceId": "agent-skills",
+        "path": ".agents/skills/orchestrate-ai-delivery"
+      },
+      "profiles": [
+        "code-collaboration"
       ],
       "compatibility": {
         "platforms": [

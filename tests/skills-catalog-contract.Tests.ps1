@@ -227,7 +227,7 @@ function Get-TestManagedManifestV4 {
             -ManifestPath $script:ManifestExample `
             -ConfigurationPath $script:ConfigurationExample
 
-        $result.SkillCount | Should Be 16
+        $result.SkillCount | Should Be 17
         $result.ProfileCount | Should Be 7
         $result.SourceCount | Should Be 1
         $result.ManifestFileCount | Should Be 2
@@ -268,8 +268,8 @@ function Get-TestManagedManifestV4 {
         $lock.schemaVersion | Should Be 3
         (@($catalog.projections | ForEach-Object { "$($_.id)|$($_.scope)|$($_.root)" }) -join "`n") |
             Should Be (@('user-agents|user|.agents/skills', 'user-claude|user|.claude/skills') -join "`n")
-        @($catalog.skills).Count | Should Be 16
-        @($lock.skills).Count | Should Be 14
+        @($catalog.skills).Count | Should Be 17
+        @($lock.skills).Count | Should Be 15
         @($catalog.skills | Where-Object { $_.lifecycle.status -eq 'removed' }).Count | Should Be 2
         foreach ($skill in @($catalog.skills | Where-Object { $_.lifecycle.status -ne 'removed' })) {
             $skill.source.sourcePath | Should Be "skills/$($skill.id)"

@@ -45,6 +45,7 @@
       "description": "Code delegation and pull-request collaboration workflows. Local execution is supported on Windows only.",
       "default": false,
       "includes": [
+        "orchestrate-ai-delivery",
         "review-bitbucket-pull-request",
         "write-implementation-prompt"
       ],
@@ -194,6 +195,30 @@
       },
       "profiles": [
         "ai-memory"
+      ],
+      "compatibility": {
+        "platforms": [
+          "any"
+        ],
+        "shells": [],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      }
+    },
+    {
+      "id": "orchestrate-ai-delivery",
+      "group": "code-collaboration",
+      "source": {
+        "sourceId": "code-collaboration",
+        "sourcePath": "skills/orchestrate-ai-delivery"
+      },
+      "profiles": [
+        "code-collaboration"
       ],
       "compatibility": {
         "platforms": [
