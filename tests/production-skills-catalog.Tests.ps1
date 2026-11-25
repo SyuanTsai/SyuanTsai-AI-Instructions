@@ -126,7 +126,7 @@ Describe 'production Skills Catalog' {
         $cases = @(
             @{
                 Profile='code-collaboration'
-                Expected=@('configure-bitbucket-api-access','review-bitbucket-pull-request','write-implementation-prompt')
+                Expected=@('configure-bitbucket-api-access','orchestrate-ai-delivery','review-bitbucket-pull-request','write-implementation-prompt')
             },
             @{
                 Profile='atlassian'
@@ -168,9 +168,9 @@ Describe 'production Skills Catalog' {
 
     # Scenario: Active migrated Skills remain routed while the retired FELO wrapper keeps only its stable-ID tombstone.
     # Purpose: Prevent the custom FELO Skill from re-entering profiles or the production lock without losing removal history.
-    It 'InterT15_maps_fourteen_active_Skills_and_keeps_the_removed_FELO_tombstone' {
+    It 'InterT15_maps_fifteen_active_Skills_and_keeps_the_removed_FELO_tombstone' {
         $activeSkills = @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' })
-        $activeSkills.Count | Should Be 14
+        $activeSkills.Count | Should Be 15
 
         $expectedSourceBySkill = @{
             'plan-production-change' = 'general'
@@ -178,6 +178,7 @@ Describe 'production Skills Catalog' {
             'investigate-datadog-logs' = 'general'
             'manage-ai-memory' = 'general'
             'manage-task-handoff' = 'general'
+            'orchestrate-ai-delivery' = 'code-collaboration'
             'write-implementation-prompt' = 'code-collaboration'
             'capture-private-course-knowledge' = 'knowledge-content'
             'configure-bitbucket-api-access' = 'atlassian-ecosystem'
@@ -398,7 +399,7 @@ Describe 'production Skills Catalog' {
         Assert-StringSequence -Actual @($script:catalog.projections.root) -Expected @('.agents/skills','.claude/skills')
         [string]$script:lock.projectionContractSha256 | Should Match '^[0-9a-f]{64}$'
         $active = @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' })
-        $active.Count | Should Be 14
+        $active.Count | Should Be 15
         foreach ($skill in $active) {
             [string]$skill.source.sourcePath | Should Be "skills/$($skill.id)"
             $null -eq $skill.source.PSObject.Properties['targetPath'] | Should Be $true

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "catalogId": "example-agent-skills",
-  "catalogSha256": "e737d6be4368262252563fce9bfd98aba970fe38244a2c9ee0a99feee7ce6870",
+  "catalogSha256": "71e1e2b397d005f40205214e42218735a66651946801603a77bf03ac911f4eb4",
   "sources": [
     {
       "id": "agent-skills",
@@ -61,6 +61,12 @@
       "sourceId": "agent-skills",
       "sourcePath": ".agents/skills/manage-task-handoff",
       "contentSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "id": "orchestrate-ai-delivery",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/orchestrate-ai-delivery",
+      "contentSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
     },
     {
       "id": "plan-production-change",
