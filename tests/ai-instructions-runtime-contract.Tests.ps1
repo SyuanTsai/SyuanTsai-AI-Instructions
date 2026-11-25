@@ -1204,6 +1204,49 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         }
     }
 
+    # Scenario: A complete installed v3/v5 runtime predates two additive platform runtime exports in the candidate validator.
+    # Purpose: Permit an authenticated historical API subset only when the caller explicitly selects the existing-runtime compatibility gate.
+    It 'UnitT104a_accepts_an_authenticated_historical_platform_runtime_api_subset_only_for_existing_runtime_validation' {
+        $fixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-historical-api-subset')
+        $configuration = New-TestConfigurationDocument -SchemaVersion 5
+        $configuration.catalog.ref = $fixture.Bundle.commit
+        $manifestPath = Join-Path $fixture.Root 'platform-runtime.psd1'
+        foreach ($functionName in @('Confirm-PlatformDirectoryDurability','Assert-PlatformPowerShellRuntime')) {
+            Set-TestTextOccurrence -Path $manifestPath -OldValue ("        '$functionName',`n") -NewValue "        `n"
+        }
+        Update-TestRuntimeV3Inventory -Fixture $fixture
+        $fixture.Bundle.platformRuntime.manifestSha256 = Get-TestCanonicalTextSha256 -Path $manifestPath
+
+        { Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configuration -RuntimeRoot $fixture.Root -AllowHistoricalPlatformRuntimeApi | Out-Null } |
+            Should Not Throw
+        (Get-RuntimeContractError {
+            Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configuration -RuntimeRoot $fixture.Root
+        }) | Should Match 'FunctionsToExport'
+    }
+
+    # Scenario: An existing-runtime compatibility gate sees an unknown, duplicate, or non-string platform export.
+    # Purpose: Keep the historical API exception fail closed for every shape except a unique string subset of the candidate API.
+    It 'UnitT104b_rejects_invalid_historical_platform_runtime_api_subsets' {
+        $cases = @(
+            @{ Name='unknown'; OldValue="        'Get-PlatformCapabilities',`n"; NewValue="        'Invoke-UnknownPlatformApi',`n" },
+            @{ Name='duplicate'; OldValue="        'Get-PlatformCapabilities',`n"; NewValue="        'Get-PlatformCapabilities',`n        'Get-PlatformCapabilities',`n" },
+            @{ Name='non-string'; OldValue="        'Get-PlatformCapabilities',`n"; NewValue="        42,`n" }
+        )
+        foreach ($case in $cases) {
+            $fixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive ('runtime-v3-historical-api-' + $case.Name))
+            $configuration = New-TestConfigurationDocument -SchemaVersion 5
+            $configuration.catalog.ref = $fixture.Bundle.commit
+            $manifestPath = Join-Path $fixture.Root 'platform-runtime.psd1'
+            Set-TestTextOccurrence -Path $manifestPath -OldValue $case.OldValue -NewValue $case.NewValue
+            Update-TestRuntimeV3Inventory -Fixture $fixture
+            $fixture.Bundle.platformRuntime.manifestSha256 = Get-TestCanonicalTextSha256 -Path $manifestPath
+
+            (Get-RuntimeContractError {
+                Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configuration -RuntimeRoot $fixture.Root -AllowHistoricalPlatformRuntimeApi
+            }) | Should Match 'FunctionsToExport'
+        }
+    }
+
     # Scenario: A v5 selection names a known projection absent from the installed Catalog.
     # Purpose: Prevent projection-aware installation from accepting a selection its authenticated Catalog cannot provide.
     It 'UnitT105_rejects_v5_projection_not_declared_by_the_installed_catalog' {

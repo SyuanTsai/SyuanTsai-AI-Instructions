@@ -722,6 +722,40 @@ finally {
     }
 
     if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    # Scenario: A complete v3/v5 installation from commit 38cd93e5 exposes the historical platform API, then a newer candidate is installed.
+    # Purpose: Prove the installer existing-runtime gate accepts only the authenticated API subset needed to unblock an additive API upgrade.
+    It 'InterT49a_upgrades_an_authenticated_historical_v3v5_platform_runtime_api_subset' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome -WriterSchema V3V5
+        Set-TestInstalledHistoricalPlatformRuntimeApi `
+            -CodexHome $codexHome `
+            -HistoricalCommit '38cd93e5dd0734859edecebfb44448b2293d0ab2'
+
+        { Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome -WriterSchema Auto | Out-Null } | Should Not Throw
+
+        $runtimeRoot=Join-Path $codexHome 'hooks\ai-instructions-runtime'
+        $manifest=Import-PowerShellDataFile -LiteralPath (Join-Path $runtimeRoot 'platform-runtime.psd1')
+        @($manifest.FunctionsToExport)|Should Contain 'Confirm-PlatformDirectoryDurability'
+        @($manifest.FunctionsToExport)|Should Contain 'Assert-PlatformPowerShellRuntime'
+        $bundle=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $runtimeRoot 'runtime-bundle.json')|ConvertFrom-Json
+        [string]$bundle.commit|Should Be ((@(& git -C $repositoryRoot rev-parse HEAD)-join'').Trim())
+    }
+    }
+
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    # Scenario: The installed v3/v5 runtime claims the same commit as the candidate but its platform manifest omits current exports.
+    # Purpose: Keep same-commit verification strict so compatibility mode cannot hide current-runtime closure drift.
+    It 'InterT49b_rejects_a_same_commit_runtime_missing_current_platform_exports' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome -WriterSchema V3V5
+        Set-TestInstalledHistoricalPlatformRuntimeApi -CodexHome $codexHome
+
+        $result=Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        $result.ExitCode|Should Not Be 0
+        $result.Output|Should Match 'FunctionsToExport'
+    }
+    }
+
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
     It 'InterT51_rolls_back_runtime_config_and_agent_files_when_a_late_install_step_fails' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'

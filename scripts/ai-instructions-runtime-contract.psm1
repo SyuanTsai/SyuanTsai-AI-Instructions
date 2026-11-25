@@ -1565,7 +1565,10 @@ function Assert-AiInstructionsPlatformRuntimeManifestLoadFields {
 }
 
 function Assert-AiInstructionsPlatformRuntimeManifestApi {
-    param([Parameter(Mandatory = $true)][object] $Manifest)
+    param(
+        [Parameter(Mandatory = $true)][object] $Manifest,
+        [switch] $AllowHistoricalPlatformRuntimeApi
+    )
 
     $rootModule = Get-AiInstructionsDataValue -Object $Manifest -Name 'RootModule'
     if ($rootModule -isnot [string] -or [string]$rootModule -cne $script:ExpectedPlatformRuntimeRootModule) {
@@ -1581,7 +1584,13 @@ function Assert-AiInstructionsPlatformRuntimeManifestApi {
     }
     $expectedFunctionSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($functionName in $script:ExpectedPlatformRuntimeFunctionsToExport) { [void]$expectedFunctionSet.Add($functionName) }
-    if ($actualFunctionSet.Count -ne $expectedFunctionSet.Count -or -not $actualFunctionSet.SetEquals($expectedFunctionSet)) {
+    $functionsMatch = if ($AllowHistoricalPlatformRuntimeApi) {
+        $actualFunctionSet.IsSubsetOf($expectedFunctionSet)
+    }
+    else {
+        $actualFunctionSet.Count -eq $expectedFunctionSet.Count -and $actualFunctionSet.SetEquals($expectedFunctionSet)
+    }
+    if (-not $functionsMatch) {
         throw 'Platform runtime manifest FunctionsToExport must exactly match the expected API.'
     }
 
@@ -1597,11 +1606,12 @@ function Assert-AiInstructionsPlatformRuntimeManifestInventory {
     param(
         [Parameter(Mandatory = $true)][object] $Manifest,
         [Parameter(Mandatory = $true)][string] $RuntimeRoot,
-        [Parameter(Mandatory = $true)][string] $BundleApiVersion
+        [Parameter(Mandatory = $true)][string] $BundleApiVersion,
+        [switch] $AllowHistoricalPlatformRuntimeApi
     )
 
     Assert-AiInstructionsPlatformRuntimeManifestLoadFields -Manifest $Manifest
-    Assert-AiInstructionsPlatformRuntimeManifestApi -Manifest $Manifest
+    Assert-AiInstructionsPlatformRuntimeManifestApi -Manifest $Manifest -AllowHistoricalPlatformRuntimeApi:$AllowHistoricalPlatformRuntimeApi
     $privateData = Get-AiInstructionsDataValue -Object $Manifest -Name 'PrivateData'
     $platformRuntime = Get-AiInstructionsDataValue -Object $privateData -Name 'PlatformRuntime'
     $manifestApiVersion = Get-AiInstructionsDataValue -Object $platformRuntime -Name 'ApiVersion'
@@ -1966,7 +1976,8 @@ function Assert-AiInstructionsRuntimeBundleV3 {
         [Parameter(Mandatory = $true)][object] $Bundle,
         [Parameter(Mandatory = $true)][object] $Configuration,
         [Parameter(Mandatory = $true)][string] $RuntimeRoot,
-        [string] $CanonicalRepository = $script:CanonicalRepository
+        [string] $CanonicalRepository = $script:CanonicalRepository,
+        [switch] $AllowHistoricalPlatformRuntimeApi
     )
     $allowed = @('schemaVersion','repository','commit','acquisition','archiveSha256','inventorySha256','inventory','platform','platformRuntime','requiredCapabilities','projectionContractSha256')
     foreach ($name in $allowed) { if (-not (Test-AiInstructionsObjectHasProperty -Object $Bundle -Name $name)) { throw "Runtime bundle is missing '$name'." } }
@@ -2075,7 +2086,8 @@ function Assert-AiInstructionsRuntimeBundleV3 {
     Assert-AiInstructionsPlatformRuntimeManifestInventory `
         -Manifest $manifest `
         -RuntimeRoot $RuntimeRoot `
-        -BundleApiVersion ([string]$Bundle.platformRuntime.apiVersion)
+        -BundleApiVersion ([string]$Bundle.platformRuntime.apiVersion) `
+        -AllowHistoricalPlatformRuntimeApi:$AllowHistoricalPlatformRuntimeApi
     foreach ($closurePath in @(Get-AiInstructionsPlatformRuntimeClosurePaths -Manifest $manifest -ManifestPath $manifestRelativePath)) {
         if (-not $inventoryByPath.ContainsKey($closurePath)) { throw "Runtime bundle inventory is missing platform runtime closure file '$closurePath'." }
         $closureFullPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $closurePath -Context 'Platform runtime closure'
@@ -2124,7 +2136,8 @@ function Assert-AiInstructionsRuntimeGate {
         [Parameter(Mandatory = $true)][object] $Configuration,
         [Parameter(Mandatory = $true)][string] $RuntimeRoot,
         [AllowNull()][object] $CapabilityReceipt,
-        [string] $CanonicalRepository = $script:CanonicalRepository
+        [string] $CanonicalRepository = $script:CanonicalRepository,
+        [switch] $AllowHistoricalPlatformRuntimeApi
     )
     if (Test-AiInstructionsWslHost) {
         throw (New-AiInstructionsRefusalException -Code runtime-baseline-unavailable -Message 'WSL is unsupported for the AI instructions projection runtime.')
@@ -2138,7 +2151,7 @@ function Assert-AiInstructionsRuntimeGate {
     }
     try {
         Assert-AiInstructionsSyncConfigurationV5 -Configuration $Configuration -CanonicalRepository $CanonicalRepository | Out-Null
-        Assert-AiInstructionsRuntimeBundleV3 -Bundle $Bundle -Configuration $Configuration -RuntimeRoot $RuntimeRoot -CanonicalRepository $CanonicalRepository | Out-Null
+        Assert-AiInstructionsRuntimeBundleV3 -Bundle $Bundle -Configuration $Configuration -RuntimeRoot $RuntimeRoot -CanonicalRepository $CanonicalRepository -AllowHistoricalPlatformRuntimeApi:$AllowHistoricalPlatformRuntimeApi | Out-Null
     }
     catch {
         if ($null -ne (Get-AiInstructionsRefusalCode $_)) { throw }
