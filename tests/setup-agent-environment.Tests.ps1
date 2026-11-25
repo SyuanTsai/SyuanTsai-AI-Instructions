@@ -2259,6 +2259,145 @@ $configuration = [pscustomobject][ordered]@{schemaVersion=5;catalog=$catalogSele
         $after | Should BeExactly $before
     }
 
+    if ($IsLinux) {
+    # Scenario: A completed Linux setup emits D13 with an absolute pwsh path while neither pwsh nor pwsh.exe is available through PATH.
+    # Purpose: Execute that exact command against a fully verified installed launcher, an offline update source and a read-only fan-out fixture.
+    It 'CloudT1a_runs_the_generated_D13_installed_bootstrap_without_pwsh_on_PATH' {
+        $userHome = New-UnixHome 'cloud-installed-bootstrap'
+        $setup = Invoke-UnixSetup $userHome @()
+        Assert-SetupTestExitCode $setup 0
+        $setup.Json.result | Should BeExactly 'completed'
+        $runtimeReceiptPath = Join-Path $userHome ".local/share/ai-instructions-setup/receipts/runtime-$($script:UnixVersion)-$($script:UnixRid).json"
+        $runtimeReceipt = Get-Content -Raw -LiteralPath $runtimeReceiptPath | ConvertFrom-Json
+        $physicalPowerShellPath = ConvertFrom-AgentEnvironmentSetupHomePath ([string]$runtimeReceipt.executablePath) $userHome
+        $renderReceipt = [pscustomobject]@{
+            os = 'linux'
+            runtime = [pscustomobject]@{ powerShellExecutablePath = $physicalPowerShellPath }
+            capabilities = @([pscustomobject]@{
+                name = 'powershell-runtime'
+                status = 'available'
+                evidence = @("Physical pwsh identity and version probe passed: $physicalPowerShellPath")
+            })
+        }
+        $runtimeContract = Import-Module (Join-Path $script:UnixRepositoryRoot 'scripts/ai-instructions-runtime-contract.psm1') -Force -PassThru
+        [byte[]]$renderedSection = & $runtimeContract {
+            param([byte[]]$template,[object]$receipt)
+            Get-AiInstructionsBootstrapSectionBytes -TemplateBytes $template -CapabilityReceipt $receipt
+        } ([IO.File]::ReadAllBytes((Join-Path $userHome '.codex/hooks/ai-instructions-runtime/bootstrap-section.md'))) $renderReceipt
+        [IO.File]::WriteAllBytes((Join-Path $userHome '.claude/CLAUDE.md'),$renderedSection)
+
+        $candidateRoot = Join-Path $script:UnixRoot 'installed-bootstrap-candidate'
+        [void][IO.Directory]::CreateDirectory($candidateRoot)
+        Copy-Item -LiteralPath (Join-Path $script:UnixRepositoryRoot 'scripts'),(Join-Path $script:UnixRepositoryRoot 'catalog') -Destination $candidateRoot -Recurse
+        [void][IO.Directory]::CreateDirectory((Join-Path $candidateRoot 'instructions/common'))
+        Copy-Item -LiteralPath (Join-Path $script:UnixRepositoryRoot 'instructions/common/bootstrap-section.md') -Destination (Join-Path $candidateRoot 'instructions/common/bootstrap-section.md')
+        foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){
+            Copy-Item -LiteralPath (Join-Path $script:UnixRepositoryRoot $leaf) -Destination (Join-Path $candidateRoot $leaf)
+        }
+        $fixtureUpdateModule = @'
+function Get-AiInstructionsUpdateDisposition {
+    param([string]$Outcome,[string]$Message)
+    return [pscustomobject]@{classification='none';installationState='not-installed';retryable=$false}
+}
+function Invoke-AiInstructionsUpdateWorkflow {
+    param([string]$CodexHome,[switch]$ForceCheck,[switch]$InstallApproved)
+    [IO.File]::WriteAllText((Join-Path $CodexHome 'ai-instructions-update-receipt.json'),'{"outcome":"current","source":"SYP571-offline-fixture"}')
+    return [pscustomobject]@{outcome='current';message='SYP571 offline fixture update source reached; runtime is current.'}
+}
+Export-ModuleMember -Function Get-AiInstructionsUpdateDisposition,Invoke-AiInstructionsUpdateWorkflow
+'@
+        $fixtureFanOut = @'
+[CmdletBinding()]
+param([string]$CatalogPath,[string]$LockPath,[string]$ConfigurationPath,[string]$RuntimeRoot,[string]$UserHome,[string]$TargetRoot,[switch]$WhatIf)
+foreach($path in @($CatalogPath,$LockPath,$ConfigurationPath)){
+    if(-not(Test-Path -LiteralPath $path -PathType Leaf)){throw "SYP571 fan-out input is missing: $path"}
+}
+$manifest=Join-Path $UserHome '.agents/catalog-skills.manifest.json'
+$claude=Join-Path $UserHome '.claude/CLAUDE.md'
+if(-not(Test-Path -LiteralPath $manifest -PathType Leaf)-or-not(Test-Path -LiteralPath $claude -PathType Leaf)){throw 'SYP571 expected setup projections are missing.'}
+$document=Get-Content -Raw -LiteralPath $manifest|ConvertFrom-Json
+if(@($document.files).Count-eq0){throw 'SYP571 expected projected Skills are missing.'}
+Write-Output 'SYP571 read-only fan-out verified existing Skills and instructions.'
+'@
+        [IO.File]::WriteAllText((Join-Path $candidateRoot 'scripts/ai-instructions-updater.psm1'),$fixtureUpdateModule,[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $candidateRoot 'scripts/bootstrap-ai-instructions-multisource.ps1'),$fixtureFanOut,[Text.UTF8Encoding]::new($false))
+        & git -C $candidateRoot init -q 2>$null|Out-Null
+        & git -C $candidateRoot remote add origin 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' 2>$null|Out-Null
+        & git -C $candidateRoot add -A 2>$null|Out-Null
+        & git -C $candidateRoot -c user.name=setup-test -c user.email=setup-test@example.invalid commit -q -m fixture 2>$null|Out-Null
+        $candidateCommit=([string](& git -C $candidateRoot rev-parse HEAD)).Trim()
+        $archivePath=Join-Path $script:UnixRoot 'installed-bootstrap-candidate.zip'
+        & git -C $candidateRoot archive --format=zip --prefix=candidate-root/ --output=$archivePath HEAD 2>$null
+        $LASTEXITCODE|Should Be 0
+        $archiveSha256=(Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+
+        $installedCodexHome=Join-Path $userHome '.codex-installed'
+        $installerStart=[Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'pwsh'))
+        foreach($argument in @(
+            '-NoProfile','-NonInteractive','-File',(Join-Path $script:UnixRepositoryRoot 'scripts/install-ai-instructions-bootstrap.ps1'),
+            '-RepositoryRoot',$candidateRoot,'-CodexHome',$installedCodexHome,
+            '-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$candidateCommit,
+            '-Acquisition','github-codeload','-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath,'-WriterSchema','V3V5'
+        )){$installerStart.ArgumentList.Add($argument)}
+        $installerStart.UseShellExecute=$false;$installerStart.RedirectStandardOutput=$true;$installerStart.RedirectStandardError=$true
+        $fixtureConfig=Join-Path $userHome '.config';$fixtureData=Join-Path $userHome '.local/share';$fixtureCache=Join-Path $userHome '.cache'
+        [void][IO.Directory]::CreateDirectory($fixtureConfig);[void][IO.Directory]::CreateDirectory($fixtureData);[void][IO.Directory]::CreateDirectory($fixtureCache)
+        $installerStart.Environment['HOME']=$userHome;$installerStart.Environment['USERPROFILE']=$userHome;$installerStart.Environment['CODEX_HOME']=$installedCodexHome
+        $installerStart.Environment['APPDATA']=$fixtureConfig;$installerStart.Environment['LOCALAPPDATA']=$fixtureData
+        $installerStart.Environment['XDG_CONFIG_HOME']=$fixtureConfig;$installerStart.Environment['XDG_DATA_HOME']=$fixtureData;$installerStart.Environment['XDG_CACHE_HOME']=$fixtureCache
+        $installerStart.Environment['HTTPS_PROXY']='http://127.0.0.1:9'
+        $installerProcess=[Diagnostics.Process]::Start($installerStart)
+        try{
+            $installerStdout=$installerProcess.StandardOutput.ReadToEndAsync();$installerStderr=$installerProcess.StandardError.ReadToEndAsync()
+            if(-not$installerProcess.WaitForExit(900000)){$installerProcess.Kill($true);throw 'SYP571 fixture installer timed out.'}
+            $installerProcess.WaitForExit()
+            $installerOutput=$installerStdout.Result+$installerStderr.Result
+            if($installerProcess.ExitCode-ne0){throw "SYP571 fixture installer failed: $installerOutput"}
+            $installerProcess.ExitCode|Should Be 0
+        }finally{$installerProcess.Dispose()}
+
+        $claudePath=Join-Path $userHome '.claude/CLAUDE.md'
+        $claudeText=[IO.File]::ReadAllText($claudePath)
+        $commandMatch=[regex]::Match($claudeText,'codexHome="\$\{CODEX_HOME:-\$HOME/\.codex\}"; [^`\r\n]+')
+        $commandMatch.Success|Should Be $true
+        $d13Command=$commandMatch.Value
+        $d13Command|Should Match "^codexHome=.*'[^']+/pwsh' -NoProfile -NonInteractive -File"
+
+        $before=@(
+            Get-UnixTreeSnapshot (Join-Path $installedCodexHome 'hooks')
+            Get-UnixTreeSnapshot (Join-Path $userHome '.agents')
+            Get-UnixTreeSnapshot (Join-Path $userHome '.claude')
+        )-join"`n"
+        $shimPath=New-UnixToolShim 'installed-bootstrap-no-pwsh'
+        Test-Path -LiteralPath (Join-Path $shimPath 'pwsh')|Should Be $false
+        Test-Path -LiteralPath (Join-Path $shimPath 'pwsh.exe')|Should Be $false
+        $bootstrapStart=[Diagnostics.ProcessStartInfo]::new('sh')
+        $bootstrapStart.ArgumentList.Add('-c');$bootstrapStart.ArgumentList.Add($d13Command)
+        $bootstrapStart.UseShellExecute=$false;$bootstrapStart.RedirectStandardOutput=$true;$bootstrapStart.RedirectStandardError=$true
+        $bootstrapStart.Environment['HOME']=$userHome;$bootstrapStart.Environment['USERPROFILE']=$userHome;$bootstrapStart.Environment['CODEX_HOME']=$installedCodexHome;$bootstrapStart.Environment['PATH']=$shimPath
+        $bootstrapStart.Environment['APPDATA']=$fixtureConfig;$bootstrapStart.Environment['LOCALAPPDATA']=$fixtureData
+        $bootstrapStart.Environment['XDG_CONFIG_HOME']=$fixtureConfig;$bootstrapStart.Environment['XDG_DATA_HOME']=$fixtureData;$bootstrapStart.Environment['XDG_CACHE_HOME']=$fixtureCache
+        $bootstrapStart.Environment['HTTPS_PROXY']='http://127.0.0.1:9'
+        $bootstrapProcess=[Diagnostics.Process]::Start($bootstrapStart)
+        try{
+            $stdout=$bootstrapProcess.StandardOutput.ReadToEndAsync();$stderr=$bootstrapProcess.StandardError.ReadToEndAsync()
+            if(-not$bootstrapProcess.WaitForExit(900000)){$bootstrapProcess.Kill($true);throw 'SYP571 D13 fixture run timed out.'}
+            $bootstrapProcess.WaitForExit();$bootstrapOutput=$stdout.Result+$stderr.Result
+            if($bootstrapProcess.ExitCode-ne0){throw "SYP571 D13 fixture run failed: $bootstrapOutput"}
+            $bootstrapProcess.ExitCode|Should Be 0
+        }finally{$bootstrapProcess.Dispose()}
+        $bootstrapOutput|Should Not Match 'pwsh\.exe|not recognized'
+        $bootstrapOutput|Should Match 'SYP571 offline fixture update source reached; runtime is current'
+        $bootstrapOutput|Should Match 'SYP571 read-only fan-out verified existing Skills and instructions'
+        $after=@(
+            Get-UnixTreeSnapshot (Join-Path $installedCodexHome 'hooks')
+            Get-UnixTreeSnapshot (Join-Path $userHome '.agents')
+            Get-UnixTreeSnapshot (Join-Path $userHome '.claude')
+        )-join"`n"
+        $after|Should BeExactly $before
+    }
+    }
+
     # Scenario: The expected commit advances and changes both managed content and a scripts/platform build input.
     # Purpose: Require an isolated updater child, retained V3V5 projections and projection of the new immutable pin.
     It 'CloudT2_updates_to_a_descendant_pin_and_projects_the_new_verified_bytes' {

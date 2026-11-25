@@ -245,8 +245,8 @@ if ($runtimeGeneration -ceq 'v3v5') {
     $runtimeRootPath = [System.IO.Path]::GetFullPath($RuntimeRoot)
     $bundlePath = Join-Path $runtimeRootPath 'runtime-bundle.json'
     $platformRuntimePath = Join-Path $runtimeRootPath 'platform-runtime.psd1'
-    $runtimeCatalogPath = Join-Path $runtimeRootPath 'catalog\skills-catalog.json'
-    $runtimeLockPath = Join-Path $runtimeRootPath 'catalog\skills-catalog-lock.json'
+    $runtimeCatalogPath = Join-Path (Join-Path $runtimeRootPath 'catalog') 'skills-catalog.json'
+    $runtimeLockPath = Join-Path (Join-Path $runtimeRootPath 'catalog') 'skills-catalog-lock.json'
     $bundle = Read-JsonDocument -Path $bundlePath -Name 'AI instruction runtime bundle'
     if ((Get-RawFileSha256 -Path $CatalogPath) -cne (Get-RawFileSha256 -Path $runtimeCatalogPath) -or
         (Get-RawFileSha256 -Path $LockPath) -cne (Get-RawFileSha256 -Path $runtimeLockPath)) {

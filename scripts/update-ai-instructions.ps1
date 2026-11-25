@@ -53,7 +53,7 @@ if ($RecoverInterruptedInstall -and ($ForceCheck -or $InstallApproved)) {
 if ([string]::IsNullOrWhiteSpace($CodexHome)) {
     $CodexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
 }
-$installedModule = Join-Path $PSScriptRoot 'ai-instructions-runtime\ai-instructions-updater.psm1'
+$installedModule = Join-Path (Join-Path $PSScriptRoot 'ai-instructions-runtime') 'ai-instructions-updater.psm1'
 $installedLauncher = Join-Path $PSScriptRoot 'bootstrap-ai-instructions.ps1'
 $entryPointDirectoryName = Split-Path -Leaf ([System.IO.Path]::GetFullPath($PSScriptRoot).TrimEnd([char[]]@('\','/')))
 $isInstalledStableEntryPoint = $entryPointDirectoryName -ieq 'hooks'

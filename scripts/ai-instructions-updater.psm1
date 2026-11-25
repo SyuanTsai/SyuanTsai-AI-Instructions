@@ -434,15 +434,16 @@ function Get-AiInstructionsCandidatePackage {
             'catalog\skills-catalog.json',
             'catalog\skills-catalog-lock.json'
         )) {
-            if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot $relativePath) -PathType Leaf)) {
+            $candidatePath = Join-Path $sourceRoot $relativePath.Replace('\',[IO.Path]::DirectorySeparatorChar)
+            if (-not (Test-Path -LiteralPath $candidatePath -PathType Leaf)) {
                 throw "Candidate runtime source is incomplete: $relativePath"
             }
         }
         Test-AiInstructionsPowerShellFiles -SourceRoot $sourceRoot
-        Import-Module (Join-Path $sourceRoot 'scripts\skills-catalog-contract.psm1') -Force
+        Import-Module (Join-Path (Join-Path $sourceRoot 'scripts') 'skills-catalog-contract.psm1') -Force
         Test-SkillsCatalogLockDocument `
-            -LockPath (Join-Path $sourceRoot 'catalog\skills-catalog-lock.json') `
-            -CatalogPath (Join-Path $sourceRoot 'catalog\skills-catalog.json') | Out-Null
+            -LockPath (Join-Path (Join-Path $sourceRoot 'catalog') 'skills-catalog-lock.json') `
+            -CatalogPath (Join-Path (Join-Path $sourceRoot 'catalog') 'skills-catalog.json') | Out-Null
         return [pscustomobject][ordered]@{
             SourceRoot = $sourceRoot
             ArchivePath = $archivePath
@@ -489,7 +490,7 @@ function Install-AiInstructionsCandidatePackage {
     param([Parameter(Mandatory = $true)][object] $Request)
 
     Assert-AiInstructionsUpdaterRuntimeBaseline
-    $installerPath = Join-Path ([string]$Request.Package.SourceRoot) 'scripts\install-ai-instructions-bootstrap.ps1'
+    $installerPath = Join-Path (Join-Path ([string]$Request.Package.SourceRoot) 'scripts') 'install-ai-instructions-bootstrap.ps1'
     $powerShellPath = Resolve-AiInstructionsCandidatePowerShellPath -PSHome $PSHOME -IsWindows ([bool]$IsWindows)
     $arguments = @(
         '-NoProfile','-NonInteractive','-File',$installerPath,
@@ -586,7 +587,7 @@ function Invoke-AiInstructionsUpdateWorkflow {
 
     Assert-AiInstructionsUpdaterRuntimeBaseline
     $codexHomePath = Get-AiInstructionsFullDirectoryPath -Path $CodexHome -RejectFileSystemRoot -Context 'Codex Home'
-    $runtimeRoot = Join-Path $codexHomePath 'hooks\ai-instructions-runtime'
+    $runtimeRoot = Join-Path (Join-Path $codexHomePath 'hooks') 'ai-instructions-runtime'
     $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
     $bundlePath = Join-Path $runtimeRoot 'runtime-bundle.json'
     $receiptPath = Join-Path $codexHomePath 'ai-instructions-update-receipt.json'
