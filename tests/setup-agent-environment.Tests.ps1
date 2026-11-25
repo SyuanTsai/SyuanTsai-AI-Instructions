@@ -1908,8 +1908,8 @@ $manifest = Join-Path $UserHome '.agents/catalog-skills.manifest.json'
 $claude = Join-Path $UserHome '.claude/CLAUDE.md'
 $section = [IO.File]::ReadAllText((Join-Path $runtime 'bootstrap-section.md'))
 $existing = if (Test-Path -LiteralPath $manifest -PathType Leaf) { Get-Content -Raw -LiteralPath $manifest | ConvertFrom-Json } else { $null }
-$installed = if ($null -eq $existing) { @() } else { @($existing.files | ForEach-Object { [string]$_.skillId } | Sort-Object -Unique) }
-$evidence = if ($null -ne $configuration.PSObject.Properties['capabilityEvidence']) { @($configuration.capabilityEvidence) } else { @() }
+[string[]]$installed = @(); if ($null -ne $existing) { $installed = @($existing.files | ForEach-Object { [string]$_.skillId } | Sort-Object -Unique) }
+[object[]]$evidence = @(); if ($null -ne $configuration.PSObject.Properties['capabilityEvidence']) { $evidence = @($configuration.capabilityEvidence) }
 $resolver = $selectionModule.ExportedCommands['Resolve-SkillsSelection']
 $selected = @(& $resolver -Catalog $catalog -Selection $configuration.catalog -CapabilityEvidence $evidence -InstalledSkillIds $installed -WarningAction SilentlyContinue)
 $desiredFiles = [Collections.Generic.List[object]]::new()
