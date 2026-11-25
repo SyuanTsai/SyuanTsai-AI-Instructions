@@ -136,6 +136,31 @@ function Set-LauncherRecoveryPinMismatch {
 }
 
 Describe 'AI instructions launcher recovery portable preflight' {
+    # Scenario: The platform-runtime receipt names a PowerShell executable that is no longer a leaf below PSHOME.
+    # Purpose: Exercise the launcher's production resolver without adding a test seam and prove it refuses instead of using a bare PATH command.
+    It 'UnitT00a_refuses_a_missing_verified_PowerShell_engine_without_bare_name_fallback' {
+        $launcherPath=Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions-installed.ps1'
+        $tokens=$null;$parseErrors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($launcherPath,[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count|Should Be 0
+        $resolver=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Resolve-InstalledPowerShellEnginePath'},$true))
+        $resolver.Count|Should Be 1
+        Invoke-Expression $resolver[0].Extent.Text
+
+        $missingEngine=Join-Path $TestDrive 'missing-pshome/pwsh'
+        $receipt=[pscustomobject]@{
+            runtime=[pscustomobject]@{powerShellExecutablePath=$missingEngine}
+            capabilities=@([pscustomobject]@{name='powershell-runtime';status='available';evidence=@('fixture')})
+        }
+        $caught=$null
+        try{Resolve-InstalledPowerShellEnginePath -CapabilityReceipt $receipt|Out-Null}catch{$caught=$_}
+
+        $caught|Should Not BeNullOrEmpty
+        $caught.Exception.Message|Should Match 'classification=compatibility; retryable=false'
+        (Get-AiInstructionsRefusalCode $caught)|Should Be runtime-baseline-unavailable
+        $resolver[0].Extent.Text|Should Not Match 'Get-Command|enginePath\s*=\s*engineName'
+    }
+
     # Scenario: An orphaned transaction directory exists beside the stable launcher before any installed runtime is available.
     # Purpose: Exercise the real launcher on every platform and prove it refuses interrupted-install residue before runtime verification without deleting evidence.
     It 'UnitT00_refuses_orphaned_transaction_residue_before_runtime_verification' {

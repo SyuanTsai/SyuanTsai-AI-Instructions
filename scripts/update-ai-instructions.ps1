@@ -8,6 +8,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
 
 function Get-LocalAiInstructionsUpdateFailureDisposition {
     param([Parameter(Mandatory = $true)][string] $Message)
@@ -53,7 +54,7 @@ if ($RecoverInterruptedInstall -and ($ForceCheck -or $InstallApproved)) {
 if ([string]::IsNullOrWhiteSpace($CodexHome)) {
     $CodexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
 }
-$installedModule = Join-Path $PSScriptRoot 'ai-instructions-runtime\ai-instructions-updater.psm1'
+$installedModule = Join-Path (Join-Path $PSScriptRoot 'ai-instructions-runtime') 'ai-instructions-updater.psm1'
 $installedLauncher = Join-Path $PSScriptRoot 'bootstrap-ai-instructions.ps1'
 $entryPointDirectoryName = Split-Path -Leaf ([System.IO.Path]::GetFullPath($PSScriptRoot).TrimEnd([char[]]@('\','/')))
 $isInstalledStableEntryPoint = $entryPointDirectoryName -ieq 'hooks'
@@ -150,7 +151,7 @@ finally {
         $resolvedSnapshotRoot = [System.IO.Path]::GetFullPath($runtimeSnapshotRoot)
         $resolvedTempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char[]]@('\','/'))
         $expectedPrefix = $resolvedTempRoot + [System.IO.Path]::DirectorySeparatorChar + 'ai-instructions-updater-runtime-'
-        if (-not $resolvedSnapshotRoot.StartsWith($expectedPrefix,[System.StringComparison]::OrdinalIgnoreCase)) {
+        if (-not $resolvedSnapshotRoot.StartsWith($expectedPrefix,$pathComparison)) {
             throw "Unsafe updater runtime snapshot cleanup path: $resolvedSnapshotRoot"
         }
         $snapshotItem = Get-Item -Force -LiteralPath $resolvedSnapshotRoot

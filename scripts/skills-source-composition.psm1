@@ -35,7 +35,8 @@ function New-ComposedBootstrapArchive {
     }
 
     $sourcePrefix = $source + [System.IO.Path]::DirectorySeparatorChar
-    if ($destination.StartsWith($sourcePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    $pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+    if ($destination.StartsWith($sourcePrefix, $pathComparison)) {
         throw "Composition archive destination must be outside its source: $destination"
     }
 

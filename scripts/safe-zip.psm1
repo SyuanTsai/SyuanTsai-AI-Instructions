@@ -172,6 +172,7 @@ function Expand-SafeZipRepository {
             $archiveRootName = @($roots)[0]
             New-Item -ItemType Directory -Path $repositoryRoot -Force | Out-Null
             $destinationPrefix = $repositoryRoot + [System.IO.Path]::DirectorySeparatorChar
+            $pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
 
             foreach ($entry in $entries) {
                 $name = [string] $entry.FullName
@@ -183,7 +184,7 @@ function Expand-SafeZipRepository {
                 $destinationPath = [System.IO.Path]::GetFullPath(
                     (Join-Path $repositoryRoot $relativeName.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
                 )
-                if (-not $destinationPath.StartsWith($destinationPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                if (-not $destinationPath.StartsWith($destinationPrefix, $pathComparison)) {
                     throw "ZIP entry escapes its repository root: $name"
                 }
 

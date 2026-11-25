@@ -559,7 +559,8 @@ function Get-SafeSourceStagingPath {
     $root = [System.IO.Path]::GetFullPath($WorkingRoot).TrimEnd([char[]]@('\', '/'))
     $candidate = [System.IO.Path]::GetFullPath((Join-Path $root $SourceId))
     $prefix = $root + [System.IO.Path]::DirectorySeparatorChar
-    if (-not $candidate.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    $pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+    if (-not $candidate.StartsWith($prefix, $pathComparison)) {
         throw "Unsafe source staging path for '$SourceId': $candidate"
     }
 
@@ -702,7 +703,8 @@ function Expand-ValidatedSkillsSourceArchives {
         $sourceRoot = [string] $stagedSourcesById[$sourceId].rootPath
         $skillRoot = [System.IO.Path]::GetFullPath((Join-Path $sourceRoot $sourcePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)))
         $sourceRootPrefix = $sourceRoot.TrimEnd([char[]]@('\', '/')) + [System.IO.Path]::DirectorySeparatorChar
-        if (-not $skillRoot.StartsWith($sourceRootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+        if (-not $skillRoot.StartsWith($sourceRootPrefix, $pathComparison)) {
             throw "Selected Skill '$skillId' resolved outside source '$sourceId'."
         }
         if (-not (Test-Path -LiteralPath $skillRoot -PathType Container)) {

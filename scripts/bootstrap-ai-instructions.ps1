@@ -20,6 +20,7 @@ if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -l
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$script:BootstrapPathComparison = if ($IsWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
 # Read-only Git inspection must not opportunistically refresh the live index;
 # the journaled index operation is the only permitted index writer.
 $env:GIT_OPTIONAL_LOCKS = '0'
@@ -1214,7 +1215,7 @@ function Get-FullPathWithoutTrailingSeparator {
     $fullPath = [System.IO.Path]::GetFullPath($Path)
     $rootPath = [System.IO.Path]::GetPathRoot($fullPath)
     if (-not [string]::IsNullOrWhiteSpace($rootPath) -and
-        $fullPath.Equals($rootPath,[System.StringComparison]::OrdinalIgnoreCase)) {
+        $fullPath.Equals($rootPath,$script:BootstrapPathComparison)) {
         return $rootPath
     }
     return $fullPath.TrimEnd([char[]]@('\', '/'))
@@ -1309,8 +1310,8 @@ function Test-RepositoryDirectoryMatches {
     )
 
     foreach ($configuredRepositoryPath in $ConfiguredRepositoryPaths) {
-        if ($RepositoryRelativePath.Equals($configuredRepositoryPath, [System.StringComparison]::OrdinalIgnoreCase) -or
-            $RepositoryRelativePath.StartsWith("$configuredRepositoryPath/", [System.StringComparison]::OrdinalIgnoreCase)) {
+        if ($RepositoryRelativePath.Equals($configuredRepositoryPath, $script:BootstrapPathComparison) -or
+            $RepositoryRelativePath.StartsWith("$configuredRepositoryPath/", $script:BootstrapPathComparison)) {
             return $true
         }
     }
@@ -1758,8 +1759,8 @@ function Assert-GitInfoExcludeMutationPath {
     if (-not [System.IO.Path]::IsPathRooted($commonGitDirectory)) { $commonGitDirectory = Join-Path $Repository $commonGitDirectory }
     $commonGitDirectory = [System.IO.Path]::GetFullPath($commonGitDirectory).TrimEnd([char[]]@('\','/'))
     $resolvedPath = [System.IO.Path]::GetFullPath($Path)
-    $expectedPath = [System.IO.Path]::GetFullPath((Join-Path $commonGitDirectory 'info\exclude'))
-    if (-not $resolvedPath.Equals($expectedPath,[System.StringComparison]::OrdinalIgnoreCase)) {
+    $expectedPath = [System.IO.Path]::GetFullPath((Join-Path (Join-Path $commonGitDirectory 'info') 'exclude'))
+    if (-not $resolvedPath.Equals($expectedPath,$script:BootstrapPathComparison)) {
         throw "Unsafe shared Git exclude mutation path '$resolvedPath': expected '$expectedPath'."
     }
 
@@ -1767,14 +1768,14 @@ function Assert-GitInfoExcludeMutationPath {
     while ($true) {
         if (Test-Path -LiteralPath $inspectionPath) {
             $item = Get-Item -Force -LiteralPath $inspectionPath
-            $isLeaf = $inspectionPath.Equals($resolvedPath,[System.StringComparison]::OrdinalIgnoreCase)
+            $isLeaf = $inspectionPath.Equals($resolvedPath,$script:BootstrapPathComparison)
             if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or ($isLeaf -and $item.PSIsContainer) -or (-not $isLeaf -and -not $item.PSIsContainer)) {
                 throw "Unsafe shared Git exclude mutation path '$resolvedPath': '$inspectionPath' must be a non-reparse $($(if ($isLeaf) { 'file' } else { 'directory' }))."
             }
         }
-        if ($inspectionPath.Equals($commonGitDirectory,[System.StringComparison]::OrdinalIgnoreCase)) { break }
+        if ($inspectionPath.Equals($commonGitDirectory,$script:BootstrapPathComparison)) { break }
         $parent = Split-Path -Parent $inspectionPath
-        if ([string]::IsNullOrWhiteSpace($parent) -or -not $parent.StartsWith($commonGitDirectory,[System.StringComparison]::OrdinalIgnoreCase)) {
+        if ([string]::IsNullOrWhiteSpace($parent) -or -not $parent.StartsWith($commonGitDirectory,$script:BootstrapPathComparison)) {
             throw "Unsafe shared Git exclude mutation path '$resolvedPath': parent traversal escaped the common Git directory."
         }
         $inspectionPath = $parent
@@ -1918,7 +1919,7 @@ function Get-RepositoryIndexTransactionPath {
     if (-not [System.IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $Repository $indexPath }
     $indexPath = [System.IO.Path]::GetFullPath($indexPath)
     $expectedIndexPath = [System.IO.Path]::GetFullPath((Join-Path $gitDirectory 'index'))
-    if (-not $indexPath.Equals($expectedIndexPath,[System.StringComparison]::OrdinalIgnoreCase)) {
+    if (-not $indexPath.Equals($expectedIndexPath,$script:BootstrapPathComparison)) {
         throw "Git index path is outside the active worktree Git directory: $indexPath"
     }
     if (-not (Test-Path -LiteralPath $indexPath -PathType Leaf)) { throw "Git index file is missing: $indexPath" }
@@ -1971,9 +1972,9 @@ function Assert-ManagedPathDoesNotCrossReparsePoint {
     $resolvedRoot = Get-FullPathWithoutTrailingSeparator -Path $Root
     $rootPrefix = $resolvedRoot.TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar
     $resolvedPath = [System.IO.Path]::GetFullPath($Path)
-    if (-not $resolvedPath.StartsWith($rootPrefix,[System.StringComparison]::OrdinalIgnoreCase)) { throw "$Context is outside its worktree: $resolvedPath" }
+    if (-not $resolvedPath.StartsWith($rootPrefix,$script:BootstrapPathComparison)) { throw "$Context is outside its worktree: $resolvedPath" }
     $inspectionPath = $resolvedPath
-    while ($inspectionPath.StartsWith($rootPrefix,[System.StringComparison]::OrdinalIgnoreCase)) {
+    while ($inspectionPath.StartsWith($rootPrefix,$script:BootstrapPathComparison)) {
         if (Test-Path -LiteralPath $inspectionPath) {
             $item = Get-Item -Force -LiteralPath $inspectionPath
             if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -2021,7 +2022,7 @@ function Get-ClaudeProjectOwnedWorktreeRoots {
         $staged = Test-GitPathHasStagedChanges -Repository $worktreeRoot -Path 'CLAUDE.md'
         $baseExists = Test-Path -LiteralPath $basePath -PathType Leaf
         $managedEntry = $null
-        $manifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
+        $manifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)
         if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
             try {
                 $candidate = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
@@ -2061,7 +2062,7 @@ function Assert-NoRepoManagedManifestV4 {
         $isSchemaV4 = $false
         $worktreeManifestPath = [string]$worktreeRoot
         try {
-            $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
+            $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)
             if ($Strict -and -not (Test-Path -LiteralPath $worktreeRoot -PathType Container)) { continue }
             if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
             Assert-ManagedPathDoesNotCrossReparsePoint -Root $worktreeRoot -Path $worktreeManifestPath -Context 'REPO managed manifest v4 detection'
@@ -2179,7 +2180,7 @@ function Get-SharedManagedExcludePaths {
         $gitPathState=$worktreeGitPathSets[$worktreeRoot]
         $worktreeTrackedPaths=$gitPathState.Tracked
         $worktreeStagedPaths=$gitPathState.Staged
-        $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
+        $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)
         if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
         Assert-ManagedPathDoesNotCrossReparsePoint -Root $worktreeRoot -Path $worktreeManifestPath -Context 'Linked worktree managed manifest'
         try {
@@ -2886,18 +2887,18 @@ function New-TargetMutationSnapshot {
             continue
         }
         try {
-            $targetPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedTargetRoot $relativePath.Replace('/', '\')))
+            $targetPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedTargetRoot $relativePath.Replace('/', [IO.Path]::DirectorySeparatorChar)))
         }
         catch {
             $codePoints = @([char[]][string]$relativePath | ForEach-Object { ([int]$_).ToString('x4') }) -join ' '
             throw "Invalid target mutation path '$relativePath' (UTF-16: $codePoints): $($_.Exception.Message)"
         }
-        if (-not $targetPath.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        if (-not $targetPath.StartsWith($targetPrefix, $script:BootstrapPathComparison)) {
             throw "Unsafe target mutation snapshot path: $relativePath"
         }
 
         $inspectionPath = $targetPath
-        while ($inspectionPath.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        while ($inspectionPath.StartsWith($targetPrefix, $script:BootstrapPathComparison)) {
             if (Test-Path -LiteralPath $inspectionPath) {
                 $inspectionItem = Get-Item -LiteralPath $inspectionPath -Force
                 if (($inspectionItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -3330,7 +3331,7 @@ function Add-TargetMutationCreatedDirectories {
     if ($null -eq $CreateContext) { return }
     foreach ($createdDirectory in @($CreateContext.CreatedDirectories)) {
         $alreadyRecorded = @($Snapshot.CreatedDirectories | Where-Object {
-            ([string]$_.FullPath).Equals([string]$createdDirectory.FullPath,[System.StringComparison]::OrdinalIgnoreCase)
+            ([string]$_.FullPath).Equals([string]$createdDirectory.FullPath,$script:BootstrapPathComparison)
         }).Count -gt 0
         if (-not $alreadyRecorded) {
             $Snapshot.CreatedDirectories.Add([pscustomobject][ordered]@{
@@ -4519,7 +4520,7 @@ function Get-PersonalAgentEvidenceFingerprint {
     )
 
     $evidenceLines = foreach ($path in @($Paths | Sort-Object -Unique)) {
-        $fullPath = Join-Path $Repository $path.Replace('/', '\')
+        $fullPath = Join-Path $Repository $path.Replace('/', [IO.Path]::DirectorySeparatorChar)
         if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
             throw "Cannot fingerprint PersonalAgent evidence because a managed path is missing: $path"
         }
@@ -4620,7 +4621,7 @@ function Update-PersonalAgentStash {
 
     $expectedRawHashes = @{}
     foreach ($path in $Paths) {
-        $fullPath = Join-Path $Repository $path.Replace('/','\')
+        $fullPath = Join-Path $Repository $path.Replace('/',[IO.Path]::DirectorySeparatorChar)
         if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
             throw "Cannot create byte-safe PersonalAgent evidence because a managed path is missing: $path"
         }
@@ -4713,7 +4714,7 @@ function Update-PersonalAgentStash {
     }
 
     foreach ($path in $Paths) {
-        $fullPath = Join-Path $Repository $path.Replace('/','\')
+        $fullPath = Join-Path $Repository $path.Replace('/',[IO.Path]::DirectorySeparatorChar)
         if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf) -or
             (Get-RawContentHash -Path $fullPath) -cne [string]$expectedRawHashes[$path]) {
             throw "PersonalAgent stash apply changed managed raw bytes; prior stashes were retained: $path"
@@ -4722,7 +4723,7 @@ function Update-PersonalAgentStash {
 
     foreach ($entry in @($ExpectedEntries)) {
         $targetPath = [string]$entry.targetPath
-        $targetFullPath = Join-Path $Repository $targetPath.Replace('/', '\')
+        $targetFullPath = Join-Path $Repository $targetPath.Replace('/', [IO.Path]::DirectorySeparatorChar)
         if (-not (Test-Path -LiteralPath $targetFullPath -PathType Leaf) -or
             (Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath) -cne [string]$entry.sha256) {
             throw "PersonalAgent stash apply changed managed file bytes; prior stashes were retained: $targetPath"
@@ -4919,7 +4920,7 @@ function Restore-SkillMigrationJournal {
     $journalPath = [IO.Path]::GetFullPath($Path)
     $backupRoot = Split-Path -Parent $journalPath
     $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([char[]]@('\','/')) + [IO.Path]::DirectorySeparatorChar
-    if (-not $backupRoot.StartsWith($tempPrefix,[StringComparison]::OrdinalIgnoreCase) -or
+    if (-not $backupRoot.StartsWith($tempPrefix,$script:BootstrapPathComparison) -or
         (Split-Path -Leaf $backupRoot) -cne 'target-backup' -or (Split-Path -Leaf $journalPath) -cne 'skill-migration.json') { throw 'Unsafe Skill migration recovery location.' }
     Assert-ManagedPathDoesNotCrossReparsePoint -Root $tempPrefix.TrimEnd([char[]]@('\','/')) -Path $journalPath -Context 'Skill migration recovery'
     $journal = Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
@@ -5110,9 +5111,9 @@ function Restore-SkillMigrationJournal {
                 [uint32]$directory.volumeSerialNumber -eq 0 -or ([uint32]$directory.fileIndexHigh -eq 0 -and [uint32]$directory.fileIndexLow -eq 0)) {
                 throw 'Invalid schema-v2 created-directory identity.'
             }
-            $fullDirectory = [IO.Path]::GetFullPath((Join-Path $Repository $relativeDirectory.Replace('/','\')))
+            $fullDirectory = [IO.Path]::GetFullPath((Join-Path $Repository $relativeDirectory.Replace('/',[IO.Path]::DirectorySeparatorChar)))
             $repositoryPrefix=[IO.Path]::GetFullPath($Repository).TrimEnd([char[]]@('\','/'))+[IO.Path]::DirectorySeparatorChar
-            if (-not $fullDirectory.StartsWith($repositoryPrefix,[StringComparison]::OrdinalIgnoreCase) -or
+            if (-not $fullDirectory.StartsWith($repositoryPrefix,$script:BootstrapPathComparison) -or
                 $fullDirectory -cne [IO.Path]::GetFullPath([string]$directory.fullPath) -or
                 $seenCreatedDirectories.ContainsKey($relativeDirectory)) { throw 'Invalid schema-v2 created-directory path.' }
             $seenCreatedDirectories[$relativeDirectory]=$true
@@ -6150,10 +6151,10 @@ function Invoke-RepositoryInstallTransaction {
 $targetRootPath = Get-FullPathWithoutTrailingSeparator -Path $TargetRoot
 Assert-RepoAndUserRootsDistinct -Repository $targetRootPath -UserHome $UserHome | Out-Null
 $syncStartRelativePath = ''
-if ($syncStartPath.Equals($targetRootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+if ($syncStartPath.Equals($targetRootPath, $script:BootstrapPathComparison)) {
     $syncStartRelativePath = ''
 }
-elseif ($syncStartPath.StartsWith($targetRootPath.TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+elseif ($syncStartPath.StartsWith($targetRootPath.TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar, $script:BootstrapPathComparison)) {
     $syncStartRelativePath = Get-RepositoryRelativePath -RepositoryRoot $targetRootPath -FullPath $syncStartPath
 }
 
@@ -6220,8 +6221,8 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
         $projectProjectionIds = @($syncConfiguration.projections.project)
         $runtimeRootPath = [System.IO.Path]::GetFullPath($RuntimeRoot)
         $runtimeBundlePath = Join-Path $runtimeRootPath 'runtime-bundle.json'
-        $runtimeCatalogPath = Join-Path $runtimeRootPath 'catalog\skills-catalog.json'
-        $runtimeLockPath = Join-Path $runtimeRootPath 'catalog\skills-catalog-lock.json'
+        $runtimeCatalogPath = Join-Path (Join-Path $runtimeRootPath 'catalog') 'skills-catalog.json'
+        $runtimeLockPath = Join-Path (Join-Path $runtimeRootPath 'catalog') 'skills-catalog-lock.json'
         $platformRuntimePath = Join-Path $runtimeRootPath 'platform-runtime.psd1'
         try {
             $runtimeBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $runtimeBundlePath | ConvertFrom-Json
@@ -6378,7 +6379,7 @@ try {
     Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -AllowV4:($repoManifestWriter -ceq 'v4')
     $claudeProjectOwnedWorktrees = @(Get-ClaudeProjectOwnedWorktreeRoots -Repository $targetRootPath)
     $currentClaudeProjectOwned = @($claudeProjectOwnedWorktrees | Where-Object {
-        [System.IO.Path]::GetFullPath([string]$_).TrimEnd([char[]]@('\','/')).Equals($targetRootPath,[System.StringComparison]::OrdinalIgnoreCase)
+        [System.IO.Path]::GetFullPath([string]$_).TrimEnd([char[]]@('\','/')).Equals($targetRootPath,$script:BootstrapPathComparison)
     }).Count -gt 0
     $activeWorktreeProtectedClaudeFamilyPaths = @(if ($currentClaudeProjectOwned) {
         @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses')
@@ -6398,7 +6399,7 @@ try {
         Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -AllowV4:($repoManifestWriter -ceq 'v4') -Strict
         $claudeProjectOwnedWorktrees = @(Get-ClaudeProjectOwnedWorktreeRoots -Repository $targetRootPath -Strict)
         $currentClaudeProjectOwned = @($claudeProjectOwnedWorktrees | Where-Object {
-            [System.IO.Path]::GetFullPath([string]$_).TrimEnd([char[]]@('\','/')).Equals($targetRootPath,[System.StringComparison]::OrdinalIgnoreCase)
+            [System.IO.Path]::GetFullPath([string]$_).TrimEnd([char[]]@('\','/')).Equals($targetRootPath,$script:BootstrapPathComparison)
         }).Count -gt 0
         $activeWorktreeProtectedClaudeFamilyPaths = @(if ($currentClaudeProjectOwned) {
             @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses')
@@ -6483,7 +6484,7 @@ if ($repoManifestWriter -ceq 'v4') {
 $sharedSkillsFamilyName = 'Shared Agent Skills'
 $sharedSkillsSource = '.agents/skills'
 
-$manifestFullPath = Join-Path $targetRootPath $manifestRelativePath.Replace('/', '\')
+$manifestFullPath = Join-Path $targetRootPath $manifestRelativePath.Replace('/', [IO.Path]::DirectorySeparatorChar)
 $manifestExists = Test-Path -LiteralPath $manifestFullPath -PathType Leaf
 $manifestInitialRawSha256 = if ($manifestExists) { Get-RawContentHash $manifestFullPath } else { $null }
 $manifestEntriesByTarget = @{}
@@ -6615,7 +6616,7 @@ if ($manifestExists) {
             if ([string]$targetPath -like '.agents/skills/*') { continue }
             if($null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains([string]$targetPath)){continue}
             $entry = $manifestEntriesByTarget[$targetPath]
-            $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
+            $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', [IO.Path]::DirectorySeparatorChar)
             if (-not (Test-Path -LiteralPath $targetFullPath -PathType Leaf) -or
                 (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path $targetPath) -or
                 (Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath) -cne [string]$entry.sha256) {
@@ -6629,7 +6630,7 @@ $retiredLegacySkillPaths = New-Object 'System.Collections.Generic.HashSet[string
 if ($repoManifestWriter -ceq 'v4' -and $manifestExists -and $manifestSchemaVersion -eq 1) {
     $retainedLegacySkillPaths = New-Object System.Collections.Generic.List[string]
     foreach ($legacySkillPath in @($manifestEntriesByTarget.Keys | Where-Object { $_ -like '.agents/skills/*' } | Sort-Object)) {
-        $legacySkillFullPath = Join-Path $targetRootPath ([string]$legacySkillPath).Replace('/','\')
+        $legacySkillFullPath = Join-Path $targetRootPath ([string]$legacySkillPath).Replace('/',[IO.Path]::DirectorySeparatorChar)
         $legacySkillExists = Test-Path -LiteralPath $legacySkillFullPath -PathType Leaf
         $legacySkillHasChanges = Test-GitPathHasChanges -Repository $targetRootPath -Path ([string]$legacySkillPath)
         if (-not $legacySkillExists -and -not $legacySkillHasChanges) {
@@ -6697,15 +6698,15 @@ try {
 
     $sourceRootPath = Expand-SafeZipRepository -ArchivePath $archivePath -DestinationRoot $extractPath
     if ($repoManifestWriter -ceq 'v4') {
-        $rendererPath = Join-Path $sourceRootPath 'scripts\Build-AiInstructions.ps1'
+        $rendererPath = Join-Path (Join-Path $sourceRootPath 'scripts') 'Build-AiInstructions.ps1'
         if (-not (Test-Path -LiteralPath $rendererPath -PathType Leaf)) { throw 'Projection-aware source snapshot is missing scripts/Build-AiInstructions.ps1.' }
         $script:rendererSha256 = Get-RawContentHash -Path $rendererPath
     }
     $desiredEntries = New-Object System.Collections.Generic.List[object]
 
     foreach ($family in $families) {
-        $sourceBasePath = Join-Path $sourceRootPath $family.SourceBase.Replace('/', '\')
-        $sourceRulesPath = Join-Path $sourceRootPath $family.SourceRules.Replace('/', '\')
+        $sourceBasePath = Join-Path $sourceRootPath $family.SourceBase.Replace('/', [IO.Path]::DirectorySeparatorChar)
+        $sourceRulesPath = Join-Path $sourceRootPath $family.SourceRules.Replace('/', [IO.Path]::DirectorySeparatorChar)
 
         if (-not (Test-Path -LiteralPath $sourceBasePath -PathType Leaf)) {
             throw "$($family.Name) base instruction is missing from GitHub archive: $($family.SourceBase)"
@@ -6919,7 +6920,7 @@ try {
     $eligibleFamilies = @{}
     foreach ($family in $families) {
         $baseTargetPath = $family.TargetBase
-        $baseTargetFullPath = Join-Path $targetRootPath $baseTargetPath.Replace('/', '\')
+        $baseTargetFullPath = Join-Path $targetRootPath $baseTargetPath.Replace('/', [IO.Path]::DirectorySeparatorChar)
         $baseTargetIsPlannedRemediation=$null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains([string]$baseTargetPath)
         $baseTargetIsTracked = $trackedPaths.Contains($baseTargetPath) -and -not $baseTargetIsPlannedRemediation
         $baseTargetMatchesDesired = $false
@@ -6992,7 +6993,7 @@ try {
     try {
         foreach ($desiredEntry in @($desiredEntries | Sort-Object TargetPath)) {
         $targetPath = $desiredEntry.TargetPath
-        $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
+        $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', [IO.Path]::DirectorySeparatorChar)
         $targetExists = Test-Path -LiteralPath $targetFullPath -PathType Leaf
         $isPlannedRemediation=$null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains([string]$targetPath)
         $managedEntry = $null
@@ -7137,7 +7138,7 @@ try {
             Write-Output "USER Skill migration unavailable; repair USER installation and ownership before retiring: $managedTargetPath"
             continue
         }
-        $targetFullPath = Join-Path $targetRootPath $managedTargetPath.Replace('/', '\')
+        $targetFullPath = Join-Path $targetRootPath $managedTargetPath.Replace('/', [IO.Path]::DirectorySeparatorChar)
         if (Test-LicenseDeliveryTargetPath $managedTargetPath) {
             $owner = Get-LicenseDeliveryOwner $managedTargetPath
             $referenced = @($nextManifestEntries | Where-Object {
@@ -7233,7 +7234,7 @@ try {
                     $entryPath = [string]$entry.targetPath
                     if ($entryPath -ceq 'CLAUDE.md' -or
                         -not (Test-IsProtectedClaudeFamilyPath -Path $entryPath -ProtectedPaths $repositoryProtectedClaudeFamilyPaths)) { continue }
-                    $entryFullPath = Join-Path $targetRootPath $entryPath.Replace('/','\')
+                    $entryFullPath = Join-Path $targetRootPath $entryPath.Replace('/',[IO.Path]::DirectorySeparatorChar)
                     if ((Test-Path -LiteralPath $entryFullPath -PathType Leaf) -and
                         (Get-ManagedContentHash -Path $entryFullPath -TargetPath $entryPath) -ceq [string]$entry.sha256) {
                         $entryPath
@@ -7299,7 +7300,7 @@ try {
                 Write-Warning "Protected Claude family path skipped at PersonalAgent recovery collection: $targetPath (project-owned Claude family)."
                 continue
             }
-            $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
+            $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', [IO.Path]::DirectorySeparatorChar)
             if ((Test-Path -LiteralPath $targetFullPath -PathType Leaf) -and
                 (Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath) -ceq [string]$manifestEntry.sha256) {
                 $stashPaths.Add($targetPath)
@@ -7380,7 +7381,7 @@ finally {
     $resolvedWorkingPath = [System.IO.Path]::GetFullPath($workingPath)
     $script:SkillMigrationJournalContext = $null
     $expectedPrefix = $tempRootPath.TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar
-    if (-not $resolvedWorkingPath.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    if (-not $resolvedWorkingPath.StartsWith($expectedPrefix, $script:BootstrapPathComparison)) {
         throw "Unsafe temporary cleanup path: $resolvedWorkingPath"
     }
 
