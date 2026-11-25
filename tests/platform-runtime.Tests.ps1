@@ -2597,7 +2597,9 @@ Describe 'Platform runtime contract' {
         $receipt = Get-PlatformCapabilities -Required @('process-environment')
 
         (@($receipt.PSObject.Properties.Name | Sort-Object) -join ',') | Should Be 'apiVersion,architecture,capabilities,os,runtime'
-        (@($receipt.runtime.PSObject.Properties.Name | Sort-Object) -join ',') | Should Be 'dotNetVersion,powerShellVersion'
+        (@($receipt.runtime.PSObject.Properties.Name | Sort-Object) -join ',') | Should Be 'dotNetVersion,powerShellExecutablePath,powerShellVersion'
+        [IO.Path]::IsPathRooted([string]$receipt.runtime.powerShellExecutablePath) | Should Be $true
+        [IO.Path]::GetFullPath([string]$receipt.runtime.powerShellExecutablePath) | Should Be ([IO.Path]::GetFullPath((Join-Path $PSHOME $(if($IsWindows){'pwsh.exe'}else{'pwsh'}))))
         $receipt.os | Should Be $script:ExpectedOs
         $receipt.apiVersion | Should Be '1.0'
         $receipt.architecture | Should Match '^(x64|x86|arm64|arm)$'

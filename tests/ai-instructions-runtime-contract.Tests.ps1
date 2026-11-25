@@ -4309,6 +4309,76 @@ exec __REAL_GIT__ "$@"
         (Get-RuntimeContractError {Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configuration -RuntimeRoot $fixture.Root|Out-Null})|Should Match 'bootstrap-section.md'
     }
 
+    # Scenario: The verified bootstrap template is rendered for Windows and for a Unix receipt whose physical pwsh path contains spaces and an apostrophe.
+    # Purpose: Preserve today's Windows bytes while producing a POSIX-shell-parseable absolute pwsh invocation without consulting PATH.
+    It 'UnitT234a_renders_the_verified_bootstrap_template_for_Windows_and_Unix' {
+        $utf8=[Text.UTF8Encoding]::new($false,$true)
+        [byte[]]$template=[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md'))
+        $templateText=$utf8.GetString($template)
+        $windowsInvocation='$codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { $env:CODEX_HOME } else { Join-Path $HOME ''.codex'' }; & (Join-Path $codexHome ''hooks\bootstrap-ai-instructions.ps1'')'
+        $windowsPath='C:\Program Files\PowerShell\7\pwsh.exe'
+        $windowsReceipt=[pscustomobject]@{os='windows';runtime=[pscustomobject]@{powerShellExecutablePath=$windowsPath};capabilities=@([pscustomobject]@{name='powershell-runtime';status='available';evidence=@("Physical pwsh identity and version probe passed: $windowsPath")})}
+        [byte[]]$windows=Get-AiInstructionsBootstrapSectionBytes -TemplateBytes $template -CapabilityReceipt $windowsReceipt
+        $utf8.GetString($windows)|Should Be $templateText.Replace('{{AI_INSTRUCTIONS_PWSH_INVOCATION}}',$windowsInvocation)
+
+        $unixPath="/opt/pwsh versions/owner's/pwsh"
+        $unixReceipt=[pscustomobject]@{os='linux';runtime=[pscustomobject]@{powerShellExecutablePath=$unixPath};capabilities=@([pscustomobject]@{name='powershell-runtime';status='available';evidence=@("Physical pwsh identity and version probe passed: $unixPath")})}
+        $shadowDirectory=Join-Path $TestDrive 'path-shadow';New-Item -ItemType Directory -Force -Path $shadowDirectory|Out-Null
+        [IO.File]::WriteAllText((Join-Path $shadowDirectory 'pwsh'),"#!/bin/sh`nexit 99`n",[Text.UTF8Encoding]::new($false))
+        $oldPath=$env:PATH
+        try {
+            $env:PATH=$shadowDirectory
+            [byte[]]$unix=Get-AiInstructionsBootstrapSectionBytes -TemplateBytes $template -CapabilityReceipt $unixReceipt
+        }
+        finally{$env:PATH=$oldPath}
+        $unixText=$utf8.GetString($unix)
+        $escapedApostrophe="'"+'"'+"'"+'"'+"'"
+        $expectedUnix="'/opt/pwsh versions/owner"+$escapedApostrophe+"s/pwsh' -NoProfile -NonInteractive -File "+'"$codexHome/hooks/bootstrap-ai-instructions.ps1"'
+        $unixText|Should Match ([regex]::Escape($expectedUnix))
+        $unixText|Should Not Match ([regex]::Escape((Join-Path $shadowDirectory 'pwsh')))
+        $command=[regex]::Match($unixText,'(?m)^- .*?`(?<command>[^`]+)`').Groups['command'].Value
+        $sh=(Get-Command sh -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+        & $sh -n -c $command
+        $LASTEXITCODE|Should Be 0
+    }
+
+    # Scenario: The renderer sees invalid complete {{...}} template tokens or an unsupported platform/path receipt.
+    # Purpose: Fail closed before desired-state or installer bytes can be planned from an ambiguous authority; an unclosed {{ is not a token boundary.
+    It 'UnitT234b_rejects_malformed_bootstrap_templates_and_unverified_Unix_paths' -TestCases @(
+        @{Name='no placeholder';Template="## Repository Instructions Bootstrap`n`n- missing`n";Os='windows';Path='C:\pwsh.exe';Status='available';Code='projection-runtime-unavailable'},
+        @{Name='two placeholders';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}} {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n";Os='windows';Path='C:\pwsh.exe';Status='available';Code='projection-runtime-unavailable'},
+        @{Name='unknown placeholder';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_UNKNOWN_PLACEHOLDER}}`n";Os='windows';Path='C:\pwsh.exe';Status='available';Code='projection-runtime-unavailable'},
+        @{Name='valid plus lower-case unknown';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}} {{unexpected_placeholder}}`n";Os='windows';Path='C:\pwsh.exe';Status='available';Code='projection-runtime-unavailable'},
+        @{Name='valid plus spaced unknown';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}} {{ AI_X }}`n";Os='windows';Path='C:\pwsh.exe';Status='available';Code='projection-runtime-unavailable'},
+        @{Name='relative Unix path';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n";Os='linux';Path='shadow/pwsh';Status='available';Code='capability-unavailable'},
+        @{Name='Unix path differs from physical verification evidence';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n";Os='linux';Path='/tmp/path-shadow/pwsh';EvidencePath='/opt/verified/pwsh';Status='available';Code='capability-unavailable'},
+        @{Name='unverified Unix receipt path';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n";Os='linux';Path='/tmp/path-shadow/pwsh';Status='unavailable';Code='capability-unavailable'},
+        @{Name='Unix path contains Markdown backtick';Template="## Repository Instructions Bootstrap`n`n- {{AI_INSTRUCTIONS_PWSH_INVOCATION}}`n";Os='linux';Path='/opt/pw`sh/pwsh';Status='available';Code='capability-unavailable'}
+    ) {
+        param($Name,$Template,$Os,$Path,$Status,$EvidencePath,$Code)
+        if([string]::IsNullOrWhiteSpace([string]$EvidencePath)){$EvidencePath=$Path}
+        $receipt=[pscustomobject]@{os=$Os;runtime=[pscustomobject]@{powerShellExecutablePath=$Path};capabilities=@([pscustomobject]@{name='powershell-runtime';status=$Status;evidence=@("Physical pwsh identity and version probe passed: $EvidencePath")})}
+        [byte[]]$bytes=[Text.UTF8Encoding]::new($false).GetBytes($Template)
+        $error=Get-RuntimeContractError {Get-AiInstructionsBootstrapSectionBytes -TemplateBytes $bytes -CapabilityReceipt $receipt|Out-Null}
+        $error|Should Match 'bootstrap|placeholder|absolute|capability|verify'
+        $error|Should Match "ai-instructions-refusal-code=$Code"
+    }
+
+    # Scenario: The verified Unix pwsh receipt changes to a different canonical physical path.
+    # Purpose: Produce one deterministic desired-byte update and remain byte-identical for repeated use of the same receipt.
+    It 'UnitT234c_updates_bootstrap_bytes_only_when_the_verified_Unix_pwsh_path_changes' {
+        [byte[]]$template=[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md'))
+        $firstPath='/Applications/PowerShell 7/pwsh';$nextPath='/Applications/PowerShell 8/pwsh'
+        $firstReceipt=[pscustomobject]@{os='macos';runtime=[pscustomobject]@{powerShellExecutablePath=$firstPath};capabilities=@([pscustomobject]@{name='powershell-runtime';status='available';evidence=@("Physical pwsh identity and version probe passed: $firstPath")})}
+        $nextReceipt=[pscustomobject]@{os='macos';runtime=[pscustomobject]@{powerShellExecutablePath=$nextPath};capabilities=@([pscustomobject]@{name='powershell-runtime';status='available';evidence=@("Physical pwsh identity and version probe passed: $nextPath")})}
+        [byte[]]$first=Get-AiInstructionsBootstrapSectionBytes -TemplateBytes $template -CapabilityReceipt $firstReceipt
+        [byte[]]$same=Get-AiInstructionsBootstrapSectionBytes -TemplateBytes $template -CapabilityReceipt $firstReceipt
+        [byte[]]$next=Get-AiInstructionsBootstrapSectionBytes -TemplateBytes $template -CapabilityReceipt $nextReceipt
+
+        [Convert]::ToBase64String($same)|Should Be ([Convert]::ToBase64String($first))
+        [Convert]::ToBase64String($next)|Should Not Be ([Convert]::ToBase64String($first))
+    }
+
     # Scenario: Config v5 is created, carried forward, replaced, and cleared with capability evidence while omission remains byte-compatible.
     # Purpose: Persist deterministic evidence only in v5 and reject duplicate tuples before configuration bytes are written.
     It 'UnitT235_persists_normalizes_replaces_and_clears_v5_capability_evidence' {

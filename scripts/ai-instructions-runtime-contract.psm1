@@ -45,6 +45,7 @@ $script:AiInstructionsRefusalCodes = @(
 $script:AiInstructionsProjectionRequiredCapabilities = @(
     'directory-lease','file-lease','file-identity','lock','publication','owned-file-removal','permissions','directory-publication'
 )
+$script:AiInstructionsBootstrapInvocationPlaceholder = '{{AI_INSTRUCTIONS_PWSH_INVOCATION}}'
 
 if ($null -eq ('SyuanTsai.AiInstructions.AiInstructionsRefusalException' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -496,6 +497,77 @@ function Test-AiInstructionsMarkdownParagraphContinuation {
     $html = Get-AiInstructionsMarkdownHtmlBlockStart -Text $remaining -ParagraphOpen $true
     if ($null -ne $html -and [int]$html.Type -le 6) { return $false }
     return $true
+}
+
+function Get-AiInstructionsBootstrapSectionBytes {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $TemplateBytes,
+        [Parameter(Mandatory = $true)][object] $CapabilityReceipt
+    )
+
+    $strictUtf8 = [Text.UTF8Encoding]::new($false,$true)
+    if ($TemplateBytes.Length -lt 1 -or
+        ($TemplateBytes.Length -ge 3 -and $TemplateBytes[0] -eq 0xEF -and $TemplateBytes[1] -eq 0xBB -and $TemplateBytes[2] -eq 0xBF)) {
+        throw (New-AiInstructionsRefusalException -Code projection-runtime-unavailable -Message 'The bootstrap section template must be non-empty UTF-8 without a BOM.')
+    }
+    try { $templateText = $strictUtf8.GetString($TemplateBytes) }
+    catch { throw (New-AiInstructionsRefusalException -Code projection-runtime-unavailable -Message 'The bootstrap section template must contain valid UTF-8.' -InnerException $_.Exception) }
+    if ($templateText.Contains("`r") -or
+        -not $templateText.StartsWith("## Repository Instructions Bootstrap`n",[StringComparison]::Ordinal) -or
+        -not $templateText.EndsWith("`n",[StringComparison]::Ordinal) -or
+        $templateText.EndsWith("`n`n",[StringComparison]::Ordinal)) {
+        throw (New-AiInstructionsRefusalException -Code projection-runtime-unavailable -Message 'The bootstrap section template must use canonical UTF-8/LF bytes, the managed heading, and one trailing LF.')
+    }
+    $knownMatches = [regex]::Matches($templateText,[regex]::Escape($script:AiInstructionsBootstrapInvocationPlaceholder))
+    # A token is any complete {{...}} pair, including non-standard content; an unclosed {{ is plain text.
+    $allMatches = [regex]::Matches($templateText,'\{\{[\s\S]*?\}\}')
+    if ($knownMatches.Count -ne 1 -or $allMatches.Count -ne 1 -or
+        [string]$allMatches[0].Value -cne $script:AiInstructionsBootstrapInvocationPlaceholder) {
+        throw (New-AiInstructionsRefusalException -Code projection-runtime-unavailable -Message "The bootstrap section template must contain exactly one '$script:AiInstructionsBootstrapInvocationPlaceholder' placeholder and no unknown placeholders.")
+    }
+    if ($null -eq $CapabilityReceipt.PSObject.Properties['os'] -or
+        [string]$CapabilityReceipt.os -cnotin @('windows','linux','macos')) {
+        throw (New-AiInstructionsRefusalException -Code platform-mismatch -Message 'The bootstrap section renderer requires a supported platform capability receipt.')
+    }
+
+    $invocation = '$codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { $env:CODEX_HOME } else { Join-Path $HOME ''.codex'' }; & (Join-Path $codexHome ''hooks\bootstrap-ai-instructions.ps1'')'
+    if ([string]$CapabilityReceipt.os -cne 'windows') {
+        if ($null -eq $CapabilityReceipt.PSObject.Properties['runtime'] -or $null -eq $CapabilityReceipt.runtime -or
+            $null -eq $CapabilityReceipt.runtime.PSObject.Properties['powerShellExecutablePath'] -or
+            [string]::IsNullOrWhiteSpace([string]$CapabilityReceipt.runtime.powerShellExecutablePath)) {
+            throw (New-AiInstructionsRefusalException -Code capability-unavailable -Message 'The verified platform capability receipt does not name its physical pwsh executable.')
+        }
+        if ($null -eq $CapabilityReceipt.PSObject.Properties['capabilities']) {
+            throw (New-AiInstructionsRefusalException -Code capability-unavailable -Message 'The platform capability receipt lacks physical pwsh verification evidence.')
+        }
+        $powerShellCapabilities = @($CapabilityReceipt.capabilities | Where-Object {
+            $null -ne $_ -and $null -ne $_.PSObject.Properties['name'] -and $null -ne $_.PSObject.Properties['status'] -and
+            [string]$_.name -ceq 'powershell-runtime' -and [string]$_.status -ceq 'available'
+        })
+        if ($powerShellCapabilities.Count -ne 1) {
+            throw (New-AiInstructionsRefusalException -Code capability-unavailable -Message 'The platform capability receipt does not verify exactly one physical pwsh runtime.')
+        }
+        $powerShellPath = [string]$CapabilityReceipt.runtime.powerShellExecutablePath
+        $expectedEvidence = "Physical pwsh identity and version probe passed: $powerShellPath"
+        if ($null -eq $powerShellCapabilities[0].PSObject.Properties['evidence'] -or
+            @($powerShellCapabilities[0].evidence | Where-Object { [string]$_ -ceq $expectedEvidence }).Count -ne 1) {
+            throw (New-AiInstructionsRefusalException -Code capability-unavailable -Message 'The platform capability receipt pwsh path does not match its physical-runtime verification evidence.')
+        }
+        if (-not $powerShellPath.StartsWith('/',[StringComparison]::Ordinal) -or
+            $powerShellPath.Contains("`0") -or $powerShellPath.Contains("`r") -or $powerShellPath.Contains("`n") -or
+            $powerShellPath.Contains('`') -or
+            $powerShellPath.EndsWith('/',[StringComparison]::Ordinal) -or
+            @($powerShellPath.Split('/') | Where-Object { $_ -in @('.','..') }).Count -gt 0) {
+            throw (New-AiInstructionsRefusalException -Code capability-unavailable -Message 'The verified Unix pwsh executable path must be an absolute canonical physical path.')
+        }
+        $singleQuoteEscape = "'" + '"' + "'" + '"' + "'"
+        $quotedPowerShellPath = "'" + $powerShellPath.Replace("'",$singleQuoteEscape) + "'"
+        $invocation = 'codexHome="${CODEX_HOME:-$HOME/.codex}"; ' + $quotedPowerShellPath +
+            ' -NoProfile -NonInteractive -File "$codexHome/hooks/bootstrap-ai-instructions.ps1"'
+    }
+    $rendered = $templateText.Replace($script:AiInstructionsBootstrapInvocationPlaceholder,$invocation)
+    return ,([Text.UTF8Encoding]::new($false).GetBytes($rendered))
 }
 
 function Get-InstallerBootstrapSectionContent {
@@ -3943,6 +4015,7 @@ Export-ModuleMember -Function @(
     'Get-AiInstructionsRefusalCodes',
     'New-AiInstructionsRefusalException',
     'Get-AiInstructionsRefusalCode',
+    'Get-AiInstructionsBootstrapSectionBytes',
     'Get-InstallerBootstrapSectionContent',
     'Test-AiInstructionsClaudeFamilyProjectOwned',
     'Get-AiInstructionsRuntimeGeneration',

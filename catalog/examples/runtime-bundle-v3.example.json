@@ -4,13 +4,13 @@
   "commit": "89abcdef0123456789abcdef0123456789abcdef",
   "acquisition": "github-codeload",
   "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "inventorySha256": "8394051800705e117d5f6551eec111ae3d21517329860fd61b9af6d87abf8acf",
+  "inventorySha256": "a7d5c5f04617d13decb55ad79aa6b2930abd5ae13a43878a646447ca41294f48",
   "inventory": [
     { "path": "Resolve-StandardValidationTool.ps1", "sha256": "e0ca981a95525f44ac482424b370d0a4982760edd4e706ee7312562daef4ccec" },
     { "path": "catalog/skills-catalog.json", "sha256": "7ee5450a20aa9e1ca9b1ecbfb3d9892cf7047c8fd7300bc1bcdcea526da2fdd2" },
     { "path": "installer-safe-mutation.psm1", "sha256": "dc031edcc2f48968df83cd68ad52eacb7f7b05d3ca6a0cc622658cf6151c8293" },
-    { "path": "platform-runtime.psd1", "sha256": "80cfd96d3fa9aab460cb30c0aefe487d943354154934831668e63085c3be7af8" },
-    { "path": "platform-runtime.psm1", "sha256": "af7949af2f2cf144606b5cafbecfa29dd713f6642ebdcfff3a565c92002b5e41" },
+    { "path": "platform-runtime.psd1", "sha256": "5052eac31585ad76c77008b9935fbc9c7e2815b544ab9d6a4b4d997d7c602475" },
+    { "path": "platform-runtime.psm1", "sha256": "61085990f7394b168694c92c8501fe472ce509942251ecd609068bf68b22695b" },
     { "path": "WindowsDacl.psm1", "sha256": "ffa1f85d94bb6bce9bf8353f8c7733bdbe59880a3d0d075191938cc28aebb5f6" },
     { "path": "platform/Linux.psm1", "sha256": "bc0aa76c8ac95e3ccafd5198173c01add5e30dbe6e2500c245edc84d3198bb07" },
     { "path": "platform/MacOS.psm1", "sha256": "9a07e650127ef05a22969169a54af4bcb5eacb084f9dc47ad95e6d22050869af" },
@@ -28,7 +28,7 @@
   "platform": { "os": "windows", "architecture": "x64" },
   "platformRuntime": {
     "apiVersion": "1.0",
-    "manifestSha256": "80cfd96d3fa9aab460cb30c0aefe487d943354154934831668e63085c3be7af8",
+    "manifestSha256": "5052eac31585ad76c77008b9935fbc9c7e2815b544ab9d6a4b4d997d7c602475",
     "sourceFingerprint": "ea833790e6f236342fa9949a6f915a5fd2409e2923d3388f157fc15cb4a05ed5"
   },
   "requiredCapabilities": ["directory-lease", "file-lease", "file-identity", "lock", "publication", "owned-file-removal", "permissions", "directory-publication"],

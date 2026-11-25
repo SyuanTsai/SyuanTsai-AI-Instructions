@@ -872,9 +872,10 @@ function Assert-AgentEnvironmentProjectionDesiredStateBinding {
            $null-eq$DesiredState.InstructionsArtifact.PSObject.Properties['sectionBytes']-or$null-eq$DesiredState.InstructionsArtifact.sectionBytes){
             throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'Projection-aware desired state is missing the verified USER Claude instructions artifact.')
         }
-        [byte[]]$runtimeSectionBytes=Get-AgentEnvironmentBoundRuntimeArtifactBytes -GateContext $GateContext -RelativePath 'bootstrap-section.md'
-        if([Convert]::ToBase64String($runtimeSectionBytes)-cne[Convert]::ToBase64String([byte[]]$DesiredState.InstructionsArtifact.sectionBytes)){
-            throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'USER Claude instructions bytes do not match the verified runtime inventory.')
+        [byte[]]$runtimeTemplateBytes=Get-AgentEnvironmentBoundRuntimeArtifactBytes -GateContext $GateContext -RelativePath 'bootstrap-section.md'
+        [byte[]]$renderedSectionBytes=Get-AiInstructionsBootstrapSectionBytes -TemplateBytes $runtimeTemplateBytes -CapabilityReceipt $GateContext.capabilityReceipt
+        if([Convert]::ToBase64String($renderedSectionBytes)-cne[Convert]::ToBase64String([byte[]]$DesiredState.InstructionsArtifact.sectionBytes)){
+            throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'USER Claude instructions bytes are not the verified runtime template rendering.')
         }
     }
     elseif($null-ne$DesiredState.PSObject.Properties['InstructionsArtifact']-and$null-ne$DesiredState.InstructionsArtifact){
@@ -1052,7 +1053,8 @@ function Get-UserSkillsDesiredState {
     }
     $instructionsArtifact=$null
     if($projectionAware-and$ProjectionIds-ccontains'user-claude'){
-        [byte[]]$sectionBytes=Get-AgentEnvironmentBoundRuntimeArtifactBytes -GateContext $GateContext -RelativePath 'bootstrap-section.md'
+        [byte[]]$templateBytes=Get-AgentEnvironmentBoundRuntimeArtifactBytes -GateContext $GateContext -RelativePath 'bootstrap-section.md'
+        [byte[]]$sectionBytes=Get-AiInstructionsBootstrapSectionBytes -TemplateBytes $templateBytes -CapabilityReceipt $GateContext.capabilityReceipt
         [byte[]]$validatedSection=Get-InstallerBootstrapSectionContent -ExistingBytes ([byte[]]@()) -SectionBytes $sectionBytes
         if([Convert]::ToBase64String($validatedSection)-cne[Convert]::ToBase64String($sectionBytes)){throw 'Verified runtime bootstrap section bytes are not canonical.'}
         $instructionsArtifact=[pscustomobject][ordered]@{targetPath='.claude/CLAUDE.md';sectionBytes=$sectionBytes}
@@ -2245,8 +2247,13 @@ function Invoke-UserSkillsReconciliation {
             if($null-eq$DesiredState.PSObject.Properties['InstructionsArtifact']-or$null-eq$DesiredState.InstructionsArtifact){throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'USER Claude instructions selection is missing its verified desired artifact.')}
             $instructionsArtifact=$DesiredState.InstructionsArtifact
             if([string]$instructionsArtifact.targetPath-cne'.claude/CLAUDE.md'-or$null-eq$instructionsArtifact.PSObject.Properties['sectionBytes']){throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'USER Claude instructions desired artifact is invalid.')}
-            [byte[]]$canonicalSection=Get-InstallerBootstrapSectionContent -ExistingBytes ([byte[]]@()) -SectionBytes ([byte[]]$instructionsArtifact.sectionBytes)
-            if([Convert]::ToBase64String($canonicalSection)-cne[Convert]::ToBase64String([byte[]]$instructionsArtifact.sectionBytes)){throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'USER Claude instructions desired artifact is not canonical.')}
+            [byte[]]$runtimeTemplateBytes=Get-AgentEnvironmentBoundRuntimeArtifactBytes -GateContext $DesiredState.GateContext -RelativePath 'bootstrap-section.md'
+            [byte[]]$renderedSectionBytes=Get-AiInstructionsBootstrapSectionBytes -TemplateBytes $runtimeTemplateBytes -CapabilityReceipt $DesiredState.GateContext.capabilityReceipt
+            [byte[]]$canonicalSection=Get-InstallerBootstrapSectionContent -ExistingBytes ([byte[]]@()) -SectionBytes $renderedSectionBytes
+            if([Convert]::ToBase64String($canonicalSection)-cne[Convert]::ToBase64String($renderedSectionBytes)-or
+               [Convert]::ToBase64String($renderedSectionBytes)-cne[Convert]::ToBase64String([byte[]]$instructionsArtifact.sectionBytes)){
+                throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'USER Claude instructions desired artifact is not the canonical verified template rendering.')
+            }
         }
         elseif($null-ne$DesiredState.PSObject.Properties['InstructionsArtifact']-and$null-ne$DesiredState.InstructionsArtifact){throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'USER Claude instructions artifact is present without the user-claude projection.')}
     }
