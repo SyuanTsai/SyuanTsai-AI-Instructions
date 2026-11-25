@@ -2157,6 +2157,25 @@ $configuration = [pscustomobject][ordered]@{schemaVersion=5;catalog=$catalogSele
             return (@($lines) -join "`n")
         }
 
+        function Assert-UnixPreparePlatformContract {
+            param([Parameter(Mandatory=$true)]$Run,[Parameter(Mandatory=$true)][string]$UserHome)
+            $manifestPath = Join-Path $UserHome '.agents/catalog-skills.manifest.json'
+            $claudePath = Join-Path $UserHome '.claude/CLAUDE.md'
+            if ($IsLinux) {
+                $Run.Json.result | Should BeExactly 'completed'
+                $Run.Json.runtimeCommit | Should BeExactly $script:UnixCommits['runtime']
+                (@($Run.Json.steps | Where-Object step -in @('S7','S8','S9') | Select-Object -ExpandProperty status) -join ',') | Should BeExactly 'completed,completed,completed'
+                Test-Path -LiteralPath $manifestPath -PathType Leaf | Should Be $true
+                $claudeBytes = [IO.File]::ReadAllBytes($claudePath)
+                $runtimeBytes = [IO.File]::ReadAllBytes((Join-Path $UserHome '.codex/hooks/ai-instructions-runtime/bootstrap-section.md'))
+                [Convert]::ToBase64String($claudeBytes) | Should BeExactly ([Convert]::ToBase64String($runtimeBytes))
+                return
+            }
+            $Run.Json.result | Should BeExactly 'prepared-runtime-only'
+            Test-Path -LiteralPath $manifestPath | Should Be $false
+            Test-Path -LiteralPath $claudePath | Should Be $false
+        }
+
         function Assert-NoUnixSetupRunDirectories {
             param([Parameter(Mandatory = $true)][string]$TmpRoot,[string]$PreservedPath)
             $remaining = @(Get-ChildItem -LiteralPath $TmpRoot -Directory -Force | Where-Object {
@@ -2196,14 +2215,8 @@ $configuration = [pscustomobject][ordered]@{schemaVersion=5;catalog=$catalogSele
         $userHome = New-UnixHome 'success'
         $prepare = Invoke-UnixSetup $userHome @('--prepare')
         Assert-SetupTestExitCode $prepare 0
-        $prepare.Json.result | Should Be 'completed'
-        $prepare.Json.runtimeCommit | Should BeExactly $script:UnixCommits['runtime']
-        (@($prepare.Json.steps | Where-Object step -in @('S7','S8','S9') | Select-Object -ExpandProperty status) -join ',') | Should BeExactly 'completed,completed,completed'
+        Assert-UnixPreparePlatformContract $prepare $userHome
         $prepare.Json.powerShell.runtimeAction | Should Be 'resolved'
-        Test-Path -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json') -PathType Leaf | Should Be $true
-        $claudeBytes = [IO.File]::ReadAllBytes((Join-Path $userHome '.claude/CLAUDE.md'))
-        $runtimeBytes = [IO.File]::ReadAllBytes((Join-Path $userHome '.codex/hooks/ai-instructions-runtime/bootstrap-section.md'))
-        [Convert]::ToBase64String($claudeBytes) | Should BeExactly ([Convert]::ToBase64String($runtimeBytes))
         $offline = Invoke-UnixSetup $userHome @('--offline')
         Assert-SetupTestExitCode $offline 0
         $offline.Json.result | Should Be 'verified-runtime-only'
@@ -2274,7 +2287,7 @@ $configuration = [pscustomobject][ordered]@{schemaVersion=5;catalog=$catalogSele
         finally { & git -C $script:UnixRepo checkout -q --detach $script:UnixCommits['runtime'] 2>$null | Out-Null }
     }
 
-    # Scenario: A fresh HOME, then an installed HOME moving to a descendant pin, contains unmanaged bytes at a selected USER projection target.
+    # Scenario: A fresh HOME contains unmanaged bytes at a selected target; a descendant pin newly selects another Skill whose target already has unmanaged bytes.
     # Purpose: Refuse with exit 29 before installer/updater mutation; the shell and every owned child observe EOF on stdin.
     It 'CloudT3_refuses_fresh_and_new_pin_projection_collisions_before_mutation' {
         $userHome = New-UnixHome 'cloud-collision'
@@ -2290,7 +2303,7 @@ $configuration = [pscustomobject][ordered]@{schemaVersion=5;catalog=$catalogSele
 
         $updateHome = New-UnixHome 'cloud-update-collision'
         Assert-SetupTestExitCode (Invoke-UnixSetup $updateHome @()) 0
-        $updateCollision = Join-Path $updateHome '.agents/skills/verify-data-access-performance/SKILL.md'
+        $updateCollision = Join-Path $updateHome '.agents/skills/manage-ai-memory/SKILL.md'
         [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($updateCollision))
         [IO.File]::WriteAllText($updateCollision,"personal update collision bytes`n")
         $managedBefore = @(
@@ -2298,10 +2311,15 @@ $configuration = [pscustomobject][ordered]@{schemaVersion=5;catalog=$catalogSele
             Get-UnixTreeSnapshot (Join-Path $updateHome '.agents')
             Get-UnixTreeSnapshot (Join-Path $updateHome '.claude')
         ) -join "`n"
-        $sectionPath = Join-Path $script:UnixRepo 'instructions/common/bootstrap-section.md'
+        $catalogPath = Join-Path $script:UnixRepo 'catalog/skills-catalog.json'
         try {
-            [IO.File]::AppendAllText($sectionPath,"`nSYP-519 collision descendant`n")
-            & git -C $script:UnixRepo add instructions/common/bootstrap-section.md 2>$null | Out-Null
+            $catalog = Get-Content -Raw -LiteralPath $catalogPath | ConvertFrom-Json
+            $core = @($catalog.profiles | Where-Object id -eq 'core')[0]
+            $core.includes = @($core.includes) + 'manage-ai-memory'
+            $newlySelected = @($catalog.skills | Where-Object id -eq 'manage-ai-memory')[0]
+            $newlySelected.profiles = @($newlySelected.profiles) + 'core'
+            [IO.File]::WriteAllText($catalogPath,(($catalog | ConvertTo-Json -Depth 20)+"`n"),[Text.UTF8Encoding]::new($false))
+            & git -C $script:UnixRepo add catalog/skills-catalog.json 2>$null | Out-Null
             & git -C $script:UnixRepo -c user.name=setup-test -c user.email=setup-test@example.invalid commit -q -m collision-pin 2>$null | Out-Null
             $next = [string](& git -C $script:UnixRepo rev-parse HEAD)
             $updateRun = Invoke-UnixSetup $updateHome @() -ExpectedCommit $next -NoCheckout
@@ -2551,7 +2569,7 @@ $configuration = [pscustomobject][ordered]@{schemaVersion=5;catalog=$catalogSele
             $bin = New-UnixToolShim "download-$downloader" -Exclude $exclude -Replace $replace
             $run = Invoke-UnixSetup $homePath @('--prepare') -Environment @{ PATH=$bin; CURL_HOME=$homePath; WGETRC=(Join-Path $homePath 'poison-wgetrc') }
             Assert-SetupTestExitCode $run 0
-            $run.Json.result | Should Be 'completed'
+            Assert-UnixPreparePlatformContract $run $homePath
             Test-Path -LiteralPath $configMarker | Should Be $false
             $cache = Join-Path $homePath ".local/share/ai-instructions-setup/cache/$($script:UnixAssetName)"
             Get-UnixMode $cache | Should Be '600'
@@ -2787,7 +2805,7 @@ $configuration = [pscustomobject][ordered]@{schemaVersion=5;catalog=$catalogSele
             GIT_CONFIG_KEY_0='core.fsmonitor'; GIT_CONFIG_VALUE_0=$tarAction; CURL_HOME=$homePath; WGETRC=$globalConfig
         }
         Assert-SetupTestExitCode $run 0
-        $run.Json.result | Should Be 'completed'
+        Assert-UnixPreparePlatformContract $run $homePath
         Test-Path -LiteralPath $marker | Should Be $false
     }
 
@@ -3084,7 +3102,7 @@ Describe 'setup-agent-environment Unix null optional leaf publication (SYP-354 P
         $curlScript=@('[ "$1" = -q ] || exit 65','out=','while [ "$#" -gt 0 ]; do','case "$1" in --output) out=$2; shift 2 ;; *) shift ;; esac','done','[ -n "$out" ] || exit 64',"cp -P '$fixtureArchive' `"`$out`"") -join "`n"
         $bin=New-UnixToolShim 'null-leaf-empty-home' -Exclude @('wget') -Replace @{curl=$curlScript}
         $prepare=Invoke-UnixSetup $homePath @('--prepare') -Environment @{PATH=$bin}
-        Assert-SetupTestExitCode $prepare 0;$prepare.Json.result | Should Be 'completed'
+        Assert-SetupTestExitCode $prepare 0;Assert-UnixPreparePlatformContract $prepare $homePath
         $offline=Invoke-UnixSetup $homePath @('--offline')
         Assert-SetupTestExitCode $offline 0;$offline.Json.result | Should Be 'verified-runtime-only'
         $setupRoot=Join-Path $homePath '.local/share/ai-instructions-setup'
