@@ -2,17 +2,18 @@
 # SPDX-FileCopyrightText: 2026 SyuanTsai
 # SPDX-License-Identifier: Apache-2.0
 #
-# SYP-354 P10a Linux/macOS setup: POSIX shell edge (S1-S4) only.
+# SYP-354 P10a Linux/macOS setup edge plus SYP-519 Linux cloud wiring.
 # Linux and macOS are supported hosts; WSL is not. See README "Linux/macOS setup".
 #
-#   sh scripts/setup-agent-environment.sh --expected-commit <40-hex> (--prepare | --offline)
+#   sh scripts/setup-agent-environment.sh --expected-commit <40-hex> [--prepare | --offline]
 #
 # S1 host RID, HOME and link-free, safely owned ancestors; K4 pinned revision
 # and dependencies; S2 canonical runtime location; S3 verified official
-# PowerShell archive in the setup cache; S4 hand-off to
-# setup-agent-environment.ps1 with a bootstrap pwsh and an allowlisted
-# environment. The setup never elevates privileges, never installs system
-# packages and never edits shell start-up files. Exit codes are the shared
+# PowerShell archive in the setup cache; S4 hand-off to the PowerShell entry
+# with a bootstrap pwsh and an allowlisted environment. Linux Prepare then
+# completes installer, USER projection and readiness steps; macOS and Offline
+# retain the runtime-only result. The setup never elevates privileges, never
+# installs system packages or edits shell start-up files. Exit codes are the shared
 # table in scripts/agent-environment-setup.psm1 (README lists them).
 set -eu
 umask 077
@@ -38,6 +39,9 @@ EXIT_CAPABILITY_UNAVAILABLE=25
 EXIT_CONCURRENT=26
 EXIT_INTERRUPTED_INSTALL=27
 EXIT_CODEX_HOME_CONFLICT=28
+EXIT_PROJECTION_COLLISION=29
+EXIT_UPDATE_FAILED=30
+EXIT_PROJECTION_FAILED=31
 
 BOUND_FILES='scripts/setup-agent-environment.policy.json scripts/setup-agent-environment.policy.tsv scripts/setup-agent-environment.policy.schema.json scripts/setup-agent-environment.sh scripts/setup-agent-environment.ps1 scripts/agent-environment-setup.psm1'
 PLATFORM_BOUND_FILES='scripts/platform-runtime.psd1 scripts/platform-runtime.psm1 scripts/installer-safe-mutation.psm1 scripts/WindowsDacl.psm1 scripts/Resolve-StandardValidationTool.ps1 scripts/platform/PlatformNative.cs scripts/platform/UnixNative.cs scripts/platform/WindowsNative.cs scripts/platform/WindowsInstallerMutation.cs scripts/platform/OwnedProcess.cs scripts/platform/UnixProcess.cs scripts/platform/WindowsProcess.cs scripts/platform/Unix.psm1 scripts/platform/RuntimePreparation.psm1 scripts/platform/Windows.psm1 scripts/platform/Linux.psm1 scripts/platform/MacOS.psm1'
@@ -143,7 +147,7 @@ trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
 
 usage_text() {
-    printf '%s\n' 'usage: sh scripts/setup-agent-environment.sh --expected-commit <40-hex> (--prepare | --offline)'
+    printf '%s\n' 'usage: sh scripts/setup-agent-environment.sh --expected-commit <40-hex> [--prepare | --offline]'
 }
 
 expected_commit=''
@@ -160,6 +164,7 @@ while [ "$#" -gt 0 ]; do
         --prepare|--offline)
             [ -z "$mode" ] || refuse usage "$EXIT_USAGE" 'Specify exactly one of --prepare or --offline.'
             mode=${1#--}
+            receipt_mode='"'"$mode"'"'
             shift ;;
         -h|--help)
             usage_text
@@ -169,8 +174,6 @@ while [ "$#" -gt 0 ]; do
             refuse usage "$EXIT_USAGE" "Unknown argument." ;;
     esac
 done
-[ -n "$mode" ] || refuse usage "$EXIT_USAGE" 'Specify exactly one of --prepare or --offline.'
-receipt_mode='"'"$mode"'"'
 case "$expected_commit" in
     ''|*[!0-9a-f]*) refuse usage "$EXIT_USAGE" '--expected-commit must be a 40-character lowercase hexadecimal commit.' ;;
 esac
@@ -209,6 +212,9 @@ case "$(run_clean uname -s)" in
     Darwin) os_token=osx ;;
     *) refuse unsupported-platform "$EXIT_UNSUPPORTED_PLATFORM" 'The host OS has no pinned PowerShell asset.' ;;
 esac
+[ -n "$mode" ] || [ "$os_token" != linux ] || mode=prepare
+[ -n "$mode" ] || refuse usage "$EXIT_USAGE" 'Specify exactly one of --prepare or --offline.'
+if [ "$receipt_mode" = null ]; then receipt_mode='"'"$mode"'"'; fi
 case "$(run_clean uname -m)" in
     x86_64|amd64) arch_token=x64 ;;
     aarch64|arm64) arch_token=arm64 ;;
@@ -322,11 +328,23 @@ done
 
 # G3/G5: before mutation, refuse only external K7 state. Setup-owned WAL is
 # handed to the verified PowerShell entry for lock-held recovery.
-if [ -e "$codex_home/.ai-instructions-txn" ] || [ -L "$codex_home/.ai-instructions-txn" ]; then
+transaction_store_has_residue() {
+    transaction_store=$1
+    if [ -L "$transaction_store" ]; then return 0; fi
+    if [ ! -e "$transaction_store" ]; then return 1; fi
+    if [ ! -d "$transaction_store" ]; then return 0; fi
+    # ls -A is available on both supported host families and includes dotfiles.
+    # A listing failure cannot prove the physical directory empty, so refuse.
+    if ! transaction_entry=$(run_clean ls -A "$transaction_store" 2>/dev/null); then
+        return 0
+    fi
+    [ -n "$transaction_entry" ]
+}
+if transaction_store_has_residue "$codex_home/.ai-instructions-txn"; then
     refuse interrupted-install "$EXIT_INTERRUPTED_INSTALL" 'An interrupted install transaction exists in CODEX_HOME; recover it before rerunning setup.' \
         'pwsh -NoProfile -NonInteractive -File scripts/install-ai-instructions-bootstrap.ps1 -CodexHome ~/.codex'
 fi
-if [ -e "$home/.ai-instructions-txn" ] || [ -L "$home/.ai-instructions-txn" ]; then
+if transaction_store_has_residue "$home/.ai-instructions-txn"; then
     refuse interrupted-install "$EXIT_INTERRUPTED_INSTALL" 'An interrupted USER agent-environment transaction exists; recover it before rerunning setup.' \
         'pwsh -NoProfile -NonInteractive -File ~/.codex/hooks/update-agent-environment.ps1 -Recover'
 fi

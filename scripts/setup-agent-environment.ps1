@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 SyuanTsai
 # SPDX-License-Identifier: Apache-2.0
 
-# SYP-354 P10a PowerShell entry (S5/S6). Invoked by setup-agent-environment.sh
+# SYP-354 P10a runtime edge plus SYP-519 Linux cloud wiring. Invoked by setup-agent-environment.sh
 # with a bootstrap pwsh expanded in the setup temp directory, or directly with
 # pwsh on Windows (-ArchivePath <local official zip>). It prepares or re-verifies
 # the canonical pwsh under ~/.local/share/ai-instructions-setup, re-executes
 # itself with that canonical pwsh (-Canonical), and prints one JSON receipt line.
-# S7-S9 (installer, USER projections, readiness) are P10b and are reported as
-# 'not-implemented-until-p10b'. This script never calls an installer, updater
-# or coordinator, never modifies a shell profile and never writes CODEX_HOME.
+# On Linux Prepare, the canonical stage completes S7-S9 through the existing
+# installer, updater and USER coordinator. Windows, macOS and Offline retain the
+# runtime-only contract. No path edits a shell profile or persists CODEX_HOME.
 [CmdletBinding()]
 param(
     [switch] $Prepare,
@@ -193,6 +193,449 @@ function Assert-SetupBootstrapTrust {
     }
 }
 
+function Invoke-SetupOwnedCommand {
+    param(
+        [Parameter(Mandatory=$true)][string]$RuntimeExecutable,
+        [Parameter(Mandatory=$true)][string[]]$Arguments,
+        [Parameter(Mandatory=$true)][Collections.IDictionary]$Environment,
+        [Parameter(Mandatory=$true)][string]$WorkingDirectory,
+        [Parameter(Mandatory=$true)][string]$FailureCode,
+        [Parameter(Mandatory=$true)][string]$Context,
+        [switch]$AllowNonZero
+    )
+    $run=Invoke-PlatformPreparationCommand -Command $RuntimeExecutable -Arguments $Arguments -Environment $Environment -WorkingDirectory $WorkingDirectory -TimeoutMilliseconds 1800000
+    if([int]$run.exitCode-ne0-and-not$AllowNonZero){
+        $detail=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$run.stderr) -UserHome ([string]$Environment['HOME'])
+        throw (New-AgentEnvironmentSetupRefusal $FailureCode "$Context exited with code $($run.exitCode). Child stderr: $detail")
+    }
+    return $run
+}
+
+function ConvertFrom-SetupOwnedJsonResult {
+    param(
+        [Parameter(Mandatory=$true)]$Run,
+        [Parameter(Mandatory=$true)][string]$FailureCode,
+        [Parameter(Mandatory=$true)][string]$Context,
+        [Parameter(Mandatory=$true)][string]$UserHome
+    )
+    $detail=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$Run.stderr) -UserHome $UserHome
+    $stdoutSummary=Get-AgentEnvironmentSetupChildOutputSummary -Stdout ([string]$Run.stdout) -UserHome $UserHome
+    $lines=@(([string]$Run.stdout).Split("`n")|ForEach-Object{$_.TrimEnd("`r")}|Where-Object{$_.Length-gt0})
+    if($lines.Count-ne1){throw (New-AgentEnvironmentSetupRefusal $FailureCode "$Context did not return exactly one JSON line. Child stdout summary: $stdoutSummary. Child stderr: $detail")}
+    try{return $lines[0]|ConvertFrom-Json -ErrorAction Stop}
+    catch{throw (New-AgentEnvironmentSetupRefusal $FailureCode "$Context returned invalid JSON. Child stdout summary: $stdoutSummary. Child stderr: $detail")}
+}
+
+function Get-SetupExpectedCommitText {
+    param(
+        [Parameter(Mandatory=$true)][string]$RepositoryRoot,
+        [Parameter(Mandatory=$true)][string]$ExpectedCommit,
+        [Parameter(Mandatory=$true)][string]$RelativePath,
+        [Parameter(Mandatory=$true)][string]$Context
+    )
+    $gitPath=[string](Get-Command git -CommandType Application|Select-Object -First 1).Source
+    $read=Invoke-SetupVerifierGit -GitPath $gitPath -RepositoryRoot $RepositoryRoot -Arguments @('show',("{0}:{1}" -f $ExpectedCommit,$RelativePath)) -Binary
+    if($read.ExitCode-ne0){throw (New-AgentEnvironmentSetupRefusal update-failed "The expected setup commit does not contain a readable $Context.")}
+    try{
+        return [Text.UTF8Encoding]::new($false,$true).GetString([byte[]]$read.Bytes)
+    }catch{throw (New-AgentEnvironmentSetupRefusal update-failed "The expected setup commit contains a non-UTF-8 $Context.")}
+}
+
+function Get-SetupExpectedCatalog {
+    param(
+        [Parameter(Mandatory=$true)][string]$RepositoryRoot,
+        [Parameter(Mandatory=$true)][string]$ExpectedCommit
+    )
+    try{
+        return (Get-SetupExpectedCommitText -RepositoryRoot $RepositoryRoot -ExpectedCommit $ExpectedCommit -RelativePath 'catalog/skills-catalog.json' -Context 'Skills Catalog')|ConvertFrom-Json -ErrorAction Stop
+    }catch{
+        if((Get-AgentEnvironmentSetupRefusalCode $_)-cne'internal-error'){throw}
+        throw (New-AgentEnvironmentSetupRefusal update-failed 'The expected setup commit contains an invalid Skills Catalog.')
+    }
+}
+
+function Test-SetupExpectedProjectionCollision {
+    param(
+        [Parameter(Mandatory=$true)]$Catalog,
+        [Parameter(Mandatory=$true)][string]$UserHome,
+        [string[]]$ManagedTargetPaths=@(),
+        [string[]]$SelectedSkillIds=@(),
+        [switch]$OwnedManifest
+    )
+    if($null-eq$Catalog.PSObject.Properties['schemaVersion']-or[int64]$Catalog.schemaVersion-ne3-or
+       $null-eq$Catalog.PSObject.Properties['profiles']-or$null-eq$Catalog.PSObject.Properties['skills']-or
+       $null-eq$Catalog.PSObject.Properties['projections']){
+        throw (New-AgentEnvironmentSetupRefusal update-failed 'The expected Skills Catalog cannot drive a v3/v5 projection preflight.')
+    }
+    $projectionRoots=[Collections.Generic.List[string]]::new()
+    foreach($projectionId in @('user-agents','user-claude')){
+        $projection=@($Catalog.projections|Where-Object{[string]$_.id-ceq$projectionId})
+        $expectedRoot=if($projectionId-ceq'user-agents'){'.agents/skills'}else{'.claude/skills'}
+        if($projection.Count-ne1-or[string]$projection[0].scope-cne'user'-or[string]$projection[0].root-cne$expectedRoot){
+            throw (New-AgentEnvironmentSetupRefusal update-failed "The expected Skills Catalog has an invalid '$projectionId' projection.")
+        }
+        $projectionRoots.Add($expectedRoot)
+    }
+    $selected=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach($skillIdValue in $SelectedSkillIds){
+        $skillId=[string]$skillIdValue
+        if($skillId-cnotmatch'^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$'){
+            throw (New-AgentEnvironmentSetupRefusal update-failed 'The expected Skills selection resolver returned an invalid Skill ID.')
+        }
+        [void]$selected.Add($skillId)
+    }
+    $managedTargets=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach($targetPathValue in $ManagedTargetPaths){
+        $targetPath=([string]$targetPathValue).Replace('\','/')
+        if([string]::IsNullOrWhiteSpace($targetPath)-or[IO.Path]::IsPathRooted($targetPath)-or
+           $targetPath-cmatch'(^|/)\.\.(/|$)'-or
+           ($targetPath-cnotmatch'^\.agents/skills/'-and$targetPath-cnotmatch'^\.claude/skills/')){
+            throw (New-AgentEnvironmentSetupRefusal projection-failed 'The installed USER manifest contains an unsafe target path.')
+        }
+        [void]$managedTargets.Add($targetPath)
+    }
+    $getChildEntry={
+        param([string]$Parent,[string]$Leaf)
+        try{
+            if(-not[IO.Directory]::Exists($Parent)){return [pscustomobject]@{State='missing';Path=$null}}
+            foreach($candidate in [IO.Directory]::EnumerateFileSystemEntries($Parent)){
+                if([string]::Equals([IO.Path]::GetFileName($candidate),$Leaf,[StringComparison]::Ordinal)){
+                    return [pscustomobject]@{State='present';Path=$candidate}
+                }
+            }
+            return [pscustomobject]@{State='missing';Path=$null}
+        }catch{return [pscustomobject]@{State='unreadable';Path=$null}}
+    }
+    $assertPhysicalDirectoryChain={
+        param([string]$RelativePath)
+        $parent=$UserHome
+        foreach($segment in $RelativePath.Split('/')){
+            $entry=& $getChildEntry $parent $segment
+            if([string]$entry.State-ceq'missing'){return $null}
+            if([string]$entry.State-cne'present'){return $false}
+            try{$info=Get-Item -Force -LiteralPath ([string]$entry.Path) -ErrorAction Stop}catch{return $false}
+            if(-not$info.PSIsContainer-or$null-ne$info.LinkType-or($info.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){return $false}
+            $parent=[string]$entry.Path
+        }
+        return $parent
+    }
+    $agentsRoot=& $assertPhysicalDirectoryChain '.agents'
+    if($agentsRoot-eq$false){return $true}
+    if($null-ne$agentsRoot){
+        $manifestEntry=& $getChildEntry ([string]$agentsRoot) 'catalog-skills.manifest.json'
+        if([string]$manifestEntry.State-cne'missing'-and-not$OwnedManifest){return $true}
+    }
+    foreach($skillId in $selected){
+        $skill=@($Catalog.skills|Where-Object{[string]$_.id-ceq$skillId-and[string]$_.lifecycle.status-cne'removed'})
+        if($skill.Count-ne1){throw (New-AgentEnvironmentSetupRefusal update-failed "The expected Skills Catalog default selection does not resolve '$skillId'.")}
+        foreach($root in $projectionRoots){
+            $parent=& $assertPhysicalDirectoryChain $root
+            if($parent-eq$false){return $true}
+            if($null-eq$parent){continue}
+            $entry=& $getChildEntry ([string]$parent) $skillId
+            if([string]$entry.State-ceq'missing'){continue}
+            if([string]$entry.State-cne'present'){return $true}
+            try{$info=Get-Item -Force -LiteralPath ([string]$entry.Path) -ErrorAction Stop}catch{return $true}
+            if(-not$info.PSIsContainer-or$null-ne$info.LinkType-or($info.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){return $true}
+            $pending=[Collections.Generic.Stack[string]]::new()
+            $pending.Push([string]$entry.Path)
+            while($pending.Count-gt0){
+                $directory=$pending.Pop()
+                try{$children=@([IO.Directory]::EnumerateFileSystemEntries($directory))}catch{return $true}
+                foreach($child in $children){
+                    try{$childInfo=Get-Item -Force -LiteralPath $child -ErrorAction Stop}catch{return $true}
+                    if($null-ne$childInfo.LinkType-or($childInfo.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){return $true}
+                    $relative=[IO.Path]::GetRelativePath($UserHome,$child).Replace('\','/')
+                    if($relative.StartsWith('../',[StringComparison]::Ordinal)-or[IO.Path]::IsPathRooted($relative)){return $true}
+                    if($childInfo.PSIsContainer){
+                        $prefix=$relative.TrimEnd('/')+'/'
+                        if(@($managedTargets|Where-Object{$_.StartsWith($prefix,[StringComparison]::Ordinal)}).Count-eq0){return $true}
+                        $pending.Push($child)
+                    }elseif(-not$managedTargets.Contains($relative)){return $true}
+                }
+            }
+        }
+    }
+    return $false
+}
+
+function Invoke-SetupEncodedChild {
+    param(
+        [Parameter(Mandatory=$true)][string]$RuntimeExecutable,
+        [Parameter(Mandatory=$true)][string]$Script,
+        [Parameter(Mandatory=$true)][Collections.IDictionary]$Environment,
+        [Parameter(Mandatory=$true)][string]$WorkingDirectory,
+        [Parameter(Mandatory=$true)][string]$FailureCode,
+        [Parameter(Mandatory=$true)][string]$Context,
+        [switch]$AllowNonZero
+    )
+    $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Script))
+    return Invoke-SetupOwnedCommand -RuntimeExecutable $RuntimeExecutable -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-OutputFormat','Text','-EncodedCommand',$encoded) -Environment $Environment -WorkingDirectory $WorkingDirectory -FailureCode $FailureCode -Context $Context -AllowNonZero:$AllowNonZero
+}
+
+function Invoke-SetupCoordinatorChild {
+    param(
+        [Parameter(Mandatory=$true)][string]$RuntimeExecutable,
+        [Parameter(Mandatory=$true)][string]$EntryPath,
+        [Parameter(Mandatory=$true)][string]$CodexHome,
+        [Parameter(Mandatory=$true)][string]$UserHome,
+        [Parameter(Mandatory=$true)][ValidateSet('WhatIf','Apply','VerifyOnly')][string]$Mode,
+        [Parameter(Mandatory=$true)][Collections.IDictionary]$Environment,
+        [Parameter(Mandatory=$true)][string]$WorkingDirectory
+    )
+    $childEnvironment=[ordered]@{}
+    foreach($key in $Environment.Keys){$childEnvironment[[string]$key]=[string]$Environment[$key]}
+    $childEnvironment['AI_SETUP_COORDINATOR_CODEX_HOME']=$CodexHome
+    $childEnvironment['AI_SETUP_COORDINATOR_ENTRY']=$EntryPath
+    $childEnvironment['AI_SETUP_COORDINATOR_MODE']=$Mode
+    $childEnvironment['AI_SETUP_COORDINATOR_USER_HOME']=$UserHome
+    $childScript=@'
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+$entry=[string]$env:AI_SETUP_COORDINATOR_ENTRY
+$powerShell=[powershell]::Create()
+$childExitCode=1
+try{
+    [void]$powerShell.AddCommand($entry)
+    [void]$powerShell.AddParameter('CodexHome',[string]$env:AI_SETUP_COORDINATOR_CODEX_HOME)
+    [void]$powerShell.AddParameter('UserHome',[string]$env:AI_SETUP_COORDINATOR_USER_HOME)
+    [void]$powerShell.AddParameter('OutputFormat','Json')
+    switch([string]$env:AI_SETUP_COORDINATOR_MODE){
+        'WhatIf'{[void]$powerShell.AddParameter('Apply',$true);[void]$powerShell.AddParameter('WhatIf',$true)}
+        'Apply'{[void]$powerShell.AddParameter('Apply',$true)}
+        'VerifyOnly'{[void]$powerShell.AddParameter('VerifyOnly',$true)}
+        default{throw 'Unsupported setup coordinator child mode.'}
+    }
+    $output=@($powerShell.Invoke())
+    $hasChildError=$powerShell.Streams.Error.Count-gt0
+    if($hasChildError){[Console]::Error.WriteLine([string]$powerShell.Streams.Error[0])}
+    if($output.Count-ne1){
+        foreach($item in $output){Write-Output ([string]$item)}
+        [Console]::Error.WriteLine("Coordinator success stream contained $($output.Count) records; exactly one JSON result is required.")
+    }
+    else{
+        try{$result=[string]$output[0]|ConvertFrom-Json -ErrorAction Stop}
+        catch{Write-Output ([string]$output[0]);[Console]::Error.WriteLine('Coordinator success stream did not contain valid JSON.');$result=$null}
+        if($null-ne$result-and$null-ne$result.PSObject.Properties['exitCode']){
+            $reportedExitCode=[int]$result.exitCode
+            if($hasChildError-and$reportedExitCode-eq0){$reportedExitCode=1;$result.exitCode=$reportedExitCode}
+            $childExitCode=$reportedExitCode
+            Write-Output ($result|ConvertTo-Json -Compress -Depth 100)
+        }
+        elseif($null-ne$result){Write-Output ([string]$output[0]);[Console]::Error.WriteLine('Coordinator JSON result did not contain exitCode.')}
+    }
+}
+catch{
+    if($powerShell.Streams.Error.Count-gt0){[Console]::Error.WriteLine([string]$powerShell.Streams.Error[0])}
+    else{[Console]::Error.WriteLine([string]$_.Exception.Message)}
+}
+finally{$powerShell.Dispose()}
+exit $childExitCode
+'@
+    return Invoke-SetupEncodedChild -RuntimeExecutable $RuntimeExecutable -Script $childScript -Environment $childEnvironment -WorkingDirectory $WorkingDirectory -FailureCode projection-failed -Context "USER projection $Mode" -AllowNonZero
+}
+
+function Invoke-SetupProjectionCollisionPreflight {
+    param(
+        [Parameter(Mandatory=$true)][string]$RepositoryRoot,
+        [Parameter(Mandatory=$true)][string]$CodexHome,
+        [Parameter(Mandatory=$true)][string]$UserHome,
+        [Parameter(Mandatory=$true)][string]$ExpectedCommit,
+        [Parameter(Mandatory=$true)][string]$RuntimeExecutable,
+        [Parameter(Mandatory=$true)][Collections.IDictionary]$Environment
+    )
+    $environmentEntry=Join-Path $CodexHome 'hooks/update-agent-environment.ps1'
+    $catalog=Get-SetupExpectedCatalog -RepositoryRoot $RepositoryRoot -ExpectedCommit $ExpectedCommit
+    $selectionSource=Get-SetupExpectedCommitText -RepositoryRoot $RepositoryRoot -ExpectedCommit $ExpectedCommit -RelativePath 'scripts/skills-selection.psm1' -Context 'Skills selection resolver'
+    $manifestPath=Join-Path $UserHome '.agents/catalog-skills.manifest.json'
+    $manifest=$null
+    if(Test-Path -LiteralPath $manifestPath){
+        try{
+            $manifestInfo=Get-Item -Force -LiteralPath $manifestPath -ErrorAction Stop
+            if($manifestInfo.PSIsContainer-or$null-ne$manifestInfo.LinkType-or($manifestInfo.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){throw 'not a physical file'}
+            $manifest=[IO.File]::ReadAllText($manifestPath)|ConvertFrom-Json -ErrorAction Stop
+            if($null-eq$manifest.PSObject.Properties['files']){throw 'missing files inventory'}
+        }catch{throw (New-AgentEnvironmentSetupRefusal projection-collision 'USER projection preflight found an untrusted managed manifest before runtime mutation.')}
+    }
+    $hasInstalledCoordinator=Test-Path -LiteralPath $environmentEntry -PathType Leaf
+    if($null-ne$manifest-and-not$hasInstalledCoordinator){
+        throw (New-AgentEnvironmentSetupRefusal projection-collision 'USER projection preflight found ownership evidence without a verified installed coordinator.')
+    }
+    $managedFiles=if($null-eq$manifest){@()}else{@($manifest.files)}
+    $managedTargets=@($managedFiles|ForEach-Object{if($null-eq$_.PSObject.Properties['targetPath']){throw (New-AgentEnvironmentSetupRefusal projection-failed 'The installed USER manifest file inventory is incomplete.')}[string]$_.targetPath})
+    $managedSkills=@($managedFiles|ForEach-Object{if($null-ne$_.PSObject.Properties['skillId']){[string]$_.skillId}}|Where-Object{$_}|Sort-Object -Unique)
+    $selection=[pscustomobject]@{profiles=@();includeSkills=@();excludeSkills=@()}
+    [object[]]$capabilityEvidence=@()
+    if($hasInstalledCoordinator){
+        $validationLauncher=Join-Path $CodexHome 'hooks/bootstrap-ai-instructions.ps1'
+        if(-not(Test-Path -LiteralPath $validationLauncher -PathType Leaf)){throw (New-AgentEnvironmentSetupRefusal update-failed 'USER projection preflight cannot verify the installed sync configuration.')}
+        [void](Invoke-SetupOwnedCommand -RuntimeExecutable $RuntimeExecutable -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-File',$validationLauncher,'-ValidateOnly') -Environment $Environment -WorkingDirectory $RepositoryRoot -FailureCode update-failed -Context 'USER projection installed configuration validation')
+        $configurationPath=Join-Path $CodexHome 'ai-instructions-sync.json'
+        try{$configuration=[IO.File]::ReadAllText($configurationPath)|ConvertFrom-Json -ErrorAction Stop}
+        catch{throw (New-AgentEnvironmentSetupRefusal update-failed 'USER projection preflight cannot read the verified sync configuration.')}
+        if([int]$configuration.schemaVersion-ne5-or$null-eq$configuration.PSObject.Properties['catalog']){throw (New-AgentEnvironmentSetupRefusal update-failed 'USER projection preflight requires a verified config v5 selection.')}
+        $selection=$configuration.catalog
+        if($null-ne$configuration.PSObject.Properties['capabilityEvidence']){$capabilityEvidence=@($configuration.capabilityEvidence)}
+    }
+    try{$selectedSkills=@(Resolve-AgentEnvironmentSetupSkillIds -Catalog $catalog -Selection $selection -CapabilityEvidence $capabilityEvidence -InstalledSkillIds $managedSkills -SelectionSource $selectionSource)}
+    catch{throw (New-AgentEnvironmentSetupRefusal update-failed ('The expected-commit Skills selection could not be resolved: '+$_.Exception.Message))}
+    if(Test-SetupExpectedProjectionCollision -Catalog $catalog -UserHome $UserHome -ManagedTargetPaths $managedTargets -SelectedSkillIds $selectedSkills -OwnedManifest:($null-ne$manifest)){
+        throw (New-AgentEnvironmentSetupRefusal projection-collision 'USER projection preflight found unmanaged target bytes before runtime mutation.')
+    }
+    if(-not$hasInstalledCoordinator){return}
+    $preflightRun=Invoke-SetupCoordinatorChild -RuntimeExecutable $RuntimeExecutable -EntryPath $environmentEntry -CodexHome $CodexHome -UserHome $UserHome -Mode WhatIf -Environment $Environment -WorkingDirectory $RepositoryRoot
+    $preflight=ConvertFrom-SetupOwnedJsonResult $preflightRun projection-failed 'USER projection WhatIf' $UserHome
+    $preflightDecision=Resolve-AgentEnvironmentSetupProjectionResult $preflight -AllowedActions @('planned','current')
+    $childError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$preflightRun.stderr) -UserHome $UserHome
+    if([string]$preflightDecision.code-ceq'projection-collision'){
+        throw (New-AgentEnvironmentSetupRefusal projection-collision "USER projection WhatIf refused unmanaged target bytes before runtime mutation. Child stderr: $childError")
+    }
+    if($null-ne$preflightDecision.code){
+        throw (New-AgentEnvironmentSetupRefusal ([string]$preflightDecision.code) "USER projection WhatIf was refused before runtime mutation. Child stderr: $childError")
+    }
+    if([string]$preflightDecision.action-cnotin@('planned','current')){
+        throw (New-AgentEnvironmentSetupRefusal projection-failed "USER projection WhatIf returned an unsupported action. Child stderr: $childError")
+    }
+}
+
+function Invoke-SetupLinuxUpdaterChild {
+    param(
+        [Parameter(Mandatory=$true)][string]$RepositoryRoot,
+        [Parameter(Mandatory=$true)][string]$CodexHome,
+        [Parameter(Mandatory=$true)][string]$ExpectedCommit,
+        [Parameter(Mandatory=$true)][string]$RuntimeExecutable,
+        [Parameter(Mandatory=$true)][Collections.IDictionary]$Environment
+    )
+    $updaterPath=Join-Path $CodexHome 'hooks/ai-instructions-runtime/ai-instructions-updater.psm1'
+    if(-not(Test-Path -LiteralPath $updaterPath -PathType Leaf)){throw (New-AgentEnvironmentSetupRefusal update-failed 'The installed updater module is missing.')}
+    $gitPath=[string](Get-Command git -CommandType Application|Select-Object -First 1).Source
+    $childEnvironment=[ordered]@{}
+    foreach($key in $Environment.Keys){$childEnvironment[[string]$key]=[string]$Environment[$key]}
+    $childEnvironment['AI_SETUP_CODEX_HOME']=$CodexHome
+    $childEnvironment['AI_SETUP_EXPECTED_COMMIT']=$ExpectedCommit
+    $childEnvironment['AI_SETUP_GIT_PATH']=$gitPath
+    $childEnvironment['AI_SETUP_INSTALLER_PATH']=Join-Path $RepositoryRoot 'scripts/install-ai-instructions-bootstrap.ps1'
+    $childEnvironment['AI_SETUP_REPOSITORY_ROOT']=$RepositoryRoot
+    $childEnvironment['AI_SETUP_RUNTIME_EXECUTABLE']=$RuntimeExecutable
+    $childEnvironment['AI_SETUP_UPDATER_PATH']=$updaterPath
+    $childScript=@'
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
+$WarningPreference='SilentlyContinue'
+$codexHome=[string]$env:AI_SETUP_CODEX_HOME
+$expectedCommit=[string]$env:AI_SETUP_EXPECTED_COMMIT
+$gitPath=[string]$env:AI_SETUP_GIT_PATH
+$installerPath=[string]$env:AI_SETUP_INSTALLER_PATH
+$repositoryRoot=[string]$env:AI_SETUP_REPOSITORY_ROOT
+$runtimeExecutable=[string]$env:AI_SETUP_RUNTIME_EXECUTABLE
+$updaterPath=[string]$env:AI_SETUP_UPDATER_PATH
+$updater=@(Import-Module $updaterPath -Force -PassThru)[-1]
+$resolveCandidate={
+    param($request)
+    [pscustomobject]@{Commit=$expectedCommit;Relation=$(if([string]$request.CurrentCommit-ceq$expectedCommit){'identical'}else{'ahead'})}
+}.GetNewClosure()
+$acquireCandidate={
+    param($request)
+    $start=[Diagnostics.ProcessStartInfo]::new($gitPath)
+    foreach($argument in @('-c','core.fsmonitor=false','-c','core.hooksPath=/dev/null','-C',$repositoryRoot,'archive','--format=zip',$expectedCommit)){[void]$start.ArgumentList.Add($argument)}
+    $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+    $start.Environment['GIT_CONFIG_NOSYSTEM']='1';$start.Environment['GIT_CONFIG_GLOBAL']='/dev/null';$start.Environment['GIT_TERMINAL_PROMPT']='0';$start.Environment['GIT_NO_REPLACE_OBJECTS']='1'
+    $process=[Diagnostics.Process]::new();$process.StartInfo=$start
+    $memory=[IO.MemoryStream]::new()
+    try{
+        if(-not$process.Start()){throw 'The local pinned candidate archive process could not be started.'}
+        $stderrTask=$process.StandardError.ReadToEndAsync();$process.StandardOutput.BaseStream.CopyTo($memory);$process.WaitForExit()
+        if($process.ExitCode-ne0){throw ('The local pinned candidate archive could not be created: '+$stderrTask.Result)}
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try{$archiveSha=([BitConverter]::ToString($sha.ComputeHash($memory.ToArray()))).Replace('-','').ToLowerInvariant()}
+        finally{$sha.Dispose()}
+        [pscustomobject]@{SourceRoot=$repositoryRoot;ArchiveSha256=$archiveSha}
+    }finally{$memory.Dispose();$process.Dispose()}
+}.GetNewClosure()
+$installCandidate={
+    param($request)
+    $arguments=@(
+        '-NoLogo','-NoProfile','-NonInteractive','-File',$installerPath,
+        '-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-SourceCommit',$expectedCommit,
+        '-ExpectedCurrentCommit',[string]$request.CurrentCommit,'-ExpectedUpdateMode',[string]$request.Mode,
+        '-ExpectedUpdateChannel',[string]$request.Channel,'-ExpectedUpdateRef',[string]$request.Ref,
+        '-ExpectedCurrentGeneration','v3v5','-WriterSchema','Auto'
+    )
+    & $runtimeExecutable @arguments | Out-Null
+    if($LASTEXITCODE-ne0){throw "Linux updater installer exited with code $LASTEXITCODE."}
+}.GetNewClosure()
+$workflow=& $updater.ExportedCommands['Invoke-AiInstructionsUpdateWorkflow'] -CodexHome $codexHome -ForceCheck -InstallApproved -ResolveCandidate $resolveCandidate -AcquireCandidate $acquireCandidate -InstallCandidate $installCandidate
+$workflow|ConvertTo-Json -Depth 8 -Compress
+'@
+    $run=Invoke-SetupEncodedChild -RuntimeExecutable $RuntimeExecutable -Script $childScript -Environment $childEnvironment -WorkingDirectory $RepositoryRoot -FailureCode update-failed -Context 'Linux updater workflow child'
+    $workflow=ConvertFrom-SetupOwnedJsonResult $run update-failed 'Linux updater workflow child' ([string]$Environment['HOME'])
+    $workflowDecision=Resolve-AgentEnvironmentSetupProjectionResult $workflow -AllowedActions installed
+    $childError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$run.stderr) -UserHome ([string]$Environment['HOME'])
+    if([string]$workflowDecision.code-ceq'concurrent'){throw (New-AgentEnvironmentSetupRefusal concurrent "Linux updater workflow was concurrent. Child stderr: $childError")}
+    if([string]$workflow.outcome-cne'installed'){throw (New-AgentEnvironmentSetupRefusal update-failed "Linux updater outcome '$($workflow.outcome)' was refused. Child stderr: $childError")}
+    return $workflow
+}
+
+function Invoke-SetupLinuxCloudWiring {
+    param(
+        [Parameter(Mandatory=$true)][string]$RepositoryRoot,
+        [Parameter(Mandatory=$true)][string]$Rid,
+        [Parameter(Mandatory=$true)][string]$CodexHome,
+        [Parameter(Mandatory=$true)][string]$UserHome,
+        [Parameter(Mandatory=$true)][string]$ExpectedCommit,
+        [Parameter(Mandatory=$true)][string]$RuntimeExecutable,
+        [Parameter(Mandatory=$true)][Collections.IDictionary]$Environment
+    )
+    $bundlePath=Join-Path $CodexHome 'hooks/ai-instructions-runtime/runtime-bundle.json'
+    $installedBundle=$null
+    if(Test-Path -LiteralPath $bundlePath -PathType Leaf){
+        try{$installedBundle=[IO.File]::ReadAllText($bundlePath)|ConvertFrom-Json -ErrorAction Stop}
+        catch{throw (New-AgentEnvironmentSetupRefusal update-failed 'The installed runtime bundle is invalid.')}
+    }
+    $cloudPlan=Get-AgentEnvironmentSetupCloudPlan -Rid $Rid -ExpectedCommit $ExpectedCommit -InstalledBundle $installedBundle
+    Invoke-SetupProjectionCollisionPreflight -RepositoryRoot $RepositoryRoot -CodexHome $CodexHome -UserHome $UserHome -ExpectedCommit $ExpectedCommit -RuntimeExecutable $RuntimeExecutable -Environment $Environment
+    $installerPath=Join-Path $RepositoryRoot 'scripts/install-ai-instructions-bootstrap.ps1'
+    $commonInstaller=@('-NoLogo','-NoProfile','-NonInteractive','-File',$installerPath,'-RepositoryRoot',$RepositoryRoot,'-CodexHome',$CodexHome,'-SourceCommit',$ExpectedCommit)
+    if($cloudPlan.action-ceq'install'){
+        [void](Invoke-SetupOwnedCommand -RuntimeExecutable $RuntimeExecutable -Arguments ($commonInstaller+@('-WriterSchema','V3V5')) -Environment $Environment -WorkingDirectory $RepositoryRoot -FailureCode update-failed -Context 'Linux V3V5 installer')
+        $installAction='installed'
+    }else{
+        $current=[string]$cloudPlan.currentCommit
+        if($current-ceq$ExpectedCommit){
+            $validationLauncher=Join-Path $CodexHome 'hooks/bootstrap-ai-instructions.ps1'
+            if(-not(Test-Path -LiteralPath $validationLauncher -PathType Leaf)){throw (New-AgentEnvironmentSetupRefusal update-failed 'The installed validation launcher is missing.')}
+            [void](Invoke-SetupOwnedCommand -RuntimeExecutable $RuntimeExecutable -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-File',$validationLauncher,'-ValidateOnly') -Environment $Environment -WorkingDirectory $RepositoryRoot -FailureCode update-failed -Context 'Linux same-pin validation child')
+            $installAction='current'
+        }else{
+            $relation=Invoke-SetupVerifierGit -GitPath ([string](Get-Command git -CommandType Application|Select-Object -First 1).Source) -RepositoryRoot $RepositoryRoot -Arguments @('merge-base','--is-ancestor',$current,$ExpectedCommit)
+            if($relation.ExitCode-ne0){throw (New-AgentEnvironmentSetupRefusal update-failed 'The expected setup commit is not ahead of the installed runtime pin.')}
+            [void](Invoke-SetupLinuxUpdaterChild -RepositoryRoot $RepositoryRoot -CodexHome $CodexHome -ExpectedCommit $ExpectedCommit -RuntimeExecutable $RuntimeExecutable -Environment $Environment)
+            $installAction='installed'
+        }
+    }
+    $configuration=try{[IO.File]::ReadAllText((Join-Path $CodexHome 'ai-instructions-sync.json'))|ConvertFrom-Json -ErrorAction Stop}catch{throw (New-AgentEnvironmentSetupRefusal update-failed 'The installed sync configuration is invalid.')}
+    if([int]$configuration.schemaVersion-ne5-or(@($configuration.projections.user)-join',')-cne(@('user-agents','user-claude')-join',')){throw (New-AgentEnvironmentSetupRefusal update-failed 'Linux cloud setup did not retain the V3V5 USER projections.')}
+    $activeBundle=try{[IO.File]::ReadAllText($bundlePath)|ConvertFrom-Json -ErrorAction Stop}catch{throw (New-AgentEnvironmentSetupRefusal update-failed 'The installed runtime bundle is invalid after installation or update.')}
+    if([int]$activeBundle.schemaVersion-ne3-or[string]$activeBundle.commit-cne$ExpectedCommit){throw (New-AgentEnvironmentSetupRefusal update-failed 'Linux cloud setup did not activate the expected v3 runtime pin.')}
+    $environmentEntry=Join-Path $CodexHome 'hooks/update-agent-environment.ps1'
+    # A clean same-pin rerun stays byte-identical. Apply remains intentional here:
+    # after read-only validation/preflight, it repairs manifest-owned drift while
+    # collision checks continue to preserve unmanaged bytes.
+    $applyRun=Invoke-SetupCoordinatorChild -RuntimeExecutable $RuntimeExecutable -EntryPath $environmentEntry -CodexHome $CodexHome -UserHome $UserHome -Mode Apply -Environment $Environment -WorkingDirectory $RepositoryRoot
+    $apply=ConvertFrom-SetupOwnedJsonResult $applyRun projection-failed 'USER projection Apply' $UserHome
+    $applyDecision=Resolve-AgentEnvironmentSetupProjectionResult $apply -AllowedActions @('applied','current')
+    $applyError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$applyRun.stderr) -UserHome $UserHome
+    if([string]$applyDecision.code-ceq'projection-collision'){throw (New-AgentEnvironmentSetupRefusal projection-collision "USER projection Apply refused unmanaged target bytes after the pre-mutation preflight. Child stderr: $applyError")}
+    if($null-ne$applyDecision.code){throw (New-AgentEnvironmentSetupRefusal ([string]$applyDecision.code) "USER projection Apply was refused. Child stderr: $applyError")}
+    $verifyRun=Invoke-SetupCoordinatorChild -RuntimeExecutable $RuntimeExecutable -EntryPath $environmentEntry -CodexHome $CodexHome -UserHome $UserHome -Mode VerifyOnly -Environment $Environment -WorkingDirectory $RepositoryRoot
+    $verify=ConvertFrom-SetupOwnedJsonResult $verifyRun projection-failed 'USER projection VerifyOnly' $UserHome
+    $verifyDecision=Resolve-AgentEnvironmentSetupProjectionResult $verify -AllowedActions current
+    $verifyError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$verifyRun.stderr) -UserHome $UserHome
+    if($null-ne$verifyDecision.code-or$verifyDecision.action-cne'current'){throw (New-AgentEnvironmentSetupRefusal $(if($null-ne$verifyDecision.code){[string]$verifyDecision.code}else{'projection-failed'}) "USER projection readiness verification was refused. Child stderr: $verifyError")}
+    return [pscustomobject][ordered]@{runtimeCommit=[string]$activeBundle.commit;installAction=$installAction;projectionAction=[string]$applyDecision.action}
+}
+
 $modeName = if ($Offline -and -not $Prepare) { 'offline' } else { 'prepare' }
 $exitCode = $script:SetupInternalExitCode
 $lock = $null
@@ -232,7 +675,9 @@ try {
     $archive = [IO.Path]::GetFullPath($ArchivePath)
 
     if ($Canonical) {
-        # Canonical stage: read-only. The bootstrap stage holds the setup lock.
+        # Canonical stage: re-verifies the runtime, then Linux Prepare may perform
+        # cloud installation/update and USER projection work. The bootstrap stage
+        # continues to hold the setup lock throughout this owned child.
         $expectedRuntimeReceiptPath = [IO.Path]::GetFullPath((Join-Path $layout.ReceiptDirectory $layout.RuntimeReceiptLeaf))
         if ([string]::IsNullOrWhiteSpace($RuntimeReceiptPath) -or
             -not [string]::Equals([IO.Path]::GetFullPath($RuntimeReceiptPath),$expectedRuntimeReceiptPath,[StringComparison]::Ordinal)) {
@@ -256,6 +701,12 @@ try {
         catch { throw (New-AgentEnvironmentSetupRefusal capability-unavailable ('A required platform capability is unavailable: ' + $_.Exception.Message)) }
         # S6: process scope only; nothing is persisted (D4).
         [void](Set-PlatformProcessEnvironment -Name CODEX_HOME -Value $codexHome)
+        $cloudWiring=$null
+        if($Prepare-and$rid.StartsWith('linux-',[StringComparison]::Ordinal)){
+            $cloudEnvironment=Get-AgentEnvironmentSetupChildEnvironment ([string]$runtimeReceipt.runtimeClosure.rootPath) $userHome
+            $cloudEnvironment['CODEX_HOME']=$codexHome
+            $cloudWiring=Invoke-SetupLinuxCloudWiring -RepositoryRoot $repositoryRoot -Rid $rid -CodexHome $codexHome -UserHome $userHome -ExpectedCommit $ExpectedCommit -RuntimeExecutable ([string]$runtimeReceipt.executablePath) -Environment $cloudEnvironment
+        }
         Write-SetupLine (ConvertTo-AgentEnvironmentSetupJsonLine ([pscustomobject][ordered]@{
             schemaVersion = 1; stage = 'canonical'
             executablePath = (ConvertTo-AgentEnvironmentSetupHomePath ([string]$runtimeReceipt.executablePath) $userHome)
@@ -264,6 +715,9 @@ try {
             codexHome = (ConvertTo-AgentEnvironmentSetupHomePath ([Environment]::GetEnvironmentVariable('CODEX_HOME')) $userHome)
             processPathVerified = $true
             capabilities = @($capabilities.capabilities | ForEach-Object { [pscustomobject][ordered]@{ name = [string]$_.name; status = [string]$_.status } })
+            runtimeCommit = $(if($null-eq$cloudWiring){$null}else{[string]$cloudWiring.runtimeCommit})
+            installAction = $(if($null-eq$cloudWiring){$null}else{[string]$cloudWiring.installAction})
+            projectionAction = $(if($null-eq$cloudWiring){$null}else{[string]$cloudWiring.projectionAction})
         }))
         $exitCode = 0
     } else {
@@ -358,15 +812,16 @@ try {
     $runtimeDirectory = [string]$runtimeReceipt.runtimeClosure.rootPath
     $arguments = @('-NoLogo','-NoProfile','-NonInteractive','-File',(Join-Path $PSScriptRoot 'setup-agent-environment.ps1'),'-Canonical',$(if ($Prepare) { '-Prepare' } else { '-Offline' }),'-ExpectedCommit',$ExpectedCommit,'-ArchivePath',$archive,'-RuntimeReceiptPath',$verifiedRuntimeReceiptPath)
     $child = Invoke-PlatformPreparationCommand -Command $runtimeExecutable -Arguments $arguments -Environment (Get-AgentEnvironmentSetupChildEnvironment $runtimeDirectory $userHome) -WorkingDirectory $layout.SetupRoot -TimeoutMilliseconds 1800000
-    if (-not [string]::IsNullOrWhiteSpace([string]$child.stderr)) { Write-SetupDiagnostic ('canonical stage: ' + (ConvertTo-AgentEnvironmentSetupSanitizedText ([string]$child.stderr).Trim() $userHome)) }
+    $canonicalChildError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$child.stderr) -UserHome $userHome
+    if($canonicalChildError-cne'<empty>'){Write-SetupDiagnostic ('canonical stage: '+$canonicalChildError)}
     $childLines = @(([string]$child.stdout).Split("`n") | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_.Length -gt 0 })
-    if ($childLines.Count -ne 1) { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The canonical stage did not return exactly one JSON line.') }
-    try { $childResult = $childLines[0] | ConvertFrom-Json -ErrorAction Stop } catch { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The canonical stage returned invalid JSON.') }
+    if ($childLines.Count -ne 1) { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed "The canonical stage did not return exactly one JSON line. Child stderr: $canonicalChildError") }
+    try { $childResult = $childLines[0] | ConvertFrom-Json -ErrorAction Stop } catch { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed "The canonical stage returned invalid JSON. Child stderr: $canonicalChildError") }
     if ([int]$child.exitCode -ne 0) {
         $childCode = if ($null -ne $childResult.PSObject.Properties['code']) { [string]$childResult.code } else { 'internal-error' }
         if ((Get-AgentEnvironmentSetupExitCode $childCode) -ne [int]$child.exitCode) { $childCode = 'internal-error' }
         $recoverCommand = if ($null -ne $childResult.PSObject.Properties['recoverCommand']) { [string]$childResult.recoverCommand } else { $null }
-        throw (New-AgentEnvironmentSetupRefusal $childCode 'The canonical stage refused.' $recoverCommand)
+        throw (New-AgentEnvironmentSetupRefusal $childCode "The canonical stage refused. Child stderr: $canonicalChildError" $recoverCommand)
     }
     if ([string]$childResult.stage -cne 'canonical' -or $childResult.processPathVerified -isnot [bool] -or -not $childResult.processPathVerified -or [string]$childResult.powerShellVersion -cne $asset.Version -or [string]$childResult.codexHome -cne '~/.codex' -or [string]$childResult.executablePath -cne (ConvertTo-AgentEnvironmentSetupHomePath $runtimeExecutable $userHome)) {
         throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The canonical stage evidence does not match the pinned runtime.')
@@ -382,9 +837,10 @@ try {
         processPathVerified = [bool]$childResult.processPathVerified
         runtimeAction = $runtimeAction
     }
-    $receipt = New-AgentEnvironmentSetupReceipt -Mode $modeName -Result $(if ($Prepare) { 'prepared-runtime-only' } else { 'verified-runtime-only' }) -Rid $rid `
+    $cloudCompleted=$null-ne$childResult.runtimeCommit
+    $receipt = New-AgentEnvironmentSetupReceipt -Mode $modeName -Result $(if($cloudCompleted){'completed'}elseif ($Prepare) { 'prepared-runtime-only' } else { 'verified-runtime-only' }) -Rid $rid `
         -SetupCommit $ExpectedCommit -PolicySha256 $policyInfo.Sha256 -PowerShell $powerShell -DotNetVersion ([string]$childResult.dotNetVersion) `
-        -Capabilities @($childResult.capabilities) -RuntimeAction $runtimeAction
+        -Capabilities @($childResult.capabilities) -RuntimeAction $runtimeAction -RuntimeCommit $childResult.runtimeCommit -InstallAction $childResult.installAction -ProjectionAction $childResult.projectionAction
     $line = ConvertTo-AgentEnvironmentSetupJsonLine $receipt
     Publish-AgentEnvironmentSetupFile -SetupRoot $layout.SetupRoot -Directory 'receipts' -Leaf $layout.SetupReceiptLeaf -Bytes ([Text.UTF8Encoding]::new($false).GetBytes($line + "`n"))
     Write-SetupLine $line

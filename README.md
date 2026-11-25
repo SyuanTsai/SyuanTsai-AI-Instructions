@@ -365,7 +365,7 @@ JSON 結果固定包含 `outcome` 與 `exitCode`：`0` 表示成功或目前已�
 
 ## Linux／macOS setup
 
-這個 setup entry point 支援 Linux 與 macOS（不含 WSL），用於取得並驗證 canonical pwsh。它目前仍只完成 P10a 範圍；S7～S9（runtime 安裝、USER projections、readiness）由 P10b 接線，receipt 會如實標為 `not-implemented-until-p10b`，不應把 setup 的成功誤解為這三個步驟已完成。
+這個 setup entry point 支援 Linux 與 macOS（不含 WSL）。Linux 預設會準備 canonical pwsh、安裝或更新 v3/v5 runtime，並把 `user-agents` 與 `user-claude` 投影到目前的 USER home；macOS 仍只執行既有的 P10a runtime 準備／驗證流程。
 
 取得方式：以 git clone 取得 Repository，checkout 固定的 full commit SHA，並把同一個 SHA 傳給 `--expected-commit`。Setup 會先以自包含 verifier、在停用 Git replace objects 的情況下確認 `HEAD` 等於該值；六個 setup 檔案及 `scripts/platform-runtime.psd1` 宣告的完整 platform runtime closure，逐檔比較 expected commit blob、stage-zero index blob 與 `hash-object --no-filters` 的 raw worktree blob。這條路徑不執行 repository-local filter、textconv、diff driver、hook 或 fsmonitor；完成前不載入 Repository module。
 
@@ -373,7 +373,7 @@ JSON 結果固定包含 `outcome` 與 `exitCode`：`0` 表示成功或目前已�
 git clone https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git ai-instructions
 cd ai-instructions
 git checkout --detach <40 位小寫 commit SHA>
-sh scripts/setup-agent-environment.sh --expected-commit <同一個 SHA> --prepare
+sh scripts/setup-agent-environment.sh --expected-commit <同一個 SHA>
 sh scripts/setup-agent-environment.sh --expected-commit <同一個 SHA> --offline
 ```
 
@@ -384,11 +384,12 @@ git add --renormalize .
 git checkout-index --force --all
 ```
 
-- `--prepare`：允許網路。依 `scripts/setup-agent-environment.policy.tsv`（由 `setup-agent-environment.policy.json` 衍生）只以 https、TLS 1.2 以上與逾時限制下載官方 PowerShell 7.6.6 release asset。下載、雜湊與解壓只使用本次執行的私有 snapshot；取得 setup lock 後才以 WAL 發布 `0600` shared cache。第一次以 create-only rename 發布不可預測的 canonical pwsh 目錄，durably flush `pwsh/` parent 並 read back 確認結果後，才開始發布 pointer receipt；之後重跑只重驗 receipt 指向的目錄，不重新安裝。結果為 `prepared-runtime-only`。
+- Linux 未指定 mode 時等同 `--prepare`；macOS 仍須明確指定 `--prepare` 或 `--offline`。`--prepare` 允許網路，依 `scripts/setup-agent-environment.policy.tsv`（由 `setup-agent-environment.policy.json` 衍生）下載並驗證官方 PowerShell 7.6.6 release asset。runtime 首次 publication 仍以 create-only rename、`durably flushes` parent 與 readback 完成既有 WAL 契約。Linux 首次執行以 installer 的 `-WriterSchema V3V5` 建立 config v5／bundle v3，再以 public USER coordinator Apply 及 VerifyOnly；成功 receipt 為 `completed`，S7～S9 都有 completed evidence，`runtimeCommit` 等於 expected commit。
+- Linux 重跑依 pin 選擇唯讀驗證或既有 updater workflow：相同 commit 先以 installed launcher 的 `-ValidateOnly` 驗證，再執行 projection preflight／Apply／VerifyOnly。乾淨的相同 pin 重跑保持 `CODEX_HOME` 與受管 USER trees byte-identical；若 manifest-owned 檔案發生受管 drift，Apply 會修復受管內容，而 collision／ownership 檢查會保留 unmanaged bytes 不變。expected commit 前進時只接受目前 installed pin 的 descendant，並在獨立 pwsh 子程序中安裝新 pin、以 `Auto` 保持 V3V5，接著重新 Apply／VerifyOnly projections。所有子程序均以關閉的 stdin、`-NoProfile -NonInteractive` 執行。
 - `--offline`：不連網，只讀 cache 並重驗既有 canonical pwsh；cache 必須是目前 uid 擁有、link count 1、`0600` 的一般檔案。Setup 會以 no-follow 方式複製到本次 private temp snapshot，後續 hash、解壓與 PowerShell handoff 只使用該 snapshot。cache 缺少、metadata／hash 不符或尚未 `--prepare` 都會以 typed exit code 失敗，不做任何更新。結果為 `verified-runtime-only`。
 - Setup root 固定為 `$HOME/.local/share/ai-instructions-setup`（不讀 XDG）：`cache/` 放已驗證的 archive，`pwsh/<version>-<rid>-<random>/` 放 immutable canonical pwsh attempt，`pwsh-tmp/` 是 pwsh hand-off 使用、持久存在且會驗證 owner 與 `0700` mode 的 private `TMPDIR`，`receipts/runtime-<version>-<rid>.json` 是唯一 current pointer，另有 `setup-receipt.json`（`0600`）。`tmp/run.<pid>.<random>/` 只屬於單次執行；結束時只會 best-effort 移除本次已知檔案與空目錄，不遞迴刪除、掃描或接管舊 tmp tree。強制終止可能留下私有 tmp 或未被 receipt 指向的 runtime orphan；不要用自動清理猜測 ownership。重驗失敗時 fail closed，不會自動重裝；同時執行時以 setup lock 序列化，被占用時回 `concurrent`，結束時不持有 lock。
-- Receipt 同時以單行 JSON 輸出到 stdout，欄位含 `schemaVersion`、`result`、`code`、`exitCode`、OS／architecture／RID、`setupCommit`、`runtimeCommit`（P10a 固定為 `null`）、policy hash、pwsh 路徑與 version、.NET version、capability 名稱與狀態，以及 S5～S9 步驟狀態。路徑一律寫成 `~/...`，不含使用者名稱、token 或 site。
-- `CODEX_HOME` 只在 setup 的 process scope 設為 `~/.codex`；外部已設成其他值時回 `codex-home-conflict`。`CODEX_HOME` 或 `$HOME` 下若有中斷的 install／agent-environment transaction，setup 回 `interrupted-install` 並附上 recover 指令，不會自動 recover。Setup 自己在 publication swap 留下的 durable journal 則會在取得 setup lock 後依 recorded state 安全完成或回復；無法證明狀態時同樣 fail closed。
+- Receipt 同時以單行 JSON 輸出到 stdout，欄位含 `schemaVersion`、`result`、`code`、`exitCode`、OS／architecture／RID、`setupCommit`、`runtimeCommit`、policy hash、pwsh 路徑與 version、.NET version、capability 名稱與狀態，以及 S5～S9 步驟狀態。Linux completed receipt 的 `runtimeCommit` 為 expected commit；P10a runtime-only receipt 仍為 `null`。路徑一律寫成 `~/...`，不含使用者名稱、token 或 site。
+- `CODEX_HOME` 只在 setup 的 process scope 設為 `~/.codex`；外部已設成其他值時回 `codex-home-conflict`。Transaction store 不存在或為空的實體目錄時視為 clean；若 store 是 link、非目錄、不可列舉，或內含任何 entry，setup 回 `interrupted-install` 並附上 recover 指令，不會自動 recover。Setup 自己在 publication swap 留下的 durable journal 則會在取得 setup lock 後依 recorded state 安全完成或回復；無法證明狀態時同樣 fail closed。
 - Windows 也可直接執行 `pwsh -NoProfile -NonInteractive -File scripts/setup-agent-environment.ps1 -Prepare|-Offline -ExpectedCommit <SHA> -ArchivePath <本機 zip>`。zip 必須是 policy 指定的官方 asset（例如 `PowerShell-7.6.6-win-x64.zip`），由使用者自行從 PowerShell 官方 GitHub release 下載；policy 就是同一個 commit 的 `scripts/setup-agent-environment.policy.json`，setup 會驗證檔名與 SHA-256。
 
 Runtime 發布的 crash-state 契約如下；任何狀態都不會回收或覆寫已發布的 runtime 目錄：
@@ -407,8 +408,7 @@ Durability closure rule：任何 commit marker（`journal.json`、runtime pointe
 
 已知限制：
 
-- K13：`~/.claude/CLAUDE.md` managed section 尚未改用 canonical pwsh 的絕對路徑，雲端 PATH 上沒有 pwsh 時規則無法直接執行；待 P9c2 處理。
-- P10b 尚未接線：P10a 不呼叫 installer、updater 或 coordinator。
+- K13（由 SYP-535 另行追蹤）：`~/.claude/CLAUDE.md` managed section 保持 verified runtime 產生的原樣；雲端 PATH 沒有 pwsh 時，該區段的 rules 仍無法直接執行。
 - 祖先目錄不得為 symbolic link，且須屬於 root 或目前使用者、不可 group／other 寫入（sticky 例外）。macOS 的 `/var` 等 symlink 祖先，以及 Fedora Atomic 的 `/home` → `/var/home`，會被拒絕。
 - A1：Unix 的保證是 cooperative lock、不跟隨 link 與重驗；同帳號、不遵守 lock 的惡意 writer 不在保證範圍內。
 - P8：所有 projection root 與 USER home 必須在同一個 filesystem；setup 的暫存與 cache 也放在 setup root 底下以便同 filesystem `mv`。
@@ -418,7 +418,7 @@ Typed exit code（shell 與 PowerShell 共用，定義在 `scripts/agent-environ
 
 | Exit code | Code | 說明 |
 | --- | --- | --- |
-| 0 | `success` | 完成（`prepared-runtime-only` 或 `verified-runtime-only`） |
+| 0 | `success` | 完成（`prepared-runtime-only`、`verified-runtime-only` 或 `completed`） |
 | 1 | `internal-error` | 未預期的錯誤 |
 | 10 | `usage` | 參數錯誤或缺少必填參數 |
 | 11 | `unsupported-platform` | OS／architecture／musl 沒有 pinned asset |
@@ -436,13 +436,16 @@ Typed exit code（shell 與 PowerShell 共用，定義在 `scripts/agent-environ
 | 23 | `runtime-verification-failed` | canonical pwsh 準備或重驗失敗（不自動重裝） |
 | 24 | `runtime-baseline-unavailable` | 不是 PowerShell 7 加 .NET 8 以上 |
 | 25 | `capability-unavailable` | 必要的 platform capability 不可用 |
-| 26 | `concurrent` | 另一個 setup 正持有 setup lock |
-| 27 | `interrupted-install` | `CODEX_HOME` 或 `$HOME` 有中斷的 transaction／legacy residue |
+| 26 | `concurrent` | 另一個 setup、updater 或 USER projection 執行正持有對應 lock |
+| 27 | `interrupted-install` | `CODEX_HOME` 或 `$HOME` 有非空或不安全的 transaction store／legacy residue |
 | 28 | `codex-home-conflict` | `CODEX_HOME` 已設成 `~/.codex` 以外的值 |
+| 29 | `projection-collision` | USER projection target 已有無法證明 ownership 的 unmanaged bytes；在 installer／updater mutation 前拒絕，Apply 仍會再次檢查 |
+| 30 | `update-failed` | Linux installer／updater 未能產生並驗證要求的 V3V5 pin |
+| 31 | `projection-failed` | USER projection Apply／VerifyOnly 失敗或 readiness 不一致 |
 
 ## Linux/macOS setup
 
-This setup entry point supports Linux and macOS, but not WSL, for acquiring and verifying the canonical pwsh. It still implements only the P10a scope; S7-S9 (runtime install, USER projections and readiness) belong to P10b and are reported accurately as `not-implemented-until-p10b`. A successful setup receipt must not be read as evidence that those three steps ran.
+This setup entry point supports Linux and macOS, but not WSL. Linux prepares the canonical pwsh, installs or updates the v3/v5 runtime, and projects `user-agents` plus `user-claude` into the current USER home. macOS retains the existing P10a runtime preparation and verification behavior.
 
 How to obtain it: git clone the repository, check out a fixed full commit SHA, and pass the same SHA to `--expected-commit`. Before importing any repository module, a self-contained verifier disables Git replace objects and checks that `HEAD` equals that commit. For each of the six setup files and every member of the complete platform runtime closure declared by `scripts/platform-runtime.psd1`, it directly compares the expected commit blob, the stage-zero index blob, and the raw worktree blob from `hash-object --no-filters`. This path does not execute repository-local filters, textconv, diff drivers, hooks, or fsmonitor.
 
@@ -450,7 +453,7 @@ How to obtain it: git clone the repository, check out a fixed full commit SHA, a
 git clone https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git ai-instructions
 cd ai-instructions
 git checkout --detach <40-character lowercase commit SHA>
-sh scripts/setup-agent-environment.sh --expected-commit <same SHA> --prepare
+sh scripts/setup-agent-environment.sh --expected-commit <same SHA>
 sh scripts/setup-agent-environment.sh --expected-commit <same SHA> --offline
 ```
 
@@ -461,11 +464,12 @@ git add --renormalize .
 git checkout-index --force --all
 ```
 
-- `--prepare` may use the network. It downloads the official PowerShell 7.6.6 release asset named by `scripts/setup-agent-environment.policy.tsv` (derived from `setup-agent-environment.policy.json`) over https with TLS 1.2+ and timeouts. Downloading, hashing and extraction use only a private per-run snapshot; the `0600` shared cache is published through the WAL only after setup-lock acquisition. The first run uses a create-only rename for an unpredictable canonical pwsh directory, durably flushes the `pwsh/` parent, and reads back the result before pointer-receipt publication can begin. Reruns only re-verify the receipt-named directory and never reinstall. Result: `prepared-runtime-only`.
+- On Linux, omitting the mode means `--prepare`; macOS still requires an explicit `--prepare` or `--offline`. Prepare may use the network and verifies the official PowerShell 7.6.6 asset. A first Linux run calls the installer with `-WriterSchema V3V5`, then runs public USER Apply and VerifyOnly for `user-agents` and `user-claude`. A successful receipt is `completed`, records completed S7-S9 evidence, and binds `runtimeCommit` to the expected commit.
+- Linux reruns select read-only validation or the existing updater workflow by pin. The same commit first uses the installed launcher's `-ValidateOnly` path, then runs projection preflight, Apply, and VerifyOnly. A clean same-pin rerun remains byte-identical across `CODEX_HOME` and the managed USER trees; if a manifest-owned file has managed drift, Apply repairs the managed content while collision and ownership checks leave unmanaged bytes untouched. A changed expected commit must be a descendant of the installed pin; an isolated pwsh child runs the updater and installs it with `Auto` so V3V5 remains active, then Apply/VerifyOnly runs again. Every child receives closed stdin and `-NoProfile -NonInteractive`.
 - `--offline` never uses the network. The cache must be a regular file owned by the current uid, with link count 1 and mode `0600`. Setup makes a no-follow copy into its private per-run temp snapshot; all subsequent hashing, extraction and PowerShell handoff use only that snapshot. A missing cache, invalid metadata, a hash mismatch or a missing `--prepare` is a typed failure with no update. Result: `verified-runtime-only`.
 - The setup root is fixed at `$HOME/.local/share/ai-instructions-setup` (XDG is not read): `cache/` holds verified archives, `pwsh/<version>-<rid>-<random>/` immutable canonical pwsh attempts, `pwsh-tmp/` is the persistent private `TMPDIR` for the pwsh hand-off with owner and `0700` mode checks, and `receipts/runtime-<version>-<rid>.json` is the only current pointer alongside `setup-receipt.json` (`0600`). `tmp/run.<pid>.<random>/` belongs only to one invocation; the exit trap best-effort removes known files and empty directories from that invocation, but never recursively deletes, scans or adopts an older tmp tree. Forced termination can leave private tmp or a runtime orphan not named by a receipt; automated cleanup must not guess ownership. A failed re-verification fails closed without reinstalling. Concurrent runs are serialized by the setup lock and a busy lock returns `concurrent`; no lock is held after exit.
-- The receipt is also printed to stdout as one JSON line with `schemaVersion`, `result`, `code`, `exitCode`, OS/architecture/RID, `setupCommit`, `runtimeCommit` (always `null` in P10a), the policy hash, pwsh path and version, .NET version, capability names and statuses, and the S5-S9 step states. Paths are always `~/...`; no user name, token or site is recorded.
-- `CODEX_HOME` is set to `~/.codex` for the setup process scope only; a different pre-set value returns `codex-home-conflict`. An interrupted install or agent-environment transaction under `CODEX_HOME` or `$HOME` returns `interrupted-install` with a recover command; setup never recovers those external transactions automatically. A durable journal left by setup's own publication swap is safely completed or rolled back under the setup lock according to its recorded state; an unprovable state still fails closed.
+- The receipt is also printed to stdout as one JSON line with `schemaVersion`, `result`, `code`, `exitCode`, OS/architecture/RID, `setupCommit`, `runtimeCommit`, the policy hash, pwsh path and version, .NET version, capability names and statuses, and the S5-S9 step states. A completed Linux receipt binds `runtimeCommit` to the expected commit; P10a runtime-only receipts keep it `null`. Paths are always `~/...`; no user name, token or site is recorded.
+- `CODEX_HOME` is set to `~/.codex` for the setup process scope only; a different pre-set value returns `codex-home-conflict`. An absent transaction store or an empty physical directory is clean. A linked store, non-directory store, unreadable store, or any entry under an install or agent-environment transaction store in `CODEX_HOME` or `$HOME` returns `interrupted-install` with a recover command; setup never recovers those external transactions automatically. A durable journal left by setup's own publication swap is safely completed or rolled back under the setup lock according to its recorded state; an unprovable state still fails closed.
 - On Windows run `pwsh -NoProfile -NonInteractive -File scripts/setup-agent-environment.ps1 -Prepare|-Offline -ExpectedCommit <SHA> -ArchivePath <local zip>`. The zip must be the official asset named by the policy (for example `PowerShell-7.6.6-win-x64.zip`), downloaded by the user from the official PowerShell GitHub release; the policy is `scripts/setup-agent-environment.policy.json` at the same commit, and setup verifies the file name and SHA-256.
 
 Runtime publication has the following crash-state contract; no state reclaims or overwrites a published runtime directory:
@@ -484,8 +488,7 @@ Manual persistence (D4): setup never edits shell profiles such as `~/.profile` a
 
 Known limitations:
 
-- K13: the `~/.claude/CLAUDE.md` managed section does not yet use the canonical pwsh absolute path, so its rules cannot run when pwsh is not on PATH; P9c2 owns this.
-- P10b is not wired yet: P10a never calls the installer, updater or coordinator.
+- K13 (tracked separately by SYP-535): the `~/.claude/CLAUDE.md` managed section remains exactly as the verified runtime produces it, so its rules cannot run directly on a cloud host whose PATH has no pwsh.
 - Ancestor directories must not be symbolic links, must be owned by root or the current user, and must not be group/other writable unless sticky. macOS symlinked ancestors such as `/var` and Fedora Atomic `/home` → `/var/home` are refused.
 - A1: on Unix the guarantee is a cooperative lock, no link following and re-verification; a same-account malicious writer that ignores the lock is out of scope.
 - P8: all projection roots and the USER home must share one filesystem; the setup temp and cache also live under the setup root so `mv` stays on one filesystem.
@@ -495,7 +498,7 @@ Typed exit codes (shared by the shell and PowerShell entry points, defined in `s
 
 | Exit code | Code | Meaning |
 | --- | --- | --- |
-| 0 | `success` | Completed (`prepared-runtime-only` or `verified-runtime-only`) |
+| 0 | `success` | Completed (`prepared-runtime-only`, `verified-runtime-only`, or `completed`) |
 | 1 | `internal-error` | Unexpected failure |
 | 10 | `usage` | Invalid or missing arguments |
 | 11 | `unsupported-platform` | No pinned asset for the OS/architecture, or musl |
@@ -513,9 +516,12 @@ Typed exit codes (shared by the shell and PowerShell entry points, defined in `s
 | 23 | `runtime-verification-failed` | Preparing or re-verifying the canonical pwsh failed (no automatic reinstall) |
 | 24 | `runtime-baseline-unavailable` | Not PowerShell 7 on .NET 8 or later |
 | 25 | `capability-unavailable` | A required platform capability is unavailable |
-| 26 | `concurrent` | Another setup holds the setup lock |
-| 27 | `interrupted-install` | Interrupted transaction or legacy residue under `CODEX_HOME` or `$HOME` |
+| 26 | `concurrent` | Another setup, updater, or USER projection run holds the corresponding lock |
+| 27 | `interrupted-install` | A non-empty or unsafe transaction store, or legacy residue, exists under `CODEX_HOME` or `$HOME` |
 | 28 | `codex-home-conflict` | `CODEX_HOME` is set to a value other than `~/.codex` |
+| 29 | `projection-collision` | A USER projection target contains unmanaged bytes without ownership evidence; setup refuses before installer/updater mutation and Apply checks again |
+| 30 | `update-failed` | The Linux installer/updater did not produce and verify the requested V3V5 pin |
+| 31 | `projection-failed` | USER projection Apply/VerifyOnly failed or readiness was inconsistent |
 
 ## 舊 REPO Skills 遷移
 

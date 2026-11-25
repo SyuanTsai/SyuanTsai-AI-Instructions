@@ -34,6 +34,9 @@ $script:AgentEnvironmentSetupExitCodes = [ordered]@{
     'concurrent' = 26
     'interrupted-install' = 27
     'codex-home-conflict' = 28
+    'projection-collision' = 29
+    'update-failed' = 30
+    'projection-failed' = 31
 }
 
 # K2/K4: the six files bound to --expected-commit.
@@ -76,6 +79,71 @@ function Get-AgentEnvironmentSetupExitCode {
 function Get-AgentEnvironmentSetupBoundFiles { return [string[]]@($script:AgentEnvironmentSetupBoundFiles) }
 function Get-AgentEnvironmentSetupRequiredCapabilities { return [string[]]@($script:AgentEnvironmentSetupRequiredCapabilities) }
 function Get-AgentEnvironmentSetupReceiptFieldNames { return [string[]]@($script:AgentEnvironmentSetupReceiptFields) }
+
+function Get-AgentEnvironmentSetupCloudPlan {
+    param(
+        [Parameter(Mandatory = $true)][string] $Rid,
+        [Parameter(Mandatory = $true)][string] $ExpectedCommit,
+        [AllowNull()] $InstalledBundle
+    )
+    if ($ExpectedCommit -cnotmatch '^[0-9a-f]{40}$') { throw (New-AgentEnvironmentSetupRefusal usage 'The cloud setup commit is invalid.') }
+    if (-not $Rid.StartsWith('linux-',[StringComparison]::Ordinal)) {
+        return [pscustomobject][ordered]@{ action='none'; candidateState=$null; currentCommit=$null }
+    }
+    if ($null -eq $InstalledBundle) {
+        return [pscustomobject][ordered]@{ action='install'; candidateState='absent'; currentCommit=$null }
+    }
+    if ($null -eq $InstalledBundle.PSObject.Properties['schemaVersion'] -or [int]$InstalledBundle.schemaVersion -ne 3 -or
+        $null -eq $InstalledBundle.PSObject.Properties['commit'] -or [string]$InstalledBundle.commit -cnotmatch '^[0-9a-f]{40}$') {
+        throw (New-AgentEnvironmentSetupRefusal update-failed 'Linux cloud setup requires an installed v3/v5 runtime or an empty CODEX_HOME.')
+    }
+    $currentCommit = [string]$InstalledBundle.commit
+    return [pscustomobject][ordered]@{
+        action='update'
+        candidateState=$(if ($currentCommit -ceq $ExpectedCommit) { 'current' } else { 'new-pin' })
+        currentCommit=$currentCommit
+    }
+}
+
+function Resolve-AgentEnvironmentSetupProjectionResult {
+    param(
+        [Parameter(Mandatory = $true)] $Result,
+        [Parameter(Mandatory = $true)][ValidateSet('applied','current','planned','installed')][string[]] $AllowedActions
+    )
+    $outcome = if ($null -ne $Result.PSObject.Properties['outcome']) { [string]$Result.outcome } else { '' }
+    $exitCode = if ($null -ne $Result.PSObject.Properties['exitCode']) { [int]$Result.exitCode } else { 1 }
+    if ($exitCode -eq 0 -and $outcome -cin $AllowedActions) {
+        return [pscustomobject][ordered]@{ action=$outcome.ToLowerInvariant(); code=$null }
+    }
+    if ($exitCode -eq 3 -or $outcome -ceq 'concurrent') {
+        return [pscustomobject][ordered]@{ action='refuse'; code='concurrent' }
+    }
+    $details = if ($null -ne $Result.PSObject.Properties['failureDetails']) { @($Result.failureDetails) } else { @() }
+    if (@($details | Where-Object { $null -ne $_.PSObject.Properties['code'] -and [string]$_.code -ceq 'unmanaged-collision' }).Count -gt 0) {
+        return [pscustomobject][ordered]@{ action='refuse'; code='projection-collision' }
+    }
+    return [pscustomobject][ordered]@{ action='refuse'; code='projection-failed' }
+}
+
+function Resolve-AgentEnvironmentSetupSkillIds {
+    param(
+        [Parameter(Mandatory = $true)] $Catalog,
+        [Parameter(Mandatory = $true)] $Selection,
+        [AllowEmptyCollection()][object[]] $CapabilityEvidence = @(),
+        [AllowEmptyCollection()][string[]] $InstalledSkillIds = @(),
+        [Parameter(Mandatory = $true)][string] $SelectionSource
+    )
+    if ([string]::IsNullOrWhiteSpace($SelectionSource)) { throw 'The expected-commit Skills selection resolver source is empty.' }
+    $module = $null
+    try {
+        $moduleName = 'agent-environment-setup-selection-' + [Guid]::NewGuid().ToString('N')
+        $module = New-Module -Name $moduleName -ScriptBlock ([scriptblock]::Create($SelectionSource))
+        $command = $module.ExportedCommands['Resolve-SkillsSelection']
+        if ($null -eq $command) { throw 'The expected-commit Skills selection resolver does not export Resolve-SkillsSelection.' }
+        return [string[]]@(& $command -Catalog $Catalog -Selection $Selection -CapabilityEvidence $CapabilityEvidence -InstalledSkillIds $InstalledSkillIds -WarningAction SilentlyContinue)
+    }
+    finally { if ($null -ne $module) { Remove-Module $module.Name -Force -ErrorAction SilentlyContinue } }
+}
 
 function New-AgentEnvironmentSetupRefusal {
     param([Parameter(Mandatory = $true)][string] $Code, [Parameter(Mandatory = $true)][string] $Message, [string] $RecoverCommand)
@@ -275,7 +343,71 @@ function ConvertTo-AgentEnvironmentSetupSanitizedText {
     $options = if ($IsWindows) { [Text.RegularExpressions.RegexOptions]::IgnoreCase } else { [Text.RegularExpressions.RegexOptions]::None }
     $result = $Text
     foreach ($variant in @($homePath,$homePath.Replace('\','/'))) { $result = [regex]::Replace($result,[regex]::Escape($variant),'~',$options) }
+    $cultureInvariant = [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    $result = [regex]::Replace($result,'\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\))','',$cultureInvariant)
+    $result = [regex]::Replace($result,'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]','',$cultureInvariant)
+    $result = [regex]::Replace($result,'(?im)\b(authorization|proxy-authorization|token|secret|password|passwd|api[_-]?key|credential)(\s*[:=]\s*)([^\s;]+)','$1$2[REDACTED]',$cultureInvariant)
+    $result = [regex]::Replace($result,'(?i)\bBearer\s+[^\s;]+','Bearer [REDACTED]',$cultureInvariant)
+    $result = [regex]::Replace($result,'(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^@/\s]+@','$1[REDACTED]@',$cultureInvariant)
     return $result
+}
+
+function Get-AgentEnvironmentSetupChildErrorLine {
+    param([AllowNull()][string] $Stderr, [Parameter(Mandatory = $true)][string] $UserHome)
+    $diagnostic = $Stderr
+    if (-not [string]::IsNullOrWhiteSpace($diagnostic) -and $diagnostic.TrimStart().StartsWith('#< CLIXML',[StringComparison]::Ordinal)) {
+        $serialized = [regex]::Replace($diagnostic,'^\s*#< CLIXML\s*','',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
+        try {
+            $records = @([Management.Automation.PSSerializer]::Deserialize($serialized))
+            $recordText = foreach ($record in $records) {
+                if ($null -eq $record) { continue }
+                $candidate = $null
+                $exceptionProperty = $record.PSObject.Properties['Exception']
+                if ($null -ne $exceptionProperty -and $null -ne $exceptionProperty.Value) {
+                    $messageProperty = $exceptionProperty.Value.PSObject.Properties['Message']
+                    if ($null -ne $messageProperty) { $candidate = [string]$messageProperty.Value }
+                }
+                if ([string]::IsNullOrWhiteSpace($candidate)) {
+                    $messageProperty = $record.PSObject.Properties['Message']
+                    if ($null -ne $messageProperty) { $candidate = [string]$messageProperty.Value }
+                }
+                if ([string]::IsNullOrWhiteSpace($candidate)) { $candidate = [string]$record }
+                if (-not [string]::IsNullOrWhiteSpace($candidate)) { $candidate }
+            }
+            $diagnostic = if (@($recordText).Count -eq 0) { '<unreadable serialized child stderr>' } else { @($recordText) -join "`n" }
+        }
+        catch { $diagnostic = '<unreadable serialized child stderr>' }
+    }
+    $sanitized = ConvertTo-AgentEnvironmentSetupSanitizedText $diagnostic $UserHome
+    $lines = @(([string]$sanitized).Split("`n") | ForEach-Object { $_.TrimEnd("`r").Trim() } | Where-Object { $_.Length -gt 0 })
+    if ($lines.Count -eq 0) { return '<empty>' }
+    $selected = if ($lines.Count -le 4) { @($lines) } else { @($lines[0]) + @($lines | Select-Object -Last 3) }
+    $parts = [Collections.Generic.List[string]]::new()
+    foreach ($line in $selected) {
+        $normalized = [regex]::Replace([string]$line,'\s+',' ',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
+        if ($normalized.Length -gt 160) { $normalized = $normalized.Substring(0,157) + '...' }
+        $parts.Add($normalized)
+    }
+    $summary = $parts -join ' | '
+    if ($summary.Length -gt 512) { $summary = $summary.Substring(0,509) + '...' }
+    return $summary
+}
+
+function Get-AgentEnvironmentSetupChildOutputSummary {
+    param([AllowNull()][string] $Stdout, [Parameter(Mandatory = $true)][string] $UserHome)
+    $sanitized = ConvertTo-AgentEnvironmentSetupSanitizedText $Stdout $UserHome
+    $lines = @(([string]$sanitized).Split("`n") | ForEach-Object { $_.TrimEnd("`r").Trim() } | Where-Object { $_.Length -gt 0 })
+    if ($lines.Count -eq 0) { return '<empty>' }
+    $parts = [Collections.Generic.List[string]]::new()
+    foreach ($line in @($lines | Select-Object -First 3)) {
+        $normalized = [regex]::Replace([string]$line,'\s+',' ',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
+        if ($normalized.Length -gt 160) { $normalized = $normalized.Substring(0,157) + '...' }
+        $parts.Add($normalized)
+    }
+    if ($lines.Count -gt 3) { $parts.Add("... (+$($lines.Count-3) lines)") }
+    $summary = $parts -join ' | '
+    if ($summary.Length -gt 512) { $summary = $summary.Substring(0,509) + '...' }
+    return $summary
 }
 
 # Runtime receipt persistence: Resolve-PlatformPowerShell returns absolute paths.
@@ -359,6 +491,23 @@ function Get-AgentEnvironmentSetupEntry {
     return $null
 }
 
+function Test-AgentEnvironmentSetupTransactionStoreResidue {
+    param([AllowNull()] $Entry)
+    if ($null -eq $Entry) { return $false }
+    if ([string]$Entry.Kind -cne 'directory') { return $true }
+    try {
+        foreach ($child in [IO.Directory]::EnumerateFileSystemEntries([string]$Entry.Path)) {
+            return $true
+        }
+        return $false
+    }
+    catch {
+        # An unreadable store cannot be proven empty. Preserve fail-closed K7
+        # handling and let the caller report the normal recovery command.
+        return $true
+    }
+}
+
 function Get-AgentEnvironmentSetupResidue {
     param(
         [Parameter(Mandatory = $true)][string] $CodexHome,
@@ -367,7 +516,7 @@ function Get-AgentEnvironmentSetupResidue {
     )
     $found = [Collections.Generic.List[object]]::new()
     $codexTxn = Get-AgentEnvironmentSetupEntry $CodexHome '.ai-instructions-txn'
-    if ($null -ne $codexTxn) { $found.Add([pscustomobject]@{ Scope = 'codex-home'; Kind = 'transaction-store'; Path = $codexTxn.Path }) }
+    if (Test-AgentEnvironmentSetupTransactionStoreResidue $codexTxn) { $found.Add([pscustomobject]@{ Scope = 'codex-home'; Kind = 'transaction-store'; Path = $codexTxn.Path }) }
     if ([IO.Directory]::Exists($CodexHome)) {
         foreach ($entry in @([IO.Directory]::EnumerateFileSystemEntries($CodexHome) | Sort-Object)) {
             $leaf = [IO.Path]::GetFileName($entry)
@@ -377,9 +526,9 @@ function Get-AgentEnvironmentSetupResidue {
         }
     }
     $userTxn = Get-AgentEnvironmentSetupEntry $UserHome '.ai-instructions-txn'
-    if ($null -ne $userTxn) { $found.Add([pscustomobject]@{ Scope = 'user-home'; Kind = 'transaction-store'; Path = $userTxn.Path }) }
+    if (Test-AgentEnvironmentSetupTransactionStoreResidue $userTxn) { $found.Add([pscustomobject]@{ Scope = 'user-home'; Kind = 'transaction-store'; Path = $userTxn.Path }) }
     $setupTxn = Get-AgentEnvironmentSetupEntry $SetupRoot '.ai-instructions-txn'
-    if ($null -ne $setupTxn) { $found.Add([pscustomobject]@{ Scope = 'setup-root'; Kind = 'setup-publication-store'; Path = $setupTxn.Path }) }
+    if (Test-AgentEnvironmentSetupTransactionStoreResidue $setupTxn) { $found.Add([pscustomobject]@{ Scope = 'setup-root'; Kind = 'setup-publication-store'; Path = $setupTxn.Path }) }
     return [object[]]$found.ToArray()
 }
 
@@ -1065,7 +1214,7 @@ function Publish-AgentEnvironmentSetupArchiveCache {
 function New-AgentEnvironmentSetupReceipt {
     param(
         [Parameter(Mandatory = $true)][ValidateSet('prepare','offline')][string] $Mode,
-        [Parameter(Mandatory = $true)][ValidateSet('prepared-runtime-only','verified-runtime-only','refused')][string] $Result,
+        [Parameter(Mandatory = $true)][ValidateSet('prepared-runtime-only','verified-runtime-only','completed','refused')][string] $Result,
         [AllowNull()] $Code,
         [AllowNull()] $Rid,
         [AllowNull()] $SetupCommit,
@@ -1074,12 +1223,16 @@ function New-AgentEnvironmentSetupReceipt {
         [AllowNull()] $DotNetVersion,
         [AllowNull()] $Capabilities,
         [AllowNull()] $RecoverCommand,
-        [AllowNull()] $RuntimeAction
+        [AllowNull()] $RuntimeAction,
+        [AllowNull()] $RuntimeCommit,
+        [AllowNull()] $InstallAction,
+        [AllowNull()] $ProjectionAction
     )
     # Null-or-empty optional strings are rendered as JSON null, never "".
     $optional = { param($Value) if ([string]::IsNullOrEmpty([string]$Value)) { $null } else { [string]$Value } }
     $Code = & $optional $Code; $Rid = & $optional $Rid; $SetupCommit = & $optional $SetupCommit; $PolicySha256 = & $optional $PolicySha256
     $DotNetVersion = & $optional $DotNetVersion; $RecoverCommand = & $optional $RecoverCommand; $RuntimeAction = & $optional $RuntimeAction
+    $RuntimeCommit = & $optional $RuntimeCommit; $InstallAction = & $optional $InstallAction; $ProjectionAction = & $optional $ProjectionAction
     $exitCode = if ($Result -ceq 'refused') { Get-AgentEnvironmentSetupExitCode $(if ([string]::IsNullOrEmpty($Code)) { 'internal-error' } else { $Code }) } else { 0 }
     $parts = if ($null -eq $Rid) { @($null,$null) } else { $Rid.Split('-',2) }
     $osName = switch ($parts[0]) { 'win' { 'windows' } 'linux' { 'linux' } 'osx' { 'macos' } default { $null } }
@@ -1088,11 +1241,18 @@ function New-AgentEnvironmentSetupReceipt {
         $steps.Add([pscustomobject][ordered]@{ step = 'S5'; status = 'completed'; detail = $(if ([string]::IsNullOrEmpty($RuntimeAction)) { $null } else { $RuntimeAction }) })
         $steps.Add([pscustomobject][ordered]@{ step = 'S6'; status = 'completed'; detail = 'process-scope' })
     }
-    foreach ($step in $script:AgentEnvironmentSetupDeferredSteps) { $steps.Add([pscustomobject][ordered]@{ step = $step; status = 'not-implemented-until-p10b'; detail = $null }) }
+    if ($Result -ceq 'completed') {
+        $steps.Add([pscustomobject][ordered]@{ step = 'S7'; status = 'completed'; detail = $InstallAction })
+        $steps.Add([pscustomobject][ordered]@{ step = 'S8'; status = 'completed'; detail = $ProjectionAction })
+        $steps.Add([pscustomobject][ordered]@{ step = 'S9'; status = 'completed'; detail = 'verified' })
+    }
+    else {
+        foreach ($step in $script:AgentEnvironmentSetupDeferredSteps) { $steps.Add([pscustomobject][ordered]@{ step = $step; status = 'not-implemented-until-p10b'; detail = $null }) }
+    }
     return [pscustomobject][ordered]@{
         schemaVersion = 1
         kind = 'agent-environment-setup-receipt'
-        phase = 'p10a'
+        phase = $(if ($Result -ceq 'completed') { 'p9d' } else { 'p10a' })
         mode = $Mode
         result = $Result
         code = $(if ($Result -ceq 'refused') { $Code } else { $null })
@@ -1101,7 +1261,7 @@ function New-AgentEnvironmentSetupReceipt {
         architecture = $parts[1]
         rid = $Rid
         setupCommit = $SetupCommit
-        runtimeCommit = $null
+        runtimeCommit = $RuntimeCommit
         policySha256 = $PolicySha256
         setupRoot = '~/' + $script:AgentEnvironmentSetupRelativeRoot
         codexHome = '~/.codex'
@@ -1121,12 +1281,13 @@ function ConvertTo-AgentEnvironmentSetupJsonLine {
 Export-ModuleMember -Function @(
     'Get-AgentEnvironmentSetupExitCodeTable','Get-AgentEnvironmentSetupExitCode','Get-AgentEnvironmentSetupBoundFiles',
     'Get-AgentEnvironmentSetupRequiredCapabilities','Get-AgentEnvironmentSetupReceiptFieldNames',
+    'Get-AgentEnvironmentSetupCloudPlan','Resolve-AgentEnvironmentSetupProjectionResult','Resolve-AgentEnvironmentSetupSkillIds',
     'New-AgentEnvironmentSetupRefusal','Get-AgentEnvironmentSetupRefusalCode','Get-AgentEnvironmentSetupSha256Text',
     'Assert-AgentEnvironmentSetupPolicy','Read-AgentEnvironmentSetupPolicy','ConvertTo-AgentEnvironmentSetupPolicyTsv',
     'Assert-AgentEnvironmentSetupPolicyTsv','Get-AgentEnvironmentSetupRid','Get-AgentEnvironmentSetupPolicyAsset',
     'Get-AgentEnvironmentSetupLayout','ConvertTo-AgentEnvironmentSetupHomePath','ConvertFrom-AgentEnvironmentSetupHomePath',
     'New-AgentEnvironmentSetupRuntimeAttemptLayout',
-    'ConvertTo-AgentEnvironmentSetupSanitizedText','ConvertTo-AgentEnvironmentSetupStoredRuntimeReceipt',
+    'ConvertTo-AgentEnvironmentSetupSanitizedText','Get-AgentEnvironmentSetupChildErrorLine','Get-AgentEnvironmentSetupChildOutputSummary','ConvertTo-AgentEnvironmentSetupStoredRuntimeReceipt',
     'ConvertFrom-AgentEnvironmentSetupStoredRuntimeReceipt','Assert-AgentEnvironmentSetupRuntimeReceiptLayout','Get-AgentEnvironmentSetupPlan',
     'Assert-AgentEnvironmentSetupPhysicalPath','Get-AgentEnvironmentSetupUserHome','Assert-AgentEnvironmentSetupCodexHome',
     'Assert-AgentEnvironmentSetupCommit','Test-AgentEnvironmentSetupSameFile','Get-AgentEnvironmentSetupChildEnvironment','Read-AgentEnvironmentSetupFile',

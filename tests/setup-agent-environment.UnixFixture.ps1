@@ -78,6 +78,47 @@ foreach ($relative in $files) {
     [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
     Copy-Item -LiteralPath (Join-Path (Join-Path $script:UnixRepositoryRoot 'scripts') $relative) -Destination $target
 }
+$fixtureUpdater = @'
+function Invoke-AiInstructionsUpdateWorkflow {
+ param([string]$CodexHome,[switch]$ForceCheck,[switch]$InstallApproved,[scriptblock]$ResolveCandidate,[scriptblock]$AcquireCandidate,[scriptblock]$InstallCandidate)
+ $bundle=Get-Content -Raw (Join-Path $CodexHome 'hooks/ai-instructions-runtime/runtime-bundle.json')|ConvertFrom-Json
+ $configuration=Get-Content -Raw (Join-Path $CodexHome 'ai-instructions-sync.json')|ConvertFrom-Json
+ $request=[pscustomobject]@{CodexHome=$CodexHome;CurrentCommit=[string]$bundle.commit;Mode=[string]$configuration.updates.mode;Channel=[string]$configuration.updates.channel;Ref=[string]$configuration.updates.ref}
+ $candidate=& $ResolveCandidate $request
+ if([string]$candidate.Commit-ceq[string]$bundle.commit){return [pscustomobject]@{outcome='current'}}
+ $request|Add-Member CandidateCommit ([string]$candidate.Commit);$package=& $AcquireCandidate $request;$again=& $ResolveCandidate $request
+ if([string]$again.Commit-cne[string]$candidate.Commit){return [pscustomobject]@{outcome='drift'}}
+ & $InstallCandidate ([pscustomobject]@{CurrentCommit=[string]$bundle.commit;CandidateCommit=[string]$candidate.Commit;Mode=$request.Mode;Channel=$request.Channel;Ref=$request.Ref;Package=$package})
+ [pscustomobject]@{outcome='installed'}
+}
+Export-ModuleMember -Function Invoke-AiInstructionsUpdateWorkflow
+'@
+$fixtureCoordinator = @'
+[CmdletBinding()]param([string]$CodexHome,[string]$UserHome,[switch]$Apply,[switch]$VerifyOnly,[string]$OutputFormat)
+$runtime=Join-Path $CodexHome 'hooks/ai-instructions-runtime';$bundle=Get-Content -Raw (Join-Path $runtime 'runtime-bundle.json')|ConvertFrom-Json
+$skill=Join-Path $UserHome '.agents/skills/plan-production-change/SKILL.md';$manifest=Join-Path $UserHome '.agents/catalog-skills.manifest.json';$claude=Join-Path $UserHome '.claude/CLAUDE.md'
+$desired="fixture commit=$($bundle.commit)`n";$section=[IO.File]::ReadAllText((Join-Path $runtime 'bootstrap-section.md'))
+if($Apply){
+ if((Test-Path $skill -PathType Leaf)-and-not(Test-Path $manifest -PathType Leaf)){[pscustomobject]@{outcome='failed';exitCode=1;failureDetails=@([pscustomobject]@{code='unmanaged-collision'})}|ConvertTo-Json -Compress -Depth 5;exit 1}
+ [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($skill));[IO.File]::WriteAllText($skill,$desired);[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($manifest));[IO.File]::WriteAllText($manifest,'{"schemaVersion":3,"projections":["user-agents","user-claude"],"files":[{"skillId":"plan-production-change","targetPath":".agents/skills/plan-production-change/SKILL.md"}]}');[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($claude));[IO.File]::WriteAllText($claude,$section)
+ [pscustomobject]@{outcome='applied';exitCode=0;failureDetails=@()}|ConvertTo-Json -Compress;exit 0
+}
+$current=(Test-Path $skill -PathType Leaf)-and([IO.File]::ReadAllText($skill)-ceq$desired)-and(Test-Path $manifest -PathType Leaf)-and(Test-Path $claude -PathType Leaf)-and([IO.File]::ReadAllText($claude)-ceq$section)
+[pscustomobject]@{outcome=$(if($current){'current'}else{'failed'});exitCode=$(if($current){0}else{1});failureDetails=@()}|ConvertTo-Json -Compress;exit $(if($current){0}else{1})
+'@
+$fixtureInstaller = @'
+[CmdletBinding()]param([string]$RepositoryRoot,[string]$CodexHome,[string]$SourceCommit,[string]$ExpectedCurrentCommit,[string]$ExpectedUpdateMode,[string]$ExpectedUpdateChannel,[string]$ExpectedUpdateRef,[string]$ExpectedCurrentGeneration,[string]$WriterSchema)
+$runtime=Join-Path $CodexHome 'hooks/ai-instructions-runtime';[void][IO.Directory]::CreateDirectory($runtime);Copy-Item (Join-Path $RepositoryRoot 'scripts/fixture-ai-instructions-updater.psm1') (Join-Path $runtime 'ai-instructions-updater.psm1') -Force;[void][IO.Directory]::CreateDirectory((Join-Path $CodexHome 'hooks'));Copy-Item (Join-Path $RepositoryRoot 'scripts/fixture-update-agent-environment.ps1') (Join-Path $CodexHome 'hooks/update-agent-environment.ps1') -Force;Copy-Item (Join-Path $RepositoryRoot 'instructions/common/bootstrap-section.md') (Join-Path $runtime 'bootstrap-section.md') -Force
+[IO.File]::WriteAllText((Join-Path $CodexHome 'ai-instructions-sync.json'),'{'+'"schemaVersion":5,"updates":{"mode":"notify-only","channel":"protected-branch","ref":"main"},"projections":{"user":["user-agents","user-claude"],"project":[]}}');[IO.File]::WriteAllText((Join-Path $runtime 'runtime-bundle.json'),('{"schemaVersion":3,"commit":"'+$SourceCommit+'"}'))
+'@
+[IO.File]::WriteAllText((Join-Path $script:UnixRepo 'scripts/fixture-ai-instructions-updater.psm1'),$fixtureUpdater,[Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText((Join-Path $script:UnixRepo 'scripts/fixture-update-agent-environment.ps1'),$fixtureCoordinator,[Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText((Join-Path $script:UnixRepo 'scripts/install-ai-instructions-bootstrap.ps1'),$fixtureInstaller,[Text.UTF8Encoding]::new($false))
+[void][IO.Directory]::CreateDirectory((Join-Path $script:UnixRepo 'catalog'))
+Copy-Item (Join-Path $script:UnixRepositoryRoot 'catalog/skills-catalog.json') (Join-Path $script:UnixRepo 'catalog/skills-catalog.json')
+Copy-Item (Join-Path $script:UnixRepositoryRoot 'scripts/skills-selection.psm1') (Join-Path $script:UnixRepo 'scripts/skills-selection.psm1')
+[void][IO.Directory]::CreateDirectory((Join-Path $script:UnixRepo 'instructions/common'))
+Copy-Item (Join-Path $script:UnixRepositoryRoot 'instructions/common/bootstrap-section.md') (Join-Path $script:UnixRepo 'instructions/common/bootstrap-section.md')
 & git -C $script:UnixRepo init -q 2>$null | Out-Null
 $script:UnixCommits = @{}
 foreach ($kind in @('runtime','symlink','parent','absolute','hardlink','device')) {
@@ -120,13 +161,14 @@ function Invoke-UnixSetup {
     if (-not $NoCheckout) { & git -C $script:UnixRepo checkout -q --detach $script:UnixCommits[$Kind] 2>$null | Out-Null }
     $start = [Diagnostics.ProcessStartInfo]::new('sh')
     foreach ($argument in @($EntryPath,'--expected-commit',$ExpectedCommit) + $Arguments) { $start.ArgumentList.Add($argument) }
-    $start.UseShellExecute = $false; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+    $start.UseShellExecute = $false; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true; $start.RedirectStandardInput = $true
     if($UnsetHome){[void]$start.Environment.Remove('HOME')}else{$start.Environment['HOME'] = $UserHome}
     # Any accidental network use fails fast instead of reaching the internet.
     $start.Environment['HTTPS_PROXY'] = 'http://127.0.0.1:9'
     [void]$start.Environment.Remove('CODEX_HOME')
     foreach ($key in $Environment.Keys) { $start.Environment[$key] = [string]$Environment[$key] }
     $process = [Diagnostics.Process]::Start($start)
+    $process.StandardInput.Close()
     try {
         $stdoutTask = $process.StandardOutput.ReadToEndAsync(); $stderrTask = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit(900000)) { $process.Kill($true); throw 'Shell setup fixture run timed out.' }
@@ -149,10 +191,11 @@ function Invoke-UnixSetupPowerShellChild {
     $archive = Join-Path $UserHome ".local/share/ai-instructions-setup/cache/$($script:UnixAssetName)"
     $start = [Diagnostics.ProcessStartInfo]::new([Environment]::ProcessPath)
     foreach ($argument in @('-NoLogo','-NoProfile','-NonInteractive','-File',$EntryPath,"-$Mode",'-ExpectedCommit',$ExpectedCommit,'-ArchivePath',$archive)) { $start.ArgumentList.Add($argument) }
-    $start.UseShellExecute=$false;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+    $start.UseShellExecute=$false;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true;$start.RedirectStandardInput=$true
     $start.Environment['HOME']=$UserHome;[void]$start.Environment.Remove('CODEX_HOME')
     foreach($key in $Environment.Keys){$start.Environment[$key]=[string]$Environment[$key]}
     $process=[Diagnostics.Process]::Start($start)
+    $process.StandardInput.Close()
     try{
         $stdoutTask=$process.StandardOutput.ReadToEndAsync();$stderrTask=$process.StandardError.ReadToEndAsync()
         if(-not $process.WaitForExit(900000)){$process.Kill($true);throw 'PowerShell setup fixture run timed out.'}
