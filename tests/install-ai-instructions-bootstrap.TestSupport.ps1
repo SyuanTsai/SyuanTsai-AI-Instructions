@@ -181,6 +181,36 @@ function Set-TestJson {
     Set-TestText -Path $Path -Value (($Document | ConvertTo-Json -Depth 20).Replace("`r`n","`n") + "`n")
 }
 
+function Set-TestInstalledHistoricalPlatformRuntimeApi {
+    param(
+        [Parameter(Mandatory=$true)][string]$CodexHome,
+        [AllowNull()][string]$HistoricalCommit
+    )
+    $runtimeRoot=Join-Path $CodexHome 'hooks\ai-instructions-runtime'
+    $manifestPath=Join-Path $runtimeRoot 'platform-runtime.psd1'
+    $manifestText=[IO.File]::ReadAllText($manifestPath)
+    foreach($functionName in @('Confirm-PlatformDirectoryDurability','Assert-PlatformPowerShellRuntime')){
+        $line="        '$functionName',`n"
+        if(-not$manifestText.Contains($line)){throw "Installed platform runtime test fixture is missing '$functionName'."}
+        $manifestText=$manifestText.Replace($line,'')
+    }
+    [IO.File]::WriteAllText($manifestPath,$manifestText,[Text.UTF8Encoding]::new($false))
+
+    $bundlePath=Join-Path $runtimeRoot 'runtime-bundle.json'
+    $configurationPath=Join-Path $CodexHome 'ai-instructions-sync.json'
+    $bundle=Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath|ConvertFrom-Json
+    $configuration=Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath|ConvertFrom-Json
+    if(-not[string]::IsNullOrWhiteSpace($HistoricalCommit)){
+        $bundle.commit=$HistoricalCommit
+        $configuration.catalog.ref=$HistoricalCommit
+    }
+    $bundle.inventory=@(Get-AiInstructionsRuntimeInventory -RuntimeRoot $runtimeRoot)
+    $bundle.inventorySha256=Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $bundle.inventory
+    $bundle.platformRuntime.manifestSha256=Get-AiInstructionsFileSha256 -Path $manifestPath
+    Set-TestJson -Path $bundlePath -Document $bundle
+    Set-TestJson -Path $configurationPath -Document $configuration
+}
+
 function Copy-TestInstallerBootstrapAuthority {
     param([Parameter(Mandatory=$true)][string]$SourceRoot,[Parameter(Mandatory=$true)][string]$DestinationRoot)
     $destination=Join-Path $DestinationRoot 'instructions\common\bootstrap-section.md'

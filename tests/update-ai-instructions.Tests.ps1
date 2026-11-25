@@ -134,6 +134,33 @@ Describe 'AI instructions updater workflow' {
         (Get-Content -Raw (Join-Path $codexHome 'ai-instructions-sync.json')|ConvertFrom-Json).schemaVersion|Should Be 5
     }
 
+    # Scenario: A candidate installer reports success but leaves the active v3/v5 manifest without current candidate exports.
+    # Purpose: Keep updater post-install verification on exact API equality rather than the installer-only historical subset gate.
+    It 'UnitT06a_rejects_a_post_install_runtime_missing_current_platform_exports' {
+        $codexHome=Join-Path $TestDrive 'v3-post-install-api-drift';New-TestUpdaterHomeV3 -Path $codexHome
+        $candidate='b'*40
+        $result=Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck -InstallApproved `
+            -ResolveCandidate {[pscustomobject]@{Commit=$candidate;Relation='ahead'}} `
+            -AcquireCandidate {[pscustomobject]@{SourceRoot='C:\fixture';ArchivePath='C:\fixture.zip';ArchiveSha256=('d'*64)}} `
+            -InstallCandidate {
+                param($request)
+                $configurationPath=Join-Path $request.CodexHome 'ai-instructions-sync.json';$runtimeRoot=Join-Path $request.CodexHome 'hooks\ai-instructions-runtime';$bundlePath=Join-Path $runtimeRoot 'runtime-bundle.json'
+                $manifestPath=Join-Path $runtimeRoot 'platform-runtime.psd1';$manifestText=[IO.File]::ReadAllText($manifestPath)
+                foreach($functionName in @('Confirm-PlatformDirectoryDurability','Assert-PlatformPowerShellRuntime')){$manifestText=$manifestText.Replace("        '$functionName',`n","        `n")}
+                [IO.File]::WriteAllText($manifestPath,$manifestText,[Text.UTF8Encoding]::new($false))
+                $configuration=Get-Content -Raw $configurationPath|ConvertFrom-Json;$configuration.catalog.ref=[string]$request.CandidateCommit
+                $bundle=Get-Content -Raw $bundlePath|ConvertFrom-Json;$bundle.commit=[string]$request.CandidateCommit
+                $bundle.inventory=@(Get-AiInstructionsRuntimeInventory -RuntimeRoot $runtimeRoot)
+                $bundle.inventorySha256=Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $bundle.inventory
+                $bundle.platformRuntime.manifestSha256=Get-AiInstructionsFileSha256 -Path $manifestPath
+                [IO.File]::WriteAllText($configurationPath,(($configuration|ConvertTo-Json -Depth 20)+"`n"),[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText($bundlePath,(($bundle|ConvertTo-Json -Depth 30)+"`n"),[Text.UTF8Encoding]::new($false))
+            }
+
+        $result.outcome|Should Be failed
+        $result.message|Should Match 'FunctionsToExport'
+    }
+
     if(-not[string]::IsNullOrWhiteSpace($script:UpdaterUnavailableCapability)){
         # Scenario: A v3/v5 updater gate observes a real host capability that is currently unavailable or unverified.
         # Purpose: Select from the native receipt at runtime and prove all Codex Home path/type/attribute/hash state is unchanged.

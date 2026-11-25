@@ -149,16 +149,18 @@ function Assert-InstallerExistingRuntimeGate {
     param(
         [Parameter(Mandatory = $true)][object] $State,
         [Parameter(Mandatory = $true)][string] $RuntimeDirectory,
-        [Parameter(Mandatory = $true)][object] $DefaultCapabilityReceipt
+        [Parameter(Mandatory = $true)][object] $DefaultCapabilityReceipt,
+        [Parameter(Mandatory = $true)][string] $CandidateCommit
     )
     if ([string]$State.Generation -in @('none','legacy-configuration')) { return $DefaultCapabilityReceipt }
     if ([string]$State.Generation -ceq 'v2v4') {
         Assert-AiInstructionsRuntimeBundleV2 -Bundle $State.Bundle -Configuration $State.Configuration -RuntimeRoot $RuntimeDirectory | Out-Null
         return $DefaultCapabilityReceipt
     }
+    $allowHistoricalPlatformRuntimeApi = [string]$State.Bundle.commit -cne $CandidateCommit
     try {
         Assert-AiInstructionsSyncConfigurationV5 -Configuration $State.Configuration | Out-Null
-        Assert-AiInstructionsRuntimeBundleV3 -Bundle $State.Bundle -Configuration $State.Configuration -RuntimeRoot $RuntimeDirectory | Out-Null
+        Assert-AiInstructionsRuntimeBundleV3 -Bundle $State.Bundle -Configuration $State.Configuration -RuntimeRoot $RuntimeDirectory -AllowHistoricalPlatformRuntimeApi:$allowHistoricalPlatformRuntimeApi | Out-Null
     }
     catch {
         if ($null -ne (Get-AiInstructionsRefusalCode $_)) { throw }
@@ -168,7 +170,7 @@ function Assert-InstallerExistingRuntimeGate {
     catch {
         throw (New-AiInstructionsRefusalException -Code capability-unavailable -Message "Installed v3/v5 runtime capabilities are unavailable: $($_.Exception.Message)" -InnerException $_.Exception)
     }
-    Assert-AiInstructionsRuntimeGate -Bundle $State.Bundle -Configuration $State.Configuration -RuntimeRoot $RuntimeDirectory -CapabilityReceipt $receipt | Out-Null
+    Assert-AiInstructionsRuntimeGate -Bundle $State.Bundle -Configuration $State.Configuration -RuntimeRoot $RuntimeDirectory -CapabilityReceipt $receipt -AllowHistoricalPlatformRuntimeApi:$allowHistoricalPlatformRuntimeApi | Out-Null
     return $receipt
 }
 
@@ -179,11 +181,12 @@ function Select-InstallerWriterSchemaForState {
         [Parameter(Mandatory = $true)][object] $DefaultCapabilityReceipt,
         [Parameter(Mandatory = $true)][object] $CatalogSchemaVersion,
         [Parameter(Mandatory = $true)][bool] $ProjectionRuntimeAvailable,
+        [Parameter(Mandatory = $true)][string] $CandidateCommit,
         [Parameter(Mandatory = $true)][ValidateSet('Auto','V2V4','V3V5')][string] $RequestedWriterSchema
     )
     $receipt = $DefaultCapabilityReceipt
     if ([string]$State.Generation -ceq 'v3v5' -and $RequestedWriterSchema -cne 'V2V4') {
-        $receipt = Assert-InstallerExistingRuntimeGate -State $State -RuntimeDirectory $RuntimeDirectory -DefaultCapabilityReceipt $DefaultCapabilityReceipt
+        $receipt = Assert-InstallerExistingRuntimeGate -State $State -RuntimeDirectory $RuntimeDirectory -DefaultCapabilityReceipt $DefaultCapabilityReceipt -CandidateCommit $CandidateCommit
     }
     $expectedOs = if ([string]$State.Generation -ceq 'v3v5') { [string]$State.Bundle.platform.os } else { [string]$receipt.os }
     $expectedArchitecture = if ([string]$State.Generation -ceq 'v3v5') { [string]$State.Bundle.platform.architecture } else { [string]$receipt.architecture }
@@ -938,6 +941,7 @@ try {
         -DefaultCapabilityReceipt $capabilityReceipt `
         -CatalogSchemaVersion $catalogDocument.schemaVersion `
         -ProjectionRuntimeAvailable $projectionRuntimeAvailable `
+        -CandidateCommit $catalogRef `
         -RequestedWriterSchema $WriterSchema
     $selectedWriterSchema = [string]$lockedSelection.Schema
     $capabilityReceipt = $lockedSelection.CapabilityReceipt
@@ -958,7 +962,7 @@ try {
         try {
             $installedBundle = $lockedState.Bundle
             $installedConfiguration = $lockedState.Configuration
-            Assert-InstallerExistingRuntimeGate -State $lockedState -RuntimeDirectory $runtimeDirectory -DefaultCapabilityReceipt $capabilityReceipt | Out-Null
+            Assert-InstallerExistingRuntimeGate -State $lockedState -RuntimeDirectory $runtimeDirectory -DefaultCapabilityReceipt $capabilityReceipt -CandidateCommit $catalogRef | Out-Null
         }
         catch { throw "The installed runtime changed before installation; the candidate transaction must be resolved again. $($_.Exception.Message)" }
         if ([string]$installedBundle.commit -cne $ExpectedCurrentCommit) { throw 'The installed runtime changed before installation; the candidate transaction must be resolved again.' }
