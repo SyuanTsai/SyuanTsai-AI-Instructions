@@ -990,11 +990,19 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/Assert-UnixCoreAggregate.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/Assert-WindowsCoreAggregate.ps1",
       "license": "Apache-2.0"
     },
     {
       "path": "scripts/Get-StandardValidatorMaintenanceEvidence.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Get-UnixCorePlan.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -1035,6 +1043,10 @@
     },
     {
       "path": "scripts/Invoke-ThirdPartySourceChecks.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Invoke-UnixCoreShard.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -1883,6 +1895,22 @@
     },
     {
       "path": "tests/skill-tools-core-path-patch.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/unix-core-aggregate.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/unix-core-plan.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/unix-core-shard-weights.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/unix-core-shard.Tests.ps1",
       "license": "Apache-2.0"
     },
     {
