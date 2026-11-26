@@ -136,29 +136,43 @@ function Set-LauncherRecoveryPinMismatch {
 }
 
 Describe 'AI instructions launcher recovery portable preflight' {
-    # Scenario: The platform-runtime receipt names a PowerShell executable that is no longer a leaf below PSHOME.
-    # Purpose: Exercise the launcher's production resolver without adding a test seam and prove it refuses instead of using a bare PATH command.
-    It 'UnitT00a_refuses_a_missing_verified_PowerShell_engine_without_bare_name_fallback' {
+    # Scenario: The expected platform-specific PowerShell executable is missing below PSHOME.
+    # Purpose: Prove the production resolver keeps the classified fail-closed leaf check and never falls back to a bare PATH command.
+    It 'UnitT00a_refuses_a_missing_PSHOME_engine_without_bare_name_fallback' {
         $launcherPath=Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions-installed.ps1'
         $tokens=$null;$parseErrors=$null
         $ast=[Management.Automation.Language.Parser]::ParseFile($launcherPath,[ref]$tokens,[ref]$parseErrors)
         @($parseErrors).Count|Should Be 0
         $resolver=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Resolve-InstalledPowerShellEnginePath'},$true))
         $resolver.Count|Should Be 1
-        Invoke-Expression $resolver[0].Extent.Text
+        $resolverText=$resolver[0].Extent.Text
+        $resolverText|Should Match ([regex]::Escape('Join-Path $PSHOME'))
+        $resolverText|Should Match '''pwsh.exe'''
+        $resolverText|Should Match '''pwsh'''
+        $resolverText|Should Match 'Test-Path -LiteralPath \$enginePath -PathType Leaf'
+        $resolverText|Should Match 'classification=compatibility; retryable=false'
+        $resolverText|Should Match 'ai-instructions-refusal-code=runtime-baseline-unavailable'
+        $resolverText|Should Not Match 'Get-Command|enginePath\s*=\s*engineName'
+    }
 
-        $missingEngine=Join-Path $TestDrive 'missing-pshome/pwsh'
-        $receipt=[pscustomobject]@{
-            runtime=[pscustomobject]@{powerShellExecutablePath=$missingEngine}
-            capabilities=@([pscustomobject]@{name='powershell-runtime';status='available';evidence=@('fixture')})
-        }
-        $caught=$null
-        try{Resolve-InstalledPowerShellEnginePath -CapabilityReceipt $receipt|Out-Null}catch{$caught=$_}
+    # Scenario: Capability evidence says powershell-runtime is unavailable while the current PSHOME engine is an existing physical leaf.
+    # Purpose: Prove the update-check resolver ignores receipt capability status and returns the real current engine on every supported platform.
+    It 'UnitT00b_returns_the_physical_PSHOME_engine_when_runtime_capability_is_unavailable' {
+        $launcherPath=Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions-installed.ps1'
+        $tokens=$null;$parseErrors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($launcherPath,[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count|Should Be 0
+        $resolver=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Resolve-InstalledPowerShellEnginePath'},$true))
+        $resolver.Count|Should Be 1
+        $resolverText=$resolver[0].Extent.Text
+        $resolverText|Should Not Match 'CapabilityReceipt|capabilities|powershell-runtime|powerShellExecutablePath'
+        Invoke-Expression $resolverText
 
-        $caught|Should Not BeNullOrEmpty
-        $caught.Exception.Message|Should Match 'classification=compatibility; retryable=false'
-        (Get-AiInstructionsRefusalCode $caught)|Should Be runtime-baseline-unavailable
-        $resolver[0].Extent.Text|Should Not Match 'Get-Command|enginePath\s*=\s*engineName'
+        $unavailableReceipt=[pscustomobject]@{capabilities=@([pscustomobject]@{name='powershell-runtime';status='unavailable'})}
+        $unavailableReceipt.capabilities[0].status|Should Be unavailable
+        $isWindowsHost=[Environment]::OSVersion.Platform-eq[PlatformID]::Win32NT
+        $expectedEngine=[IO.Path]::GetFullPath((Join-Path $PSHOME $(if($isWindowsHost){'pwsh.exe'}else{'pwsh'})))
+        Resolve-InstalledPowerShellEnginePath|Should BeExactly $expectedEngine
     }
 
     # Scenario: An orphaned transaction directory exists beside the stable launcher before any installed runtime is available.
