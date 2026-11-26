@@ -2679,7 +2679,7 @@ Write-Output 'SYP571 read-only fan-out verified existing Skills and instructions
     }
 
     # Scenario: After setup, D13 runs the real verified updater and multisource with GitHub unreachable.
-    # Purpose: Complete instruction fan-out from setup's cache and prove offline discovery exits zero without reaching the launcher trap.
+    # Purpose: Verify both managed instruction families and their manifest from setup's cache, plus a stable offline rerun of the consumer tree.
     It 'CloudT1b_runs_real_installed_fanout_from_cache_with_GitHub_unreachable' {
         $setupHome=New-UnixHome 'cloud-real-offline-setup'
         Assert-SetupTestExitCode (Invoke-UnixSetup $setupHome @()) 0
@@ -2772,12 +2772,42 @@ Write-Output 'SYP571 read-only fan-out verified existing Skills and instructions
         $run.Text|Should Match 'update outcome: offline'
         $run.Text|Should Not Match 'bootstrap disposition|bootstrap stopped'
         (Get-Content -Raw (Join-Path $codexHome 'ai-instructions-update-receipt.json')|ConvertFrom-Json).outcome|Should BeExactly offline
-        Test-Path (Join-Path $target '.codex/AGENTS.md')|Should Be $true
-        Test-Path (Join-Path $target '.codex/ai-instructions.manifest.json')|Should Be $true
-        $before=Get-UnixTreeSnapshot (Join-Path $target '.codex')
+        # bootstrap-ai-instructions.ps1 maps the Codex base to root AGENTS.md;
+        # this V3V5 archive supplies Codex/Copilot bases and English rule modules.
+        $expectedInstructions=@{'AGENTS.md'='.codex/AGENTS.en.md';'.github/copilot-instructions.md'='.github/copilot-instructions.en.md'}
+        foreach($rulesRoot in @('.codex/AI-Rules','.github/AI-Rules')){
+            $rules=@(Get-ChildItem -LiteralPath (Join-Path $candidate $rulesRoot) -File -Filter '*.en.md')
+            $rules.Count|Should BeGreaterThan 0
+            foreach($rule in $rules){$relative="$rulesRoot/$($rule.Name)";$expectedInstructions[$relative]=$relative}
+        }
+        $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json'
+        Test-Path -LiteralPath $manifestPath -PathType Leaf|Should Be $true
+        $managed=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        $managed.lockSha256|Should BeExactly (Get-FileHash -LiteralPath (Join-Path $candidate 'catalog/skills-catalog-lock.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+        foreach($relative in $expectedInstructions.Keys){
+            $outputPath=Join-Path $target $relative
+            Test-Path -LiteralPath $outputPath -PathType Leaf|Should Be $true
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($outputPath))|Should BeExactly ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $candidate $expectedInstructions[$relative]))))
+            $entries=@($managed.files|Where-Object targetPath -CEQ $relative)
+            $entries.Count|Should Be 1
+            $entries[0].sourcePath|Should BeExactly $expectedInstructions[$relative]
+            $entries[0].sourceCommit|Should BeExactly $commit
+        }
+        # Include root AGENTS.md and both managed trees (rules, licenses and
+        # manifest), keeping Git's internal bookkeeping outside this snapshot.
+        $before=@(
+            (Get-FileHash -LiteralPath (Join-Path $target 'AGENTS.md') -Algorithm SHA256).Hash
+            Get-UnixTreeSnapshot (Join-Path $target '.codex')
+            Get-UnixTreeSnapshot (Join-Path $target '.github')
+        )-join"`n"
         $again=Invoke-RealOfflineFixtureChild 'sh' @('-c',$command.Value)
         if($again.ExitCode -ne 0){throw $again.Text}
-        (Get-UnixTreeSnapshot (Join-Path $target '.codex'))|Should BeExactly $before
+        $after=@(
+            (Get-FileHash -LiteralPath (Join-Path $target 'AGENTS.md') -Algorithm SHA256).Hash
+            Get-UnixTreeSnapshot (Join-Path $target '.codex')
+            Get-UnixTreeSnapshot (Join-Path $target '.github')
+        )-join"`n"
+        $after|Should BeExactly $before
     }
 
     # Scenario: The expected commit advances and changes both managed content and a scripts/platform build input.
@@ -3615,7 +3645,7 @@ Describe 'setup-agent-environment Unix null optional leaf publication (SYP-354 P
     }
 
     # Scenario: A genuinely empty private HOME downloads only from a local fixture shim, prepares once, and then reruns offline.
-    # Purpose: Prove the complete native shell entry covers every null optional leaf and leaves A6-private runtime and receipt state.
+    # Purpose: Prove the native shell entry covers every null optional leaf, leaves private runtime/receipts and publishes Linux's lock-bound local source cache.
     It 'InterT46_prepares_an_empty_HOME_from_the_local_fixture_and_then_verifies_offline' {
         $homePath=New-UnixHome 'null-leaf-empty-home' -WithoutCache
         @(Get-ChildItem -LiteralPath $homePath -Force).Count | Should Be 0
@@ -3624,6 +3654,25 @@ Describe 'setup-agent-environment Unix null optional leaf publication (SYP-354 P
         $bin=New-UnixToolShim 'null-leaf-empty-home' -Exclude @('wget') -Replace @{curl=$curlScript}
         $prepare=Invoke-UnixSetup $homePath @('--prepare') -Environment @{PATH=$bin}
         Assert-SetupTestExitCode $prepare 0;Assert-UnixPreparePlatformContract $prepare $homePath
+        if($IsLinux){
+            $codexHome=Join-Path $homePath '.codex'
+            $cache=Join-Path $codexHome 'ai-instructions-source-cache'
+            $cacheManifest=Get-Content -Raw -LiteralPath (Join-Path $cache 'manifest.json')|ConvertFrom-Json
+            $cacheManifest.commit|Should BeExactly $script:UnixCommits['runtime']
+            $lockPath=Join-Path $codexHome 'hooks/ai-instructions-runtime/catalog/skills-catalog-lock.json'
+            $cacheManifest.lockSha256|Should BeExactly (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $lock=Get-Content -Raw -LiteralPath $lockPath|ConvertFrom-Json
+            @($cacheManifest.sources).Count|Should Be @($lock.sources).Count
+            foreach($source in $lock.sources){
+                $cached=@($cacheManifest.sources|Where-Object id -CEQ $source.id)
+                $cached.Count|Should Be 1
+                $cached[0].archiveSha256|Should BeExactly $source.archiveSha256
+                (Get-FileHash -LiteralPath (Join-Path $cache $cached[0].fileName) -Algorithm SHA256).Hash.ToLowerInvariant()|Should BeExactly $source.archiveSha256
+            }
+            (Get-FileHash -LiteralPath (Join-Path $cache $cacheManifest.instruction.fileName) -Algorithm SHA256).Hash.ToLowerInvariant()|Should BeExactly $cacheManifest.instruction.sha256
+            Assert-UnixPrivatePath $cache '700'
+            foreach($file in Get-ChildItem -LiteralPath $cache -File){Assert-UnixPrivatePath $file.FullName '600'}
+        }
         $offline=Invoke-UnixSetup $homePath @('--offline')
         Assert-SetupTestExitCode $offline 0;$offline.Json.result | Should Be 'verified-runtime-only'
         $setupRoot=Join-Path $homePath '.local/share/ai-instructions-setup'
