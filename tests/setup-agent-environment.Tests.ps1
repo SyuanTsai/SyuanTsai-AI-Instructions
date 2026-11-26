@@ -1115,6 +1115,37 @@ exit 1
         $message | Should Not Match 'failureDetails\['
         (Get-AgentEnvironmentSetupRefusalCode $failure) | Should BeExactly 'projection-failed'
     }
+
+    # Scenario: A default stderr line exceeds 160 characters and a canonical refusal carries a failure reason after character 1500.
+    # Purpose: Preserve the default truncation while larger bounds retain the full refusal with HOME and secrets sanitized.
+    It 'UnitT57_preserves_default_child_error_bounds_and_full_sanitized_canonical_refusals' {
+        (Get-AgentEnvironmentSetupChildErrorLine -Stderr ('x' * 200) -UserHome $TestDrive) | Should BeExactly (('x' * 157) + '...')
+
+        $diagnosticHome = Join-Path $TestDrive 'canonical-refusal-home'
+        $prefix = 'setup-agent-environment: USER projection WhatIf was refused before runtime mutation. Child result: ' + ('x' * 1450)
+        $failedReason = 'failed=Response status code does not indicate success: 403 (Forbidden).'
+        $refusal = "$prefix; $failedReason Child stderr: $diagnosticHome/.claude/x token=fixture-secret [agent-environment-setup-code=projection-failed]"
+        $refusal.IndexOf($failedReason,[StringComparison]::Ordinal) | Should BeGreaterThan 1500
+        $summary = Get-AgentEnvironmentSetupChildErrorLine -Stderr $refusal -UserHome $diagnosticHome -MaxLineLength 2048 -MaxLength 4096
+        $summary | Should BeExactly "$prefix; $failedReason Child stderr: ~/.claude/x token=[REDACTED] [agent-environment-setup-code=projection-failed]"
+        $summary | Should Match ([regex]::Escape($failedReason))
+        $summary | Should Not Match ([regex]::Escape($diagnosticHome))
+        $summary | Should Not Match 'fixture-secret'
+    }
+
+    # Scenario: The outer stage summarizes the canonical child's stderr before reporting or rethrowing its refusal.
+    # Purpose: Keep that call site's bounds large enough for the canonical refusal instead of applying the default 160/512 caps again.
+    It 'UnitT58_uses_larger_child_error_bounds_only_at_the_outer_canonical_stage' {
+        $entryText = [IO.File]::ReadAllText($script:SetupEntryPath)
+        $canonicalCalls = @([regex]::Matches($entryText,'(?m)^\s*\$canonicalChildError\s*=\s*(Get-AgentEnvironmentSetupChildErrorLine[^\r\n]*)'))
+        $canonicalCalls.Count | Should Be 1
+        $callSource = $canonicalCalls[0].Groups[1].Value
+        $callSource | Should Match '-Stderr\s+\(\[string\]\$child\.stderr\)'
+        $callSource | Should Match '-UserHome\s+\$userHome\b'
+        $callSource | Should Match '-MaxLineLength\s+2048\b'
+        $callSource | Should Match '-MaxLength\s+4096\b'
+        @([regex]::Matches($entryText,'Get-AgentEnvironmentSetupChildErrorLine[^\r\n]*-MaxLineLength')).Count | Should Be 1
+    }
 }
 
 # Register only on the native host; keep this file's Core CI skip count at zero.

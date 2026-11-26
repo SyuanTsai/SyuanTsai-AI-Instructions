@@ -353,7 +353,12 @@ function ConvertTo-AgentEnvironmentSetupSanitizedText {
 }
 
 function Get-AgentEnvironmentSetupChildErrorLine {
-    param([AllowNull()][string] $Stderr, [Parameter(Mandatory = $true)][string] $UserHome)
+    param(
+        [AllowNull()][string] $Stderr,
+        [Parameter(Mandatory = $true)][string] $UserHome,
+        [ValidateRange(3,2147483647)][int] $MaxLineLength = 160,
+        [ValidateRange(3,2147483647)][int] $MaxLength = 512
+    )
     $diagnostic = $Stderr
     if (-not [string]::IsNullOrWhiteSpace($diagnostic) -and $diagnostic.TrimStart().StartsWith('#< CLIXML',[StringComparison]::Ordinal)) {
         $serialized = [regex]::Replace($diagnostic,'^\s*#< CLIXML\s*','',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
@@ -385,11 +390,11 @@ function Get-AgentEnvironmentSetupChildErrorLine {
     $parts = [Collections.Generic.List[string]]::new()
     foreach ($line in $selected) {
         $normalized = [regex]::Replace([string]$line,'\s+',' ',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
-        if ($normalized.Length -gt 160) { $normalized = $normalized.Substring(0,157) + '...' }
+        if ($normalized.Length -gt $MaxLineLength) { $normalized = $normalized.Substring(0,$MaxLineLength-3) + '...' }
         $parts.Add($normalized)
     }
     $summary = $parts -join ' | '
-    if ($summary.Length -gt 512) { $summary = $summary.Substring(0,509) + '...' }
+    if ($summary.Length -gt $MaxLength) { $summary = $summary.Substring(0,$MaxLength-3) + '...' }
     return $summary
 }
 
