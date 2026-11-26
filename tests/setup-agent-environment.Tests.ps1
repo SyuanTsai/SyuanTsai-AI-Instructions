@@ -2755,7 +2755,14 @@ Write-Output 'SYP571 read-only fan-out verified existing Skills and instructions
         } $sourceZip
         Publish-AiInstructionsSourceCache -CodexHome $codexHome -RuntimeRoot $runtime -ExpectedCommit $commit -InstructionArchiveBytes ([IO.File]::ReadAllBytes($archive))
         $contract=Import-Module (Join-Path $script:UnixRepositoryRoot 'scripts/ai-instructions-runtime-contract.psm1') -Force -PassThru
-        $renderReceipt=[pscustomobject]@{os='linux';runtime=[pscustomobject]@{powerShellExecutablePath=$pwsh};capabilities=@([pscustomobject]@{name='powershell-runtime';status='available'})}
+        $renderReceipt=[pscustomobject]@{
+            os='linux'
+            runtime=[pscustomobject]@{powerShellExecutablePath=$pwsh}
+            capabilities=@([pscustomobject]@{
+                name='powershell-runtime';status='available'
+                evidence=@("Physical pwsh identity and version probe passed: $pwsh")
+            })
+        }
         $section=& $contract {param($template,$receipt)Get-AiInstructionsBootstrapSectionBytes -TemplateBytes $template -CapabilityReceipt $receipt} ([IO.File]::ReadAllBytes((Join-Path $runtime 'bootstrap-section.md'))) $renderReceipt
         $command=[regex]::Match([Text.Encoding]::UTF8.GetString($section),'codexHome="\$\{CODEX_HOME:-\$HOME/\.codex\}"; [^`\r\n]+')
         $command.Success|Should Be $true

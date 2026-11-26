@@ -72,7 +72,7 @@ function Get-SkillsSourceArchives {
 }
 
 function Assert-AiSourceCacheOwner {
-    param($Lease,[switch]$Directory)
+    param($Lease,[switch]$Directory,[switch]$Staging)
     $permissions=Get-PlatformPermissions -Lease $Lease
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
@@ -84,7 +84,7 @@ function Assert-AiSourceCacheOwner {
     } else {
         $mode=if($Directory){448}else{384}
         if ([uint64]$permissions.Uid -ne [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetEffectiveUserId() -or
-            [Convert]::ToUInt32([string]$permissions.Mode,8) -ne $mode) { throw 'Source cache requires current-user ownership and private 0700/0600 modes.' }
+            (-not $Staging -and [Convert]::ToUInt32([string]$permissions.Mode,8) -ne $mode)) { throw 'Source cache requires current-user ownership and private 0700/0600 modes.' }
     }
 }
 
@@ -102,12 +102,12 @@ function Assert-AiSourceCacheObject {
 }
 
 function Read-AiSourceCacheFile {
-    param($Parent,[string]$Leaf)
+    param($Parent,[string]$Leaf,[switch]$Staging)
     # Platform leases open regular files without following links and identity-check
     # before/after reading. Hash these bytes, never a second path-based read.
     $file=Open-PlatformFile -ParentLease $Parent -Leaf $Leaf -Access Read -CreateMode OpenExisting
     try {
-        Assert-AiSourceCacheOwner $file
+        Assert-AiSourceCacheOwner $file -Staging:$Staging
         $observed=Assert-PlatformFileIdentity -Lease $file -Expected $file.Observation -SingleLink -VerifyPath
         $bytes=[byte[]]$file.ReadAllBytes([int]$observed.Size)
         $hash=Get-AiSourceCacheHash $bytes
@@ -129,7 +129,8 @@ function Remove-AiSourceCacheSnapshot {
     } finally { $Snapshot.Lease.Dispose() }
     # Nonrecursive removal cannot traverse a substituted link or unknown entry.
     [IO.Directory]::Delete($Snapshot.Path,$false)
-    try { [IO.Directory]::Delete($Snapshot.StorePath,$false) } catch { Write-Verbose 'Other source cache snapshots still use the private store.' }
+    # Keep the shared store: another reader may have opened it but not yet
+    # created its snapshot. Snapshot cleanup does not hold the cache lock.
 }
 
 function Open-AiInstructionsSourceCache {
@@ -232,19 +233,20 @@ function Publish-AiInstructionsSourceCache {
         $cache=Open-PlatformDirectory -Root $CodexHome -RelativePath 'ai-instructions-source-cache' -CreatePrivate
         Assert-AiSourceCacheOwner $cache -Directory
         Confirm-PlatformDirectoryDurability -DirectoryLease $root | Out-Null
-        # Inspect existing entries without recursing through links. Unknown regular
-        # private files are preserved; unsafe ownership or links refuse publication.
-        $pending=[Collections.Generic.Queue[string]]::new();$pending.Enqueue($cacheRoot)
+        # Published entries stay strict. Staging may contain umask-mode downloads
+        # from an aborted writer; require owned, single-link regular files there,
+        # but preserve them since other readers can still be using snapshots.
+        $pending=[Collections.Generic.Queue[object]]::new();$pending.Enqueue(@{Path=$cacheRoot;Staging=$false})
         while($pending.Count -gt 0){
-            $directory=$pending.Dequeue()
+            $currentDirectory=$pending.Dequeue();$directory=$currentDirectory.Path
             $guard=Open-PlatformDirectory -Root $directory -RootOnly
             try {
                 Assert-AiSourceCacheOwner $guard -Directory
                 foreach($entry in Get-ChildItem -Force -LiteralPath $directory){
                     if(($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Source cache contains a reparse point.'}
-                    if($entry.PSIsContainer){$pending.Enqueue($entry.FullName)}else{
+                    if($entry.PSIsContainer){$pending.Enqueue(@{Path=$entry.FullName;Staging=($currentDirectory.Staging -or ($directory -ceq $cacheRoot -and $entry.Name -ceq '.ai-instructions-txn'))})}else{
                         $file=Open-PlatformFile -ParentLease $guard -Leaf $entry.Name -Access Read -CreateMode OpenExisting
-                        try{Assert-AiSourceCacheOwner $file;Assert-PlatformFileIdentity -Lease $file -Expected $file.Observation -SingleLink -VerifyPath | Out-Null}finally{$file.Dispose()}
+                        try{Assert-AiSourceCacheOwner $file -Staging:$currentDirectory.Staging;Assert-PlatformFileIdentity -Lease $file -Expected $file.Observation -SingleLink -VerifyPath | Out-Null}finally{$file.Dispose()}
                     }
                 }
             } finally {$guard.Dispose()}
@@ -263,10 +265,9 @@ function Publish-AiInstructionsSourceCache {
             # file mode before guarded reading, and publish only the locked bytes.
             $download=Open-PlatformFile -ParentLease $transaction -Leaf ([IO.Path]::GetFileName($path)) -Access Read -CreateMode OpenExisting
             try{
-                $permissions=Get-PlatformPermissions -Lease $download
-                if([uint64]$permissions.Uid -ne [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetEffectiveUserId()){throw 'Downloaded source archive is not owned by the current user.'}
+                Assert-AiSourceCacheOwner $download -Staging
                 Assert-PlatformFileIdentity -Lease $download -Expected $download.Observation -SingleLink -VerifyPath | Out-Null
-                Set-PlatformPermissions -Lease $download -Policy @{Mode=384} | Out-Null
+                if([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT){Set-PlatformPermissions -Lease $download -Policy @{Mode=384} | Out-Null}
             }finally{$download.Dispose()}
             $file=Read-AiSourceCacheFile $transaction ([IO.Path]::GetFileName($path))
             if($file.Hash -cne [string]$source.archiveSha256){throw 'Source cache acquisition SHA-256 differs from the runtime lock.'}
@@ -302,14 +303,14 @@ function Publish-AiInstructionsSourceCache {
         if($null -ne $transaction){
             try{
                 foreach($entry in Get-ChildItem -Force -LiteralPath $transactionPath){
-                    $file=Read-AiSourceCacheFile $transaction $entry.Name
+                    $file=Read-AiSourceCacheFile $transaction $entry.Name -Staging
                     Remove-PlatformOwnedFile -ParentLease $transaction -Leaf $entry.Name -ExpectedState $file.State | Out-Null
                 }
                 $transaction.Dispose();[IO.Directory]::Delete($transactionPath,$false)
             }catch{Write-Verbose 'Private source cache staging cleanup was deferred.'}
             finally{$transaction.Dispose()}
         }
-        if($null -ne $store){$store.Dispose();try{[IO.Directory]::Delete((Join-Path $cacheRoot '.ai-instructions-txn'),$false)}catch{Write-Verbose 'Source cache staging directory cleanup was deferred.'}}
+        if($null -ne $store){$store.Dispose()}
         if($null -ne $cache){$cache.Dispose()};if($null -ne $lock){$lock.Dispose()};if($null -ne $root){$root.Dispose()}
     }
 }
