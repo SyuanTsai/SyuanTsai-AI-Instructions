@@ -486,15 +486,16 @@ function Invoke-SetupProjectionCollisionPreflight {
     $preflightRun=Invoke-SetupCoordinatorChild -RuntimeExecutable $RuntimeExecutable -EntryPath $environmentEntry -CodexHome $CodexHome -UserHome $UserHome -Mode WhatIf -Environment $Environment -WorkingDirectory $RepositoryRoot
     $preflight=ConvertFrom-SetupOwnedJsonResult $preflightRun projection-failed 'USER projection WhatIf' $UserHome
     $preflightDecision=Resolve-AgentEnvironmentSetupProjectionResult $preflight -AllowedActions @('planned','current')
+    $childResult=Get-AgentEnvironmentSetupProjectionResultSummary -Result $preflight -UserHome $UserHome
     $childError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$preflightRun.stderr) -UserHome $UserHome
     if([string]$preflightDecision.code-ceq'projection-collision'){
-        throw (New-AgentEnvironmentSetupRefusal projection-collision "USER projection WhatIf refused unmanaged target bytes before runtime mutation. Child stderr: $childError")
+        throw (New-AgentEnvironmentSetupRefusal projection-collision "USER projection WhatIf refused unmanaged target bytes before runtime mutation. Child result: $childResult. Child stderr: $childError")
     }
     if($null-ne$preflightDecision.code){
-        throw (New-AgentEnvironmentSetupRefusal ([string]$preflightDecision.code) "USER projection WhatIf was refused before runtime mutation. Child stderr: $childError")
+        throw (New-AgentEnvironmentSetupRefusal ([string]$preflightDecision.code) "USER projection WhatIf was refused before runtime mutation. Child result: $childResult. Child stderr: $childError")
     }
     if([string]$preflightDecision.action-cnotin@('planned','current')){
-        throw (New-AgentEnvironmentSetupRefusal projection-failed "USER projection WhatIf returned an unsupported action. Child stderr: $childError")
+        throw (New-AgentEnvironmentSetupRefusal projection-failed "USER projection WhatIf returned an unsupported action. Child result: $childResult. Child stderr: $childError")
     }
 }
 
@@ -625,14 +626,16 @@ function Invoke-SetupLinuxCloudWiring {
     $applyRun=Invoke-SetupCoordinatorChild -RuntimeExecutable $RuntimeExecutable -EntryPath $environmentEntry -CodexHome $CodexHome -UserHome $UserHome -Mode Apply -Environment $Environment -WorkingDirectory $RepositoryRoot
     $apply=ConvertFrom-SetupOwnedJsonResult $applyRun projection-failed 'USER projection Apply' $UserHome
     $applyDecision=Resolve-AgentEnvironmentSetupProjectionResult $apply -AllowedActions @('applied','current')
+    $applyResult=Get-AgentEnvironmentSetupProjectionResultSummary -Result $apply -UserHome $UserHome
     $applyError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$applyRun.stderr) -UserHome $UserHome
-    if([string]$applyDecision.code-ceq'projection-collision'){throw (New-AgentEnvironmentSetupRefusal projection-collision "USER projection Apply refused unmanaged target bytes after the pre-mutation preflight. Child stderr: $applyError")}
-    if($null-ne$applyDecision.code){throw (New-AgentEnvironmentSetupRefusal ([string]$applyDecision.code) "USER projection Apply was refused. Child stderr: $applyError")}
+    if([string]$applyDecision.code-ceq'projection-collision'){throw (New-AgentEnvironmentSetupRefusal projection-collision "USER projection Apply refused unmanaged target bytes after the pre-mutation preflight. Child result: $applyResult. Child stderr: $applyError")}
+    if($null-ne$applyDecision.code){throw (New-AgentEnvironmentSetupRefusal ([string]$applyDecision.code) "USER projection Apply was refused. Child result: $applyResult. Child stderr: $applyError")}
     $verifyRun=Invoke-SetupCoordinatorChild -RuntimeExecutable $RuntimeExecutable -EntryPath $environmentEntry -CodexHome $CodexHome -UserHome $UserHome -Mode VerifyOnly -Environment $Environment -WorkingDirectory $RepositoryRoot
     $verify=ConvertFrom-SetupOwnedJsonResult $verifyRun projection-failed 'USER projection VerifyOnly' $UserHome
     $verifyDecision=Resolve-AgentEnvironmentSetupProjectionResult $verify -AllowedActions current
+    $verifyResult=Get-AgentEnvironmentSetupProjectionResultSummary -Result $verify -UserHome $UserHome
     $verifyError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$verifyRun.stderr) -UserHome $UserHome
-    if($null-ne$verifyDecision.code-or$verifyDecision.action-cne'current'){throw (New-AgentEnvironmentSetupRefusal $(if($null-ne$verifyDecision.code){[string]$verifyDecision.code}else{'projection-failed'}) "USER projection readiness verification was refused. Child stderr: $verifyError")}
+    if($null-ne$verifyDecision.code-or$verifyDecision.action-cne'current'){throw (New-AgentEnvironmentSetupRefusal $(if($null-ne$verifyDecision.code){[string]$verifyDecision.code}else{'projection-failed'}) "USER projection readiness verification was refused. Child result: $verifyResult. Child stderr: $verifyError")}
     return [pscustomobject][ordered]@{runtimeCommit=[string]$activeBundle.commit;installAction=$installAction;projectionAction=[string]$applyDecision.action}
 }
 
@@ -812,7 +815,9 @@ try {
     $runtimeDirectory = [string]$runtimeReceipt.runtimeClosure.rootPath
     $arguments = @('-NoLogo','-NoProfile','-NonInteractive','-File',(Join-Path $PSScriptRoot 'setup-agent-environment.ps1'),'-Canonical',$(if ($Prepare) { '-Prepare' } else { '-Offline' }),'-ExpectedCommit',$ExpectedCommit,'-ArchivePath',$archive,'-RuntimeReceiptPath',$verifiedRuntimeReceiptPath)
     $child = Invoke-PlatformPreparationCommand -Command $runtimeExecutable -Arguments $arguments -Environment (Get-AgentEnvironmentSetupChildEnvironment $runtimeDirectory $userHome) -WorkingDirectory $layout.SetupRoot -TimeoutMilliseconds 1800000
-    $canonicalChildError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$child.stderr) -UserHome $userHome
+    # A refusal combines fixed text, a 1024-character result and a 512-character
+    # stderr summary; 2048 fits one line and 4096 leaves room for context lines.
+    $canonicalChildError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$child.stderr) -UserHome $userHome -MaxLineLength 2048 -MaxLength 4096
     if($canonicalChildError-cne'<empty>'){Write-SetupDiagnostic ('canonical stage: '+$canonicalChildError)}
     $childLines = @(([string]$child.stdout).Split("`n") | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_.Length -gt 0 })
     if ($childLines.Count -ne 1) { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed "The canonical stage did not return exactly one JSON line. Child stderr: $canonicalChildError") }

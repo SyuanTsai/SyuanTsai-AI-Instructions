@@ -956,6 +956,196 @@ exit 0
         $directError.stderr|Should Match 'fixture encoded diagnostic'
         $directError.stderr|Should Not Match '^#< CLIXML'
     }
+    # Scenario: A failed coordinator result includes five details, HOME paths and credential-shaped values.
+    # Purpose: Keep the first failure and three actionable details visible in a bounded, sanitized single line.
+    It 'UnitT52_summarizes_failed_projection_JSON_without_exposing_HOME_or_secrets' {
+        $diagnosticHome = Join-Path $TestDrive 'projection-summary-home'
+        $details = @(1..5 | ForEach-Object {
+            [pscustomobject]@{code="detail-$_";skillId="skill-$_";path="$diagnosticHome/.claude/x";evidence="token=fixture-secret`n evidence";remediation=@("repair $_`nsecond-line",'later-remediation')}
+        })
+        $result = [pscustomobject]@{outcome='failed';exitCode=1;Code='some-code';failed=@('first failure','later failure');failureDetails=$details}
+        $summary = Get-AgentEnvironmentSetupProjectionResultSummary -Result $result -UserHome $diagnosticHome
+        $summary | Should Match 'outcome=failed; exitCode=1; Code=some-code'
+        $summary | Should Match 'failed=first failure'
+        foreach ($number in 1..3) { $summary | Should Match "code=detail-$number" }
+        $summary | Should Match 'skillId=skill-1'
+        $summary | Should Match 'path=~/.claude/x'
+        $summary | Should Match 'evidence=token=\[REDACTED\] evidence'
+        $summary | Should Match 'remediation=repair 1'
+        $summary | Should Match '\(\+2 more\)'
+        $summary | Should Not Match 'detail-[45]|later failure|second-line|later-remediation|fixture-secret|[\r\n]'
+        $summary | Should Not Match ([regex]::Escape($diagnosticHome))
+        $summary.Length | Should BeLessOrEqual 1024
+    }
+
+    # Scenario: Coordinator JSON has absent/null fields, scalar collections or a single detail object.
+    # Purpose: Ensure diagnostics never obscure a refusal by throwing on incomplete or oddly typed JSON.
+    It 'UnitT53_tolerates_missing_null_and_scalar_projection_result_fields' {
+        foreach ($result in @($null,[pscustomobject]@{},42,[pscustomobject]@{Code=$null;failed=42;failureDetails='odd'},[pscustomobject]@{Code=$null;failureDetails=@($null,42)})) {
+            { Get-AgentEnvironmentSetupProjectionResultSummary -Result $result -UserHome $TestDrive } | Should Not Throw
+            $summary = Get-AgentEnvironmentSetupProjectionResultSummary -Result $result -UserHome $TestDrive
+            $summary | Should Match 'outcome=<none>; exitCode=<none>; Code=<none>'
+        }
+        $single = [pscustomobject]@{Code=$null;failureDetails=[pscustomobject]@{code='single-detail';remediation="first line`nsecond line"}}
+        $summary = Get-AgentEnvironmentSetupProjectionResultSummary -Result $single -UserHome $TestDrive
+        $summary | Should Match 'Code=<none>'
+        $summary | Should Match 'code=single-detail; skillId=<none>; path=<none>; evidence=<none>; remediation=first line'
+        $summary | Should Not Match 'second line'
+    }
+
+    # Scenario: Every coordinator field is longer than a diagnostic line and five details are returned.
+    # Purpose: Cap individual fields and the entire summary while retaining the omitted-detail count.
+    It 'UnitT54_bounds_projection_summary_fields_and_retains_the_truncation_marker' {
+        $long = 'x' * 2000
+        $result = [pscustomobject]@{outcome=$long;exitCode=$long;Code=$long;failed=$long;failureDetails=@(1..5 | ForEach-Object { [pscustomobject]@{code=$long;skillId=$long;path=$long;evidence=$long;remediation=$long} })}
+        $summary = Get-AgentEnvironmentSetupProjectionResultSummary -Result $result -UserHome $TestDrive
+        $summary.Length | Should BeLessOrEqual 1024
+        $summary | Should Match 'outcome=x{157}\.\.\.;'
+        $summary | Should Not Match 'x{158}'
+        $summary | Should Match '\.\.\..*\(\+2 more\)$'
+    }
+
+    # Scenario: The real coordinator child emits failed JSON with empty stderr during WhatIf.
+    # Purpose: Execute the production preflight's coordinator/refusal tail, isolating earlier install/bootstrap work, and preserve its typed refusal with sanitized JSON evidence.
+    It 'UnitT55_reports_failed_WhatIf_JSON_in_the_production_refusal_with_empty_stderr' {
+        function Invoke-SetupOwnedCommand {
+            param([string]$RuntimeExecutable,[string[]]$Arguments,[Collections.IDictionary]$Environment,[string]$WorkingDirectory,[string]$FailureCode,[string]$Context,[switch]$AllowNonZero)
+            $start=[Diagnostics.ProcessStartInfo]::new($RuntimeExecutable)
+            $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true;$start.WorkingDirectory=$WorkingDirectory
+            foreach($argument in $Arguments){[void]$start.ArgumentList.Add($argument)}
+            foreach($key in $Environment.Keys){$start.Environment[[string]$key]=[string]$Environment[$key]}
+            $process=[Diagnostics.Process]::new();$process.StartInfo=$start
+            try{
+                if(-not$process.Start()){throw 'fixture child could not start'}
+                $process.StandardInput.Close()
+                $stdoutTask=$process.StandardOutput.ReadToEndAsync();$stderrTask=$process.StandardError.ReadToEndAsync();$process.WaitForExit()
+                return [pscustomobject]@{exitCode=$process.ExitCode;stdout=$stdoutTask.Result;stderr=$stderrTask.Result}
+            }finally{$process.Dispose()}
+        }
+        foreach ($name in @('Invoke-SetupEncodedChild','Invoke-SetupCoordinatorChild','ConvertFrom-SetupOwnedJsonResult')) {
+            . ([scriptblock]::Create((Get-SetupTestEntryFunctionSource $name)))
+        }
+        $UserHome = Join-Path $TestDrive 'refusal-home'
+        [void][IO.Directory]::CreateDirectory($UserHome)
+        $CodexHome = Join-Path $UserHome '.codex'
+        $RepositoryRoot = $TestDrive
+        $RuntimeExecutable = [Environment]::ProcessPath
+        $Environment = [ordered]@{HOME=$UserHome;USERPROFILE=$UserHome;CODEX_HOME=$CodexHome}
+        $environmentEntry = Join-Path $TestDrive 'fixture-refusing-coordinator.ps1'
+        [IO.File]::WriteAllText($environmentEntry,@'
+[CmdletBinding(SupportsShouldProcess=$true)]param([string]$CodexHome,[string]$UserHome,[switch]$Apply,[switch]$VerifyOnly,[string]$OutputFormat)
+[pscustomobject]@{outcome='failed';exitCode=1;Code='some-code';failureDetails=@([pscustomobject]@{code='mutation-failure';path="$UserHome/.claude/x";evidence='token=fixture-secret'})}|ConvertTo-Json -Depth 5 -Compress
+exit 1
+'@,[Text.UTF8Encoding]::new($false))
+        $preflightSource = Get-SetupTestEntryFunctionSource Invoke-SetupProjectionCollisionPreflight
+        $start = $preflightSource.IndexOf('$preflightRun=Invoke-SetupCoordinatorChild',[StringComparison]::Ordinal)
+        $start | Should BeGreaterThan 0
+        $refusalTail = $preflightSource.Substring($start,$preflightSource.LastIndexOf('}')-$start)
+        $failure = $null
+        try { & ([scriptblock]::Create($refusalTail)) } catch { $failure = $_ }
+        $failure | Should Not BeNullOrEmpty
+        $message = $failure.Exception.Message
+        $message | Should Match '^USER projection WhatIf was refused before runtime mutation\.'
+        foreach ($expected in @('Child result:','outcome=failed','Code=some-code','mutation-failure','~/.claude/x','token=[REDACTED]','Child stderr: <empty>','[agent-environment-setup-code=projection-failed]')) {
+            $message | Should Match ([regex]::Escape($expected))
+        }
+        $message | Should Not Match ([regex]::Escape($UserHome))
+        $message | Should Not Match 'fixture-secret'
+        (Get-AgentEnvironmentSetupRefusalCode $failure) | Should BeExactly 'projection-failed'
+    }
+
+    # Scenario: The coordinator emits only a failed reason for a 403 archive download, with no failureDetails and empty stderr.
+    # Purpose: Preserve that reason in the production WhatIf refusal and the result summary shared by Apply and VerifyOnly.
+    It 'UnitT56_reports_failed_only_WhatIf_JSON_in_the_production_refusal_with_empty_stderr' {
+        $coordinatorRuns = [Collections.Generic.List[object]]::new()
+        function Invoke-SetupOwnedCommand {
+            param([string]$RuntimeExecutable,[string[]]$Arguments,[Collections.IDictionary]$Environment,[string]$WorkingDirectory,[string]$FailureCode,[string]$Context,[switch]$AllowNonZero)
+            $start=[Diagnostics.ProcessStartInfo]::new($RuntimeExecutable)
+            $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true;$start.WorkingDirectory=$WorkingDirectory
+            foreach($argument in $Arguments){[void]$start.ArgumentList.Add($argument)}
+            foreach($key in $Environment.Keys){$start.Environment[[string]$key]=[string]$Environment[$key]}
+            $process=[Diagnostics.Process]::new();$process.StartInfo=$start
+            try{
+                if(-not$process.Start()){throw 'fixture child could not start'}
+                $process.StandardInput.Close()
+                $stdoutTask=$process.StandardOutput.ReadToEndAsync();$stderrTask=$process.StandardError.ReadToEndAsync();$process.WaitForExit()
+                $run=[pscustomobject]@{exitCode=$process.ExitCode;stdout=$stdoutTask.Result;stderr=$stderrTask.Result}
+                $coordinatorRuns.Add($run)
+                return $run
+            }finally{$process.Dispose()}
+        }
+        foreach ($name in @('Invoke-SetupEncodedChild','Invoke-SetupCoordinatorChild','ConvertFrom-SetupOwnedJsonResult')) {
+            . ([scriptblock]::Create((Get-SetupTestEntryFunctionSource $name)))
+        }
+        $UserHome = Join-Path $TestDrive 'failed-only-refusal-home'
+        [void][IO.Directory]::CreateDirectory($UserHome)
+        $CodexHome = Join-Path $UserHome '.codex'
+        $RepositoryRoot = $TestDrive
+        $RuntimeExecutable = [Environment]::ProcessPath
+        $Environment = [ordered]@{HOME=$UserHome;USERPROFILE=$UserHome;CODEX_HOME=$CodexHome}
+        $failedJson = '{"schemaVersion":1,"outcome":"failed","exitCode":1,"Code":null,"runtimeCommit":null,"catalogCommit":null,"installed":[],"updated":[],"removed":[],"preserved":[],"failed":["Response status code does not indicate success: 403 (Forbidden)."],"rollbackState":"not-started","backupPath":null}'
+        $environmentEntry = Join-Path $TestDrive 'fixture-failed-only-coordinator.ps1'
+        $fixtureSource = @(
+            '[CmdletBinding(SupportsShouldProcess=$true)]param([string]$CodexHome,[string]$UserHome,[switch]$Apply,[switch]$VerifyOnly,[string]$OutputFormat)'
+            "'$failedJson'"
+            'exit 1'
+        ) -join "`n"
+        [IO.File]::WriteAllText($environmentEntry,$fixtureSource,[Text.UTF8Encoding]::new($false))
+        $failedReason = 'failed=Response status code does not indicate success: 403 (Forbidden).'
+        # Apply and VerifyOnly use the same summary for this result shape.
+        $summary = Get-AgentEnvironmentSetupProjectionResultSummary -Result ($failedJson | ConvertFrom-Json) -UserHome $UserHome
+        $summary | Should Match ([regex]::Escape($failedReason))
+
+        $preflightSource = Get-SetupTestEntryFunctionSource Invoke-SetupProjectionCollisionPreflight
+        $start = $preflightSource.IndexOf('$preflightRun=Invoke-SetupCoordinatorChild',[StringComparison]::Ordinal)
+        $start | Should BeGreaterThan 0
+        $refusalTail = $preflightSource.Substring($start,$preflightSource.LastIndexOf('}')-$start)
+        $failure = $null
+        try { & ([scriptblock]::Create($refusalTail)) } catch { $failure = $_ }
+        $coordinatorRuns.Count | Should Be 1
+        $coordinatorRuns[0].exitCode | Should Be 1
+        $coordinatorRuns[0].stdout | Should BeExactly ($failedJson + [Environment]::NewLine)
+        $coordinatorRuns[0].stderr | Should BeExactly ''
+        $failure | Should Not BeNullOrEmpty
+        $message = $failure.Exception.Message
+        $message | Should Match '^USER projection WhatIf was refused before runtime mutation\.'
+        foreach ($expected in @('outcome=failed','Code=<none>',$failedReason,'Child stderr: <empty>','[agent-environment-setup-code=projection-failed]')) {
+            $message | Should Match ([regex]::Escape($expected))
+        }
+        $message | Should Not Match 'failureDetails\['
+        (Get-AgentEnvironmentSetupRefusalCode $failure) | Should BeExactly 'projection-failed'
+    }
+
+    # Scenario: A default stderr line exceeds 160 characters and a canonical refusal carries a failure reason after character 1500.
+    # Purpose: Preserve the default truncation while larger bounds retain the full refusal with HOME and secrets sanitized.
+    It 'UnitT57_preserves_default_child_error_bounds_and_full_sanitized_canonical_refusals' {
+        (Get-AgentEnvironmentSetupChildErrorLine -Stderr ('x' * 200) -UserHome $TestDrive) | Should BeExactly (('x' * 157) + '...')
+
+        $diagnosticHome = Join-Path $TestDrive 'canonical-refusal-home'
+        $prefix = 'setup-agent-environment: USER projection WhatIf was refused before runtime mutation. Child result: ' + ('x' * 1450)
+        $failedReason = 'failed=Response status code does not indicate success: 403 (Forbidden).'
+        $refusal = "$prefix; $failedReason Child stderr: $diagnosticHome/.claude/x token=fixture-secret [agent-environment-setup-code=projection-failed]"
+        $refusal.IndexOf($failedReason,[StringComparison]::Ordinal) | Should BeGreaterThan 1500
+        $summary = Get-AgentEnvironmentSetupChildErrorLine -Stderr $refusal -UserHome $diagnosticHome -MaxLineLength 2048 -MaxLength 4096
+        $summary | Should BeExactly "$prefix; $failedReason Child stderr: ~/.claude/x token=[REDACTED] [agent-environment-setup-code=projection-failed]"
+        $summary | Should Match ([regex]::Escape($failedReason))
+        $summary | Should Not Match ([regex]::Escape($diagnosticHome))
+        $summary | Should Not Match 'fixture-secret'
+    }
+
+    # Scenario: The outer stage summarizes the canonical child's stderr before reporting or rethrowing its refusal.
+    # Purpose: Keep that call site's bounds large enough for the canonical refusal instead of applying the default 160/512 caps again.
+    It 'UnitT58_uses_larger_child_error_bounds_only_at_the_outer_canonical_stage' {
+        $entryText = [IO.File]::ReadAllText($script:SetupEntryPath)
+        $canonicalCalls = @([regex]::Matches($entryText,'(?m)^\s*\$canonicalChildError\s*=\s*(Get-AgentEnvironmentSetupChildErrorLine[^\r\n]*)'))
+        $canonicalCalls.Count | Should Be 1
+        $callSource = $canonicalCalls[0].Groups[1].Value
+        $callSource | Should Match '-Stderr\s+\(\[string\]\$child\.stderr\)'
+        $callSource | Should Match '-UserHome\s+\$userHome\b'
+        $callSource | Should Match '-MaxLineLength\s+2048\b'
+        $callSource | Should Match '-MaxLength\s+4096\b'
+        @([regex]::Matches($entryText,'Get-AgentEnvironmentSetupChildErrorLine[^\r\n]*-MaxLineLength')).Count | Should Be 1
+    }
 }
 
 # Register only on the native host; keep this file's Core CI skip count at zero.
