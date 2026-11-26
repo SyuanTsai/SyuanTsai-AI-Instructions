@@ -1146,6 +1146,32 @@ exit 1
         $callSource | Should Match '-MaxLength\s+4096\b'
         @([regex]::Matches($entryText,'Get-AgentEnvironmentSetupChildErrorLine[^\r\n]*-MaxLineLength')).Count | Should Be 1
     }
+
+    # Scenario: Linux setup reaches successful runtime/projection verification before publishing source archives.
+    # Purpose: Keep cache publication inside the completed path, hardened exact-commit git acquisition and existing typed refusal boundary.
+    It 'UnitT59_binds_source_cache_publication_to_verified_Linux_setup' {
+        $tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($script:SetupEntryPath,[ref]$tokens,[ref]$errors)
+        $wiring=$ast.Find({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Invoke-SetupLinuxCloudWiring'},$true).Extent.Text
+        $wiring.IndexOf('Publish-AiInstructionsSourceCache',[StringComparison]::Ordinal)|Should BeGreaterThan $wiring.IndexOf('USER projection readiness verification',[StringComparison]::Ordinal)
+        $wiring|Should Match "'archive','--format=zip'"
+        $wiring|Should Match '--prefix=instructions-\$ExpectedCommit/'
+        $wiring|Should Match 'Publish-AiInstructionsSourceCache[^\r\n]*-ExpectedCommit \$ExpectedCommit'
+        $wiring|Should Match 'New-AgentEnvironmentSetupRefusal update-failed "Runtime and USER projections verified, but source cache publication failed:'
+    }
+
+    # Scenario: Setup's catalog pin differs from the installed bundle/expected commit.
+    # Purpose: Refuse before creating any cache or changing the commit fan-out consumes.
+    It 'UnitT60_refuses_source_cache_commit_identity_mismatch_before_publication' {
+        Import-Module (Join-Path $script:SetupScripts 'skills-source-retrieval.psm1') -Force
+        $fixtureHome=Join-Path $TestDrive 'cache-identity-refusal'
+        $runtime=Join-Path $fixtureHome 'hooks/ai-instructions-runtime'
+        [void][IO.Directory]::CreateDirectory($runtime)
+        [IO.File]::WriteAllText((Join-Path $fixtureHome 'ai-instructions-sync.json'),(@{catalog=@{ref=('b'*40)}}|ConvertTo-Json))
+        [IO.File]::WriteAllText((Join-Path $runtime 'runtime-bundle.json'),(@{commit=('a'*40)}|ConvertTo-Json))
+        {Publish-AiInstructionsSourceCache -CodexHome $fixtureHome -RuntimeRoot $runtime -ExpectedCommit ('a'*40) -InstructionArchiveBytes ([byte[]]@(1))}|Should Throw 'to be identical'
+        Test-Path (Join-Path $fixtureHome 'ai-instructions-source-cache')|Should Be $false
+    }
 }
 
 # Register only on the native host; keep this file's Core CI skip count at zero.
@@ -2175,6 +2201,9 @@ $runtime = Join-Path $CodexHome 'hooks/ai-instructions-runtime'; [void][IO.Direc
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts/fixture-ai-instructions-updater.psm1') -Destination (Join-Path $runtime 'ai-instructions-updater.psm1') -Force
 [void][IO.Directory]::CreateDirectory((Join-Path $runtime 'catalog'))
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'catalog/skills-catalog.json') -Destination (Join-Path $runtime 'catalog/skills-catalog.json') -Force
+Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'catalog/skills-catalog-lock.json') -Destination (Join-Path $runtime 'catalog/skills-catalog-lock.json') -Force
+Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts/fixture-source.zip') -Destination (Join-Path $runtime 'fixture-source.zip') -Force
+Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts/fixture-skills-source-retrieval.psm1') -Destination (Join-Path $runtime 'skills-source-retrieval.psm1') -Force
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts/skills-selection.psm1') -Destination (Join-Path $runtime 'skills-selection.psm1') -Force
 [void][IO.Directory]::CreateDirectory((Join-Path $CodexHome 'hooks'))
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts/fixture-update-agent-environment.ps1') -Destination (Join-Path $CodexHome 'hooks/update-agent-environment.ps1') -Force
@@ -2195,6 +2224,32 @@ $configuration = [pscustomobject][ordered]@{schemaVersion=5;catalog=$catalogSele
         [void][IO.Directory]::CreateDirectory((Join-Path $script:UnixRepo 'catalog'))
         Copy-Item -LiteralPath (Join-Path $script:UnixRepositoryRoot 'catalog/skills-catalog.json') -Destination (Join-Path $script:UnixRepo 'catalog/skills-catalog.json')
         Copy-Item -LiteralPath (Join-Path $script:UnixRepositoryRoot 'scripts/skills-selection.psm1') -Destination (Join-Path $script:UnixRepo 'scripts/skills-selection.psm1')
+        # Existing cloud fixtures have a closed proxy and a local coordinator.
+        # Preserve real cache publication; replace only remote acquisition with
+        # one local ZIP, whose exact hash is recorded for every fixture lock source.
+        $fixtureZip=Join-Path $script:UnixRepo 'scripts/fixture-source.zip'
+        $zipStream=[IO.File]::Create($fixtureZip)
+        $zip=[IO.Compression.ZipArchive]::new($zipStream,[IO.Compression.ZipArchiveMode]::Create,$false)
+        try{
+            $writer=[IO.StreamWriter]::new($zip.CreateEntry('fixture-source/README.md').Open())
+            try{$writer.Write('Local setup source fixture')}finally{$writer.Dispose()}
+        }finally{$zip.Dispose();$zipStream.Dispose()}
+        $fixtureLock=Get-Content -Raw (Join-Path $script:UnixRepositoryRoot 'catalog/skills-catalog-lock.json')|ConvertFrom-Json
+        foreach($source in $fixtureLock.sources){$source.archiveSha256=(Get-FileHash $fixtureZip -Algorithm SHA256).Hash.ToLowerInvariant()}
+        [IO.File]::WriteAllText((Join-Path $script:UnixRepo 'catalog/skills-catalog-lock.json'),($fixtureLock|ConvertTo-Json -Depth 30))
+        $localRetrieval=@'
+function Get-SkillsSourceArchives {
+    param($Plan,[string]$DestinationRoot,[hashtable]$LocalArchiveOverrides=@{})
+    $result=@{}
+    foreach($source in $Plan.Sources){
+        $destination=Join-Path $DestinationRoot ($source.id+'.zip')
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'fixture-source.zip') -Destination $destination
+        $result[[string]$source.id]=$destination
+    }
+    return $result
+}
+'@
+        [IO.File]::WriteAllText((Join-Path $script:UnixRepo 'scripts/fixture-skills-source-retrieval.psm1'),([IO.File]::ReadAllText((Join-Path $script:UnixRepositoryRoot 'scripts/skills-source-retrieval.psm1'))+"`n"+$localRetrieval))
         [void][IO.Directory]::CreateDirectory((Join-Path $script:UnixRepo 'instructions/common'))
         Copy-Item -LiteralPath (Join-Path $script:UnixRepositoryRoot 'instructions/common/bootstrap-section.md') -Destination (Join-Path $script:UnixRepo 'instructions/common/bootstrap-section.md')
         & git -C $script:UnixRepo init -q 2>$null | Out-Null
@@ -2426,6 +2481,41 @@ $configuration = [pscustomobject][ordered]@{schemaVersion=5;catalog=$catalogSele
 
     # CloudT1-T7 are Linux-only: macOS deliberately retains the runtime-only P10a contract and has no default mode.
     if ($IsLinux) {
+    # Scenario: A completed setup has verified runtime, USER projections and all local fixture source archives.
+    # Purpose: Bind the cache to catalog.ref/bundle/expected commit, private modes, lock hashes and a byte-identical same-pin rerun.
+    It 'CloudT0_writes_a_private_commit_bound_source_cache_without_same_pin_rewrites' {
+        $userHome=New-UnixHome 'cloud-source-cache'
+        $first=Invoke-UnixSetup $userHome @();Assert-SetupTestExitCode $first 0
+        $codexHome=Join-Path $userHome '.codex';$cache=Join-Path $codexHome 'ai-instructions-source-cache'
+        $manifest=Get-Content -Raw (Join-Path $cache 'manifest.json')|ConvertFrom-Json
+        $configuration=Get-Content -Raw (Join-Path $codexHome 'ai-instructions-sync.json')|ConvertFrom-Json
+        $bundle=Get-Content -Raw (Join-Path $codexHome 'hooks/ai-instructions-runtime/runtime-bundle.json')|ConvertFrom-Json
+        $manifest.commit|Should BeExactly $script:UnixCommits['runtime']
+        $manifest.commit|Should BeExactly $configuration.catalog.ref;$manifest.commit|Should BeExactly $bundle.commit
+        Assert-UnixPrivatePath $cache '700'
+        foreach($file in Get-ChildItem $cache -File){Assert-UnixPrivatePath $file.FullName '600'}
+        $lockPath=Join-Path $codexHome 'hooks/ai-instructions-runtime/catalog/skills-catalog-lock.json'
+        $manifest.lockSha256|Should BeExactly (Get-FileHash $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $lock=Get-Content -Raw $lockPath|ConvertFrom-Json
+        @($manifest.sources).Count|Should Be @($lock.sources).Count
+        foreach($source in $manifest.sources){
+            $actual=(Get-FileHash (Join-Path $cache $source.fileName) -Algorithm SHA256).Hash.ToLowerInvariant()
+            $actual|Should BeExactly $source.archiveSha256
+            $actual|Should BeExactly (@($lock.sources|Where-Object id -CEQ $source.id)[0].archiveSha256)
+        }
+        $instruction=Join-Path $cache $manifest.instruction.fileName
+        (Get-FileHash $instruction -Algorithm SHA256).Hash.ToLowerInvariant()|Should BeExactly $manifest.instruction.sha256
+        # Inspect the exact-commit git archive as fan-out does, including its one root.
+        Import-Module (Join-Path $script:UnixRepositoryRoot 'scripts/safe-zip.psm1') -Force
+        $extracted=Expand-SafeZipRepository -ArchivePath $instruction -DestinationRoot (Join-Path $script:UnixRoot 'cache-instruction-extract')
+        Test-Path (Join-Path $extracted 'instructions/common/bootstrap-section.md')|Should Be $true
+        $before=Get-UnixTreeSnapshot $cache
+        $times=@(Get-ChildItem $cache -File|Sort-Object Name|ForEach-Object{$_.LastWriteTimeUtc.Ticks}) -join ','
+        Assert-SetupTestExitCode (Invoke-UnixSetup $userHome @()) 0
+        (Get-UnixTreeSnapshot $cache)|Should BeExactly $before
+        (@(Get-ChildItem $cache -File|Sort-Object Name|ForEach-Object{$_.LastWriteTimeUtc.Ticks}) -join ',')|Should BeExactly $times
+    }
+
     # Scenario: Linux setup is rerun at the same immutable commit after the first cloud projection and its committed empty transaction store.
     # Purpose: Exercise read-only same-pin validation with closed stdin and prove all CODEX_HOME/managed USER bytes remain stable.
     It 'CloudT1_reruns_the_same_pin_through_the_updater_without_managed_tree_changes' {
@@ -2586,6 +2676,138 @@ Write-Output 'SYP571 read-only fan-out verified existing Skills and instructions
         )-join"`n"
         $after|Should BeExactly $before
     }
+    }
+
+    # Scenario: After setup, D13 runs the real verified updater and multisource with GitHub unreachable.
+    # Purpose: Verify both managed instruction families and their manifest from setup's cache, plus a stable offline rerun of the consumer tree.
+    It 'CloudT1b_runs_real_installed_fanout_from_cache_with_GitHub_unreachable' {
+        $setupHome=New-UnixHome 'cloud-real-offline-setup'
+        Assert-SetupTestExitCode (Invoke-UnixSetup $setupHome @()) 0
+        $receipt=Get-Content -Raw (Join-Path $setupHome ".local/share/ai-instructions-setup/receipts/runtime-$($script:UnixVersion)-$($script:UnixRid).json")|ConvertFrom-Json
+        $pwsh=ConvertFrom-AgentEnvironmentSetupHomePath $receipt.executablePath $setupHome
+        $candidate=Join-Path $script:UnixRoot 'real-offline-candidate';[void][IO.Directory]::CreateDirectory($candidate)
+        foreach($relative in @('scripts','catalog','.codex','.github','.claude')){
+            Copy-Item -LiteralPath (Join-Path $script:UnixRepositoryRoot $relative) -Destination $candidate -Recurse
+        }
+        [void][IO.Directory]::CreateDirectory((Join-Path $candidate 'instructions/common'))
+        Copy-Item -LiteralPath (Join-Path $script:UnixRepositoryRoot 'instructions/common/bootstrap-section.md') -Destination (Join-Path $candidate 'instructions/common/bootstrap-section.md')
+        foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){
+            Copy-Item -LiteralPath (Join-Path $script:UnixRepositoryRoot $leaf) -Destination (Join-Path $candidate $leaf)
+        }
+        # Native cloud fixtures already supply source acquisition locally. Use the
+        # same ZIP/hash here, leaving installed updater and multisource untouched.
+        # Exclude Skills for this instructions-only consumer; setup cache tests
+        # above verify every lock source even when none is selected by fan-out.
+        $sourceZip=Join-Path $script:UnixRepo 'scripts/fixture-source.zip'
+        $candidateLock=Get-Content -Raw (Join-Path $candidate 'catalog/skills-catalog-lock.json')|ConvertFrom-Json
+        foreach($source in $candidateLock.sources){$source.archiveSha256=(Get-FileHash $sourceZip -Algorithm SHA256).Hash.ToLowerInvariant()}
+        [IO.File]::WriteAllText((Join-Path $candidate 'catalog/skills-catalog-lock.json'),($candidateLock|ConvertTo-Json -Depth 30))
+        & git -C $candidate init -q
+        & git -C $candidate remote add origin 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
+        & git -C $candidate add -A
+        & git -C $candidate -c user.name=setup-test -c user.email=setup-test@example.invalid commit -q -m fixture
+        $commit=([string](& git -C $candidate rev-parse HEAD)).Trim()
+        $archive=Join-Path $script:UnixRoot 'real-offline-instructions.zip'
+        & git -c core.fsmonitor=false -c core.hooksPath=/dev/null -C $candidate archive --format=zip --prefix=instruction-root/ --output=$archive $commit
+        $LASTEXITCODE|Should Be 0
+        $consumerHome=New-UnixHome 'real-offline-consumer' -WithoutCache
+        $codexHome=Join-Path $consumerHome '.codex'
+        $target=Join-Path $consumerHome 'consumer';[void][IO.Directory]::CreateDirectory($target)
+        & git -C $target init -q
+        & git -C $target remote add origin 'https://example.test/team/consumer.git'
+        [IO.File]::WriteAllText((Join-Path $target 'README.md'),'Consumer fixture')
+        & git -C $target add README.md
+        & git -C $target -c user.name=setup-test -c user.email=setup-test@example.invalid commit -q -m fixture
+        $environment=@{HOME=$consumerHome;USERPROFILE=$consumerHome;CODEX_HOME=$codexHome;XDG_CONFIG_HOME=(Join-Path $consumerHome '.config');XDG_DATA_HOME=(Join-Path $consumerHome '.local/share');XDG_CACHE_HOME=(Join-Path $consumerHome '.cache');APPDATA=(Join-Path $consumerHome '.config');LOCALAPPDATA=(Join-Path $consumerHome '.local/share')}
+        function Invoke-RealOfflineFixtureChild {
+            param([string]$Executable,[string[]]$Arguments)
+            $start=[Diagnostics.ProcessStartInfo]::new($Executable)
+            foreach($argument in $Arguments){$start.ArgumentList.Add($argument)}
+            $start.UseShellExecute=$false;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true;$start.WorkingDirectory=$target
+            foreach($key in $environment.Keys){$start.Environment[$key]=$environment[$key]}
+            # Closed proxy avoids TLS termination/certificate installation in CI.
+            # Real HTTP 401/403/407 responses are covered by updater unit tests.
+            $start.Environment['HTTPS_PROXY']='http://127.0.0.1:9';$start.Environment['https_proxy']='http://127.0.0.1:9';$start.Environment['NO_PROXY']='';$start.Environment['no_proxy']=''
+            $process=[Diagnostics.Process]::Start($start)
+            try{
+                $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+                if(-not$process.WaitForExit(120000)){$process.Kill($true);throw 'Real offline fan-out fixture timed out.'}
+                $process.WaitForExit()
+                return [pscustomobject]@{ExitCode=$process.ExitCode;Text=($stdout.Result+$stderr.Result)}
+            }finally{$process.Dispose()}
+        }
+        $install=Invoke-RealOfflineFixtureChild $pwsh @('-NoProfile','-NonInteractive','-File',(Join-Path $script:UnixRepositoryRoot 'scripts/install-ai-instructions-bootstrap.ps1'),'-RepositoryRoot',$candidate,'-CodexHome',$codexHome,'-SourceCommit',$commit,'-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-Acquisition','github-codeload','-SourceArchivePath',$archive,'-ArchiveSha256',((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()),'-WriterSchema','V3V5')
+        if($install.ExitCode -ne 0){throw $install.Text}
+        $configPath=Join-Path $codexHome 'ai-instructions-sync.json'
+        $configuration=Get-Content -Raw $configPath|ConvertFrom-Json
+        $catalog=Get-Content -Raw (Join-Path $candidate 'catalog/skills-catalog.json')|ConvertFrom-Json
+        $configuration.catalog.excludeSkills=@($catalog.skills|ForEach-Object{[string]$_.id})
+        [IO.File]::WriteAllText($configPath,($configuration|ConvertTo-Json -Depth 20))
+        $runtime=Join-Path $codexHome 'hooks/ai-instructions-runtime'
+        $retrieval=Import-Module (Join-Path $runtime 'skills-source-retrieval.psm1') -Force -PassThru
+        & $retrieval {
+            param($localZip)
+            $script:OfflineFixtureSourceZip=$localZip
+            function script:Get-SkillsSourceArchives {
+                param($Plan,[string]$DestinationRoot)
+                $result=@{};foreach($source in $Plan.Sources){$path=Join-Path $DestinationRoot ($source.id+'.zip');Copy-Item -LiteralPath $script:OfflineFixtureSourceZip -Destination $path;$result[[string]$source.id]=$path};return $result
+            }
+        } $sourceZip
+        Publish-AiInstructionsSourceCache -CodexHome $codexHome -RuntimeRoot $runtime -ExpectedCommit $commit -InstructionArchiveBytes ([IO.File]::ReadAllBytes($archive))
+        $contract=Import-Module (Join-Path $script:UnixRepositoryRoot 'scripts/ai-instructions-runtime-contract.psm1') -Force -PassThru
+        $renderReceipt=[pscustomobject]@{
+            os='linux'
+            runtime=[pscustomobject]@{powerShellExecutablePath=$pwsh}
+            capabilities=@([pscustomobject]@{
+                name='powershell-runtime';status='available'
+                evidence=@("Physical pwsh identity and version probe passed: $pwsh")
+            })
+        }
+        $section=& $contract {param($template,$receipt)Get-AiInstructionsBootstrapSectionBytes -TemplateBytes $template -CapabilityReceipt $receipt} ([IO.File]::ReadAllBytes((Join-Path $runtime 'bootstrap-section.md'))) $renderReceipt
+        $command=[regex]::Match([Text.Encoding]::UTF8.GetString($section),'codexHome="\$\{CODEX_HOME:-\$HOME/\.codex\}"; [^`\r\n]+')
+        $command.Success|Should Be $true
+        $run=Invoke-RealOfflineFixtureChild 'sh' @('-c',$command.Value)
+        if($run.ExitCode -ne 0){throw $run.Text}
+        $run.ExitCode|Should Be 0
+        $run.Text|Should Match 'update outcome: offline'
+        $run.Text|Should Not Match 'bootstrap disposition|bootstrap stopped'
+        (Get-Content -Raw (Join-Path $codexHome 'ai-instructions-update-receipt.json')|ConvertFrom-Json).outcome|Should BeExactly offline
+        # bootstrap-ai-instructions.ps1 maps the Codex base to root AGENTS.md;
+        # this V3V5 archive supplies Codex/Copilot bases and English rule modules.
+        $expectedInstructions=@{'AGENTS.md'='.codex/AGENTS.en.md';'.github/copilot-instructions.md'='.github/copilot-instructions.en.md'}
+        foreach($rulesRoot in @('.codex/AI-Rules','.github/AI-Rules')){
+            $rules=@(Get-ChildItem -LiteralPath (Join-Path $candidate $rulesRoot) -File -Filter '*.en.md')
+            $rules.Count|Should BeGreaterThan 0
+            foreach($rule in $rules){$relative="$rulesRoot/$($rule.Name)";$expectedInstructions[$relative]=$relative}
+        }
+        $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json'
+        Test-Path -LiteralPath $manifestPath -PathType Leaf|Should Be $true
+        $managed=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        $managed.lockSha256|Should BeExactly (Get-FileHash -LiteralPath (Join-Path $candidate 'catalog/skills-catalog-lock.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+        foreach($relative in $expectedInstructions.Keys){
+            $outputPath=Join-Path $target $relative
+            Test-Path -LiteralPath $outputPath -PathType Leaf|Should Be $true
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($outputPath))|Should BeExactly ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $candidate $expectedInstructions[$relative]))))
+            $entries=@($managed.files|Where-Object targetPath -CEQ $relative)
+            $entries.Count|Should Be 1
+            $entries[0].sourcePath|Should BeExactly $expectedInstructions[$relative]
+            $entries[0].sourceCommit|Should BeExactly $commit
+        }
+        # Include root AGENTS.md and both managed trees (rules, licenses and
+        # manifest), keeping Git's internal bookkeeping outside this snapshot.
+        $before=@(
+            (Get-FileHash -LiteralPath (Join-Path $target 'AGENTS.md') -Algorithm SHA256).Hash
+            Get-UnixTreeSnapshot (Join-Path $target '.codex')
+            Get-UnixTreeSnapshot (Join-Path $target '.github')
+        )-join"`n"
+        $again=Invoke-RealOfflineFixtureChild 'sh' @('-c',$command.Value)
+        if($again.ExitCode -ne 0){throw $again.Text}
+        $after=@(
+            (Get-FileHash -LiteralPath (Join-Path $target 'AGENTS.md') -Algorithm SHA256).Hash
+            Get-UnixTreeSnapshot (Join-Path $target '.codex')
+            Get-UnixTreeSnapshot (Join-Path $target '.github')
+        )-join"`n"
+        $after|Should BeExactly $before
     }
 
     # Scenario: The expected commit advances and changes both managed content and a scripts/platform build input.
@@ -3423,7 +3645,7 @@ Describe 'setup-agent-environment Unix null optional leaf publication (SYP-354 P
     }
 
     # Scenario: A genuinely empty private HOME downloads only from a local fixture shim, prepares once, and then reruns offline.
-    # Purpose: Prove the complete native shell entry covers every null optional leaf and leaves A6-private runtime and receipt state.
+    # Purpose: Prove the native shell entry covers every null optional leaf, leaves private runtime/receipts and publishes Linux's lock-bound local source cache.
     It 'InterT46_prepares_an_empty_HOME_from_the_local_fixture_and_then_verifies_offline' {
         $homePath=New-UnixHome 'null-leaf-empty-home' -WithoutCache
         @(Get-ChildItem -LiteralPath $homePath -Force).Count | Should Be 0
@@ -3432,6 +3654,25 @@ Describe 'setup-agent-environment Unix null optional leaf publication (SYP-354 P
         $bin=New-UnixToolShim 'null-leaf-empty-home' -Exclude @('wget') -Replace @{curl=$curlScript}
         $prepare=Invoke-UnixSetup $homePath @('--prepare') -Environment @{PATH=$bin}
         Assert-SetupTestExitCode $prepare 0;Assert-UnixPreparePlatformContract $prepare $homePath
+        if($IsLinux){
+            $codexHome=Join-Path $homePath '.codex'
+            $cache=Join-Path $codexHome 'ai-instructions-source-cache'
+            $cacheManifest=Get-Content -Raw -LiteralPath (Join-Path $cache 'manifest.json')|ConvertFrom-Json
+            $cacheManifest.commit|Should BeExactly $script:UnixCommits['runtime']
+            $lockPath=Join-Path $codexHome 'hooks/ai-instructions-runtime/catalog/skills-catalog-lock.json'
+            $cacheManifest.lockSha256|Should BeExactly (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $lock=Get-Content -Raw -LiteralPath $lockPath|ConvertFrom-Json
+            @($cacheManifest.sources).Count|Should Be @($lock.sources).Count
+            foreach($source in $lock.sources){
+                $cached=@($cacheManifest.sources|Where-Object id -CEQ $source.id)
+                $cached.Count|Should Be 1
+                $cached[0].archiveSha256|Should BeExactly $source.archiveSha256
+                (Get-FileHash -LiteralPath (Join-Path $cache $cached[0].fileName) -Algorithm SHA256).Hash.ToLowerInvariant()|Should BeExactly $source.archiveSha256
+            }
+            (Get-FileHash -LiteralPath (Join-Path $cache $cacheManifest.instruction.fileName) -Algorithm SHA256).Hash.ToLowerInvariant()|Should BeExactly $cacheManifest.instruction.sha256
+            Assert-UnixPrivatePath $cache '700'
+            foreach($file in Get-ChildItem -LiteralPath $cache -File){Assert-UnixPrivatePath $file.FullName '600'}
+        }
         $offline=Invoke-UnixSetup $homePath @('--offline')
         Assert-SetupTestExitCode $offline 0;$offline.Json.result | Should Be 'verified-runtime-only'
         $setupRoot=Join-Path $homePath '.local/share/ai-instructions-setup'

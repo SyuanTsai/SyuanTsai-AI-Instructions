@@ -108,8 +108,18 @@ $current=(Test-Path $skill -PathType Leaf)-and([IO.File]::ReadAllText($skill)-ce
 '@
 $fixtureInstaller = @'
 [CmdletBinding()]param([string]$RepositoryRoot,[string]$CodexHome,[string]$SourceCommit,[string]$ExpectedCurrentCommit,[string]$ExpectedUpdateMode,[string]$ExpectedUpdateChannel,[string]$ExpectedUpdateRef,[string]$ExpectedCurrentGeneration,[string]$WriterSchema)
-$runtime=Join-Path $CodexHome 'hooks/ai-instructions-runtime';[void][IO.Directory]::CreateDirectory($runtime);Copy-Item (Join-Path $RepositoryRoot 'scripts/fixture-ai-instructions-updater.psm1') (Join-Path $runtime 'ai-instructions-updater.psm1') -Force;[void][IO.Directory]::CreateDirectory((Join-Path $CodexHome 'hooks'));Copy-Item (Join-Path $RepositoryRoot 'scripts/fixture-update-agent-environment.ps1') (Join-Path $CodexHome 'hooks/update-agent-environment.ps1') -Force;Copy-Item (Join-Path $RepositoryRoot 'instructions/common/bootstrap-section.md') (Join-Path $runtime 'bootstrap-section.md') -Force
-[IO.File]::WriteAllText((Join-Path $CodexHome 'ai-instructions-sync.json'),'{'+'"schemaVersion":5,"updates":{"mode":"notify-only","channel":"protected-branch","ref":"main"},"projections":{"user":["user-agents","user-claude"],"project":[]}}');[IO.File]::WriteAllText((Join-Path $runtime 'runtime-bundle.json'),('{"schemaVersion":3,"commit":"'+$SourceCommit+'"}'))
+$runtime=Join-Path $CodexHome 'hooks/ai-instructions-runtime';[void][IO.Directory]::CreateDirectory($runtime)
+Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts/fixture-ai-instructions-updater.psm1') -Destination (Join-Path $runtime 'ai-instructions-updater.psm1') -Force
+[void][IO.Directory]::CreateDirectory((Join-Path $runtime 'catalog'))
+foreach($leaf in @('skills-catalog.json','skills-catalog-lock.json')){Copy-Item -LiteralPath (Join-Path $RepositoryRoot "catalog/$leaf") -Destination (Join-Path $runtime "catalog/$leaf") -Force}
+Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts/fixture-source.zip') -Destination (Join-Path $runtime 'fixture-source.zip') -Force
+Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts/fixture-skills-source-retrieval.psm1') -Destination (Join-Path $runtime 'skills-source-retrieval.psm1') -Force
+[void][IO.Directory]::CreateDirectory((Join-Path $CodexHome 'hooks'))
+Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts/fixture-update-agent-environment.ps1') -Destination (Join-Path $CodexHome 'hooks/update-agent-environment.ps1') -Force
+Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'instructions/common/bootstrap-section.md') -Destination (Join-Path $runtime 'bootstrap-section.md') -Force
+$configuration=[pscustomobject][ordered]@{schemaVersion=5;catalog=[pscustomobject]@{repository='https://example.com/catalog.git';ref=$SourceCommit};updates=[pscustomobject]@{mode='notify-only';channel='protected-branch';ref='main'};projections=[pscustomobject]@{user=@('user-agents','user-claude');project=@()}}
+[IO.File]::WriteAllText((Join-Path $CodexHome 'ai-instructions-sync.json'),($configuration|ConvertTo-Json -Depth 8 -Compress))
+[IO.File]::WriteAllText((Join-Path $runtime 'runtime-bundle.json'),('{"schemaVersion":3,"commit":"'+$SourceCommit+'"}'))
 '@
 [IO.File]::WriteAllText((Join-Path $script:UnixRepo 'scripts/fixture-ai-instructions-updater.psm1'),$fixtureUpdater,[Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $script:UnixRepo 'scripts/fixture-update-agent-environment.ps1'),$fixtureCoordinator,[Text.UTF8Encoding]::new($false))
@@ -117,6 +127,33 @@ $runtime=Join-Path $CodexHome 'hooks/ai-instructions-runtime';[void][IO.Director
 [void][IO.Directory]::CreateDirectory((Join-Path $script:UnixRepo 'catalog'))
 Copy-Item (Join-Path $script:UnixRepositoryRoot 'catalog/skills-catalog.json') (Join-Path $script:UnixRepo 'catalog/skills-catalog.json')
 Copy-Item (Join-Path $script:UnixRepositoryRoot 'scripts/skills-selection.psm1') (Join-Path $script:UnixRepo 'scripts/skills-selection.psm1')
+# Match the native CloudT fixtures: keep real cache publication and replace only
+# remote acquisition with a local ZIP whose bytes are bound by every lock source.
+# The setup process already loads platform-runtime from the bound fixture files.
+$fixtureZip=Join-Path $script:UnixRepo 'scripts/fixture-source.zip'
+$zipStream=[IO.File]::Create($fixtureZip)
+$zip=[IO.Compression.ZipArchive]::new($zipStream,[IO.Compression.ZipArchiveMode]::Create,$false)
+try{
+    $writer=[IO.StreamWriter]::new($zip.CreateEntry('fixture-source/README.md').Open())
+    try{$writer.Write('Local setup source fixture')}finally{$writer.Dispose()}
+}finally{$zip.Dispose();$zipStream.Dispose()}
+$fixtureLock=Get-Content -Raw (Join-Path $script:UnixRepositoryRoot 'catalog/skills-catalog-lock.json')|ConvertFrom-Json
+$fixtureSourceHash=(Get-FileHash -LiteralPath $fixtureZip -Algorithm SHA256).Hash.ToLowerInvariant()
+foreach($source in $fixtureLock.sources){$source.archiveSha256=$fixtureSourceHash}
+[IO.File]::WriteAllText((Join-Path $script:UnixRepo 'catalog/skills-catalog-lock.json'),($fixtureLock|ConvertTo-Json -Depth 30))
+$localRetrieval=@'
+function Get-SkillsSourceArchives {
+    param($Plan,[string]$DestinationRoot,[hashtable]$LocalArchiveOverrides=@{})
+    $result=@{}
+    foreach($source in $Plan.Sources){
+        $destination=Join-Path $DestinationRoot ($source.id+'.zip')
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'fixture-source.zip') -Destination $destination
+        $result[[string]$source.id]=$destination
+    }
+    return $result
+}
+'@
+[IO.File]::WriteAllText((Join-Path $script:UnixRepo 'scripts/fixture-skills-source-retrieval.psm1'),([IO.File]::ReadAllText((Join-Path $script:UnixRepositoryRoot 'scripts/skills-source-retrieval.psm1'))+"`n"+$localRetrieval))
 [void][IO.Directory]::CreateDirectory((Join-Path $script:UnixRepo 'instructions/common'))
 Copy-Item (Join-Path $script:UnixRepositoryRoot 'instructions/common/bootstrap-section.md') (Join-Path $script:UnixRepo 'instructions/common/bootstrap-section.md')
 & git -C $script:UnixRepo init -q 2>$null | Out-Null
