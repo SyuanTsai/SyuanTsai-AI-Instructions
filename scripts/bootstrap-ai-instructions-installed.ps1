@@ -604,39 +604,33 @@ function Assert-InstalledRuntime {
         Bundle = $bundle
         PinMismatch = $pinMismatch
         Generation = $generation
-        CapabilityReceipt = $runtimeCapabilityReceipt
     }
 }
 
-function Resolve-InstalledPowerShellEnginePath {
-    param([Parameter(Mandatory=$true)][AllowNull()][object]$CapabilityReceipt)
+function Resolve-PhysicalInstalledPowerShellEnginePath {
+    param([Parameter(Mandatory = $true)][string] $EnginePath)
 
-    $powerShellCapabilities = @()
-    $enginePath = ''
-    if ($null -ne $CapabilityReceipt) {
-        $powerShellCapabilities = @($CapabilityReceipt.capabilities | Where-Object {
-            [string]$_.name -ceq 'powershell-runtime'
-        })
-        $enginePath = [string]$CapabilityReceipt.runtime.powerShellExecutablePath
-    }
-    if ($null -eq $CapabilityReceipt -or
-        $powerShellCapabilities.Count -ne 1 -or
-        [string]$powerShellCapabilities[0].status -cne 'available' -or
-        [string]::IsNullOrWhiteSpace($enginePath) -or
-        -not (Test-Path -LiteralPath $enginePath -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $enginePath -PathType Leaf)) {
         throw [System.InvalidOperationException]::new(
             "The verified PowerShell runtime executable under PSHOME is unavailable: $enginePath`nAI instructions bootstrap stopped [classification=compatibility; retryable=false].`n[ai-instructions-refusal-code=runtime-baseline-unavailable]"
         )
     }
     $engineItem = Get-Item -Force -LiteralPath $enginePath
+    $linkType = [string]$engineItem.LinkType
     if ($engineItem.PSIsContainer -or
         ($engineItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-        $null -ne $engineItem.LinkType) {
+        (-not [string]::IsNullOrEmpty($linkType) -and $linkType -cne 'HardLink')) {
         throw [System.InvalidOperationException]::new(
             "The verified PowerShell runtime executable under PSHOME is not a physical file: $enginePath`nAI instructions bootstrap stopped [classification=compatibility; retryable=false].`n[ai-instructions-refusal-code=runtime-baseline-unavailable]"
         )
     }
     return [System.IO.Path]::GetFullPath($enginePath)
+}
+
+function Resolve-InstalledPowerShellEnginePath {
+    $isWindowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    $enginePath = Join-Path $PSHOME $(if ($isWindowsHost) { 'pwsh.exe' } else { 'pwsh' })
+    return Resolve-PhysicalInstalledPowerShellEnginePath -EnginePath $enginePath
 }
 
 function Assert-VerifiedInstalledRuntime {
@@ -893,17 +887,7 @@ if ($RecoverInterruptedInstall) {
 $runtimeReadLock = Open-InstalledRuntimeReadLock
 try {
     Assert-NoLauncherInterruptedInstallResidue
-    $verifiedRuntimeState = Assert-VerifiedInstalledRuntime
-    if ($verifiedRuntimeState.Generation -cne 'v3v5' -and
-        -not $ValidateOnly -and -not $SkipUpdateCheck -and -not $WhatIf -and
-        (Test-InstalledMutationRuntimeBaseline)) {
-        try { Import-Module $platformRuntimeManifestPath -Force -ErrorAction Stop }
-        catch { throw [InvalidOperationException]::new("Verified installed platform runtime could not be loaded: $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception) }
-        try { Assert-PlatformRuntimeInventory -Root $runtimeRoot -ManifestPath $platformRuntimeManifestPath | Out-Null }
-        catch { throw [InvalidOperationException]::new("Installed platform runtime inventory verification failed: $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception) }
-        try { $verifiedRuntimeState.CapabilityReceipt = Get-PlatformCapabilities -Required @() }
-        catch { throw [InvalidOperationException]::new("Installed runtime capabilities are unavailable: $($_.Exception.Message) [ai-instructions-refusal-code=runtime-baseline-unavailable]",$_.Exception) }
-    }
+    Assert-VerifiedInstalledRuntime | Out-Null
 }
 finally { $runtimeReadLock.Dispose() }
 if ($ValidateOnly) { return }
@@ -912,7 +896,7 @@ if (-not $SkipUpdateCheck -and -not $WhatIf) {
         [Console]::Error.WriteLine('AI instructions automatic update check was skipped because it requires pwsh 7 on .NET 8 or newer; read-only fan-out will continue.')
     }
     else {
-        $enginePath = Resolve-InstalledPowerShellEnginePath -CapabilityReceipt $verifiedRuntimeState.CapabilityReceipt
+        $enginePath = Resolve-InstalledPowerShellEnginePath
         $updateOutput = & $enginePath -NoProfile -ExecutionPolicy Bypass -File $stableUpdaterPath -CodexHome $codexHome 2>&1
         if ($LASTEXITCODE -ne 0) { throw "AI instructions update check failed: $($updateOutput -join [Environment]::NewLine)" }
         foreach ($line in @($updateOutput)) { Write-Output $line }

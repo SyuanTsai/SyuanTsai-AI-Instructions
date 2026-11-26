@@ -355,7 +355,12 @@ function ConvertTo-AgentEnvironmentSetupSanitizedText {
 }
 
 function Get-AgentEnvironmentSetupChildErrorLine {
-    param([AllowNull()][string] $Stderr, [Parameter(Mandatory = $true)][string] $UserHome)
+    param(
+        [AllowNull()][string] $Stderr,
+        [Parameter(Mandatory = $true)][string] $UserHome,
+        [ValidateRange(3,2147483647)][int] $MaxLineLength = 160,
+        [ValidateRange(3,2147483647)][int] $MaxLength = 512
+    )
     $diagnostic = $Stderr
     if (-not [string]::IsNullOrWhiteSpace($diagnostic) -and $diagnostic.TrimStart().StartsWith('#< CLIXML',[StringComparison]::Ordinal)) {
         $serialized = [regex]::Replace($diagnostic,'^\s*#< CLIXML\s*','',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
@@ -387,12 +392,61 @@ function Get-AgentEnvironmentSetupChildErrorLine {
     $parts = [Collections.Generic.List[string]]::new()
     foreach ($line in $selected) {
         $normalized = [regex]::Replace([string]$line,'\s+',' ',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
-        if ($normalized.Length -gt 160) { $normalized = $normalized.Substring(0,157) + '...' }
+        if ($normalized.Length -gt $MaxLineLength) { $normalized = $normalized.Substring(0,$MaxLineLength-3) + '...' }
         $parts.Add($normalized)
     }
     $summary = $parts -join ' | '
-    if ($summary.Length -gt 512) { $summary = $summary.Substring(0,509) + '...' }
+    if ($summary.Length -gt $MaxLength) { $summary = $summary.Substring(0,$MaxLength-3) + '...' }
     return $summary
+}
+
+function Get-AgentEnvironmentSetupProjectionResultSummary {
+    param([AllowNull()][object] $Result, [Parameter(Mandatory = $true)][string] $UserHome)
+    $readProperty = {
+        param($Object,[string]$Name)
+        if ($null -eq $Object) { return }
+        try {
+            if ($Object -is [Collections.IDictionary]) { $value = $Object[$Name] }
+            else {
+                $property = $Object.PSObject.Properties[$Name]
+                $value = if ($null -ne $property) { $property.Value } else { $null }
+            }
+            if ($null -ne $value) { $value }
+        }
+        catch { return }
+    }
+    $formatField = {
+        param($Value,[switch]$FirstLine)
+        try { $text = [string]$Value } catch { $text = '' }
+        $text = ConvertTo-AgentEnvironmentSetupSanitizedText $text $UserHome
+        if ($FirstLine) { $text = ([string]$text -split '\r\n|\r|\n',2)[0] }
+        $text = [regex]::Replace([string]$text,'\s+',' ',[Text.RegularExpressions.RegexOptions]::CultureInvariant).Trim()
+        if ($text.Length -eq 0) { return '<none>' }
+        if ($text.Length -gt 160) { $text = $text.Substring(0,157) + '...' }
+        return $text
+    }
+    $parts = [Collections.Generic.List[string]]::new()
+    foreach ($name in @('outcome','exitCode','Code')) {
+        $parts.Add($name + '=' + (& $formatField (& $readProperty $Result $name)))
+    }
+    $failed = @(& $readProperty $Result 'failed')
+    if ($failed.Count -gt 0) { $parts.Add('failed=' + (& $formatField $failed[0])) }
+    $details = @(& $readProperty $Result 'failureDetails')
+    for ($index = 0; $index -lt [Math]::Min(3,$details.Count); $index++) {
+        $fields = [Collections.Generic.List[string]]::new()
+        foreach ($name in @('code','skillId','path','evidence')) {
+            $fields.Add($name + '=' + (& $formatField (& $readProperty $details[$index] $name)))
+        }
+        $remediation = @(& $readProperty $details[$index] 'remediation')
+        $firstRemediation = if ($remediation.Count -gt 0) { $remediation[0] } else { $null }
+        $fields.Add('remediation=' + (& $formatField $firstRemediation -FirstLine))
+        $parts.Add('failureDetails[' + $index + ']={' + ($fields -join '; ') + '}')
+    }
+    $suffix = if ($details.Count -gt 3) { " (+$($details.Count-3) more)" } else { '' }
+    $summary = $parts -join '; '
+    $limit = 1024 - $suffix.Length
+    if ($summary.Length -gt $limit) { $summary = $summary.Substring(0,$limit-3) + '...' }
+    return $summary + $suffix
 }
 
 function Get-AgentEnvironmentSetupChildOutputSummary {
@@ -1289,7 +1343,7 @@ Export-ModuleMember -Function @(
     'Assert-AgentEnvironmentSetupPolicyTsv','Get-AgentEnvironmentSetupRid','Get-AgentEnvironmentSetupPolicyAsset',
     'Get-AgentEnvironmentSetupLayout','ConvertTo-AgentEnvironmentSetupHomePath','ConvertFrom-AgentEnvironmentSetupHomePath',
     'New-AgentEnvironmentSetupRuntimeAttemptLayout',
-    'ConvertTo-AgentEnvironmentSetupSanitizedText','Get-AgentEnvironmentSetupChildErrorLine','Get-AgentEnvironmentSetupChildOutputSummary','ConvertTo-AgentEnvironmentSetupStoredRuntimeReceipt',
+    'ConvertTo-AgentEnvironmentSetupSanitizedText','Get-AgentEnvironmentSetupChildErrorLine','Get-AgentEnvironmentSetupProjectionResultSummary','Get-AgentEnvironmentSetupChildOutputSummary','ConvertTo-AgentEnvironmentSetupStoredRuntimeReceipt',
     'ConvertFrom-AgentEnvironmentSetupStoredRuntimeReceipt','Assert-AgentEnvironmentSetupRuntimeReceiptLayout','Get-AgentEnvironmentSetupPlan',
     'Assert-AgentEnvironmentSetupPhysicalPath','Get-AgentEnvironmentSetupUserHome','Assert-AgentEnvironmentSetupCodexHome',
     'Assert-AgentEnvironmentSetupCommit','Test-AgentEnvironmentSetupSameFile','Get-AgentEnvironmentSetupChildEnvironment','Read-AgentEnvironmentSetupFile',
