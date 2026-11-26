@@ -346,8 +346,10 @@ function ConvertTo-AgentEnvironmentSetupSanitizedText {
     $cultureInvariant = [Text.RegularExpressions.RegexOptions]::CultureInvariant
     $result = [regex]::Replace($result,'\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\))','',$cultureInvariant)
     $result = [regex]::Replace($result,'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]','',$cultureInvariant)
-    $result = [regex]::Replace($result,'(?im)\b(authorization|proxy-authorization|token|secret|password|passwd|api[_-]?key|credential)(\s*[:=]\s*)([^\s;]+)','$1$2[REDACTED]',$cultureInvariant)
+    $result = [regex]::Replace($result,'(?i)\b((?:proxy-)?authorization["'']?[^\S\r\n]*[:=][^\S\r\n]*)[^\r\n]*','$1[REDACTED]',$cultureInvariant)
+    $result = [regex]::Replace($result,'(?im)\b(token|secret|password|passwd|api[_-]?key|credential)(\s*[:=]\s*)([^\s;]+)','$1$2[REDACTED]',$cultureInvariant)
     $result = [regex]::Replace($result,'(?i)\bBearer\s+[^\s;]+','Bearer [REDACTED]',$cultureInvariant)
+    $result = [regex]::Replace($result,'(?i)\bBasic[^\S\r\n]+[^\s;]+','Basic [REDACTED]',$cultureInvariant)
     $result = [regex]::Replace($result,'(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^@/\s]+@','$1[REDACTED]@',$cultureInvariant)
     return $result
 }

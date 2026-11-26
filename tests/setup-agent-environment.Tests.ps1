@@ -15,8 +15,11 @@ function Get-SetupTestRepositoryRoot { return (Split-Path -Parent $PSScriptRoot)
 function ConvertTo-SetupTestDiagnosticStderr {
     param([AllowNull()][string]$Stderr)
     if ([string]::IsNullOrEmpty($Stderr)) { return '<empty>' }
-    $sanitized = [regex]::Replace($Stderr,'(?im)\b(authorization|proxy-authorization|token|secret|password|passwd|api[_-]?key|credential)(\s*[:=]\s*)([^\s;]+)','$1$2[REDACTED]')
-    $sanitized = [regex]::Replace($sanitized,'(?i)\bBearer\s+[^\s;]+','Bearer [REDACTED]')
+    $cultureInvariant = [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    $sanitized = [regex]::Replace($Stderr,'(?i)\b((?:proxy-)?authorization["'']?[^\S\r\n]*[:=][^\S\r\n]*)[^\r\n]*','$1[REDACTED]',$cultureInvariant)
+    $sanitized = [regex]::Replace($sanitized,'(?im)\b(token|secret|password|passwd|api[_-]?key|credential)(\s*[:=]\s*)([^\s;]+)','$1$2[REDACTED]')
+    $sanitized = [regex]::Replace($sanitized,'(?i)\bBearer\s+[^\s;]+','Bearer [REDACTED]',$cultureInvariant)
+    $sanitized = [regex]::Replace($sanitized,'(?i)\bBasic[^\S\r\n]+[^\s;]+','Basic [REDACTED]',$cultureInvariant)
     $utf8 = [Text.UTF8Encoding]::new($false)
     if ($utf8.GetByteCount($sanitized) -le 4096) { return $sanitized }
     $low = 0
@@ -1004,6 +1007,35 @@ exit 0
         $LASTEXITCODE | Should Be 0
         $verify | Should Not Throw
         $verify | Should Not Throw
+    }
+
+    # Scenario: Setup and test diagnostics contain authorization headers and standalone authentication schemes.
+    # Purpose: Redact complete header values, preserve line boundaries, and keep repeated sanitization stable.
+    It 'UnitT54_redacts_complete_authorization_values_in_setup_and_test_diagnostics' {
+        $cases = @(
+            @{ Input = 'Authorization: Bearer example-token'; Expected = 'Authorization: [REDACTED]' }
+            @{ Input = 'Proxy-Authorization: Basic example-credential'; Expected = 'Proxy-Authorization: [REDACTED]' }
+            @{ Input = 'authorization: bearer x'; Expected = 'authorization: [REDACTED]' }
+            @{ Input = 'authorization=Basic x'; Expected = 'authorization=[REDACTED]' }
+            @{ Input = 'authorization=''Basic abc'''; Expected = 'authorization=[REDACTED]' }
+            @{ Input = '{"Authorization": "Bearer abc123"}'; Expected = '{"Authorization": [REDACTED]' }
+            @{ Input = 'Basic dXNlcjpwYXNz'; Expected = 'Basic [REDACTED]' }
+            @{ Input = 'Bearer abc'; Expected = 'Bearer [REDACTED]' }
+            @{ Input = "first line ok`r`nAUTHORIZATION: Custom value with spaces`r`nnext line ok`nlast line ok"; Expected = "first line ok`r`nAUTHORIZATION: [REDACTED]`r`nnext line ok`nlast line ok" }
+            @{ Input = 'token=example-token; next field ok'; Expected = 'token=[REDACTED]; next field ok' }
+        )
+        foreach ($case in $cases) {
+            $setup = ConvertTo-AgentEnvironmentSetupSanitizedText $case.Input $TestDrive
+            $diagnostic = ConvertTo-SetupTestDiagnosticStderr $case.Input
+            $setup | Should BeExactly $case.Expected
+            $diagnostic | Should BeExactly $case.Expected
+            (ConvertTo-AgentEnvironmentSetupSanitizedText $setup $TestDrive) | Should BeExactly $setup
+            (ConvertTo-SetupTestDiagnosticStderr $diagnostic) | Should BeExactly $diagnostic
+        }
+
+        $url = ConvertTo-AgentEnvironmentSetupSanitizedText 'https://user:pass@example.test/path' $TestDrive
+        $url | Should BeExactly 'https://[REDACTED]@example.test/path'
+        (ConvertTo-AgentEnvironmentSetupSanitizedText $url $TestDrive) | Should BeExactly $url
     }
 }
 
