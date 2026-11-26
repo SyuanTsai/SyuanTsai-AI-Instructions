@@ -607,9 +607,9 @@ function Assert-InstalledRuntime {
     }
 }
 
-function Resolve-InstalledPowerShellEnginePath {
-    $isWindowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
-    $enginePath = Join-Path $PSHOME $(if ($isWindowsHost) { 'pwsh.exe' } else { 'pwsh' })
+function Resolve-PhysicalInstalledPowerShellEnginePath {
+    param([Parameter(Mandatory = $true)][string] $EnginePath)
+
     if (-not (Test-Path -LiteralPath $enginePath -PathType Leaf)) {
         throw [System.InvalidOperationException]::new(
             "The verified PowerShell runtime executable under PSHOME is unavailable: $enginePath`nAI instructions bootstrap stopped [classification=compatibility; retryable=false].`n[ai-instructions-refusal-code=runtime-baseline-unavailable]"
@@ -625,6 +625,12 @@ function Resolve-InstalledPowerShellEnginePath {
         )
     }
     return [System.IO.Path]::GetFullPath($enginePath)
+}
+
+function Resolve-InstalledPowerShellEnginePath {
+    $isWindowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    $enginePath = Join-Path $PSHOME $(if ($isWindowsHost) { 'pwsh.exe' } else { 'pwsh' })
+    return Resolve-PhysicalInstalledPowerShellEnginePath -EnginePath $enginePath
 }
 
 function Assert-VerifiedInstalledRuntime {

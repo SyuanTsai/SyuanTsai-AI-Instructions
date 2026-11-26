@@ -136,40 +136,126 @@ function Set-LauncherRecoveryPinMismatch {
 }
 
 Describe 'AI instructions launcher recovery portable preflight' {
-    # Scenario: The expected platform-specific PowerShell executable is missing below PSHOME.
-    # Purpose: Prove the production resolver keeps the classified fail-closed leaf check and never falls back to a bare PATH command.
+    # Scenario: A requested PowerShell engine path does not exist.
+    # Purpose: Execute the production physical-engine helper and prove the missing leaf keeps the classified fail-closed refusal.
     It 'UnitT00a_refuses_a_missing_PSHOME_engine_without_bare_name_fallback' {
         $launcherPath=Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions-installed.ps1'
         $tokens=$null;$parseErrors=$null
         $ast=[Management.Automation.Language.Parser]::ParseFile($launcherPath,[ref]$tokens,[ref]$parseErrors)
         @($parseErrors).Count|Should Be 0
+        $helper=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Resolve-PhysicalInstalledPowerShellEnginePath'},$true))
         $resolver=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Resolve-InstalledPowerShellEnginePath'},$true))
+        $helper.Count|Should Be 1
         $resolver.Count|Should Be 1
-        $resolverText=$resolver[0].Extent.Text
-        $resolverText|Should Match ([regex]::Escape('Join-Path $PSHOME'))
-        $resolverText|Should Match '''pwsh.exe'''
-        $resolverText|Should Match '''pwsh'''
-        $resolverText|Should Match 'Test-Path -LiteralPath \$enginePath -PathType Leaf'
-        $resolverText|Should Match 'classification=compatibility; retryable=false'
-        $resolverText|Should Match 'ai-instructions-refusal-code=runtime-baseline-unavailable'
-        $resolverText|Should Not Match 'Get-Command|enginePath\s*=\s*engineName'
+        Invoke-Expression $helper[0].Extent.Text
+        Invoke-Expression $resolver[0].Extent.Text
+
+        $missingEngine=Join-Path $TestDrive 'missing-pwsh'
+        $caught=$null
+        try{Resolve-PhysicalInstalledPowerShellEnginePath -EnginePath $missingEngine|Out-Null}catch{$caught=$_}
+
+        $caught|Should Not BeNullOrEmpty
+        [string]$caught.Exception.Message|Should Match 'classification=compatibility; retryable=false'
+        (Get-AiInstructionsRefusalCode $caught)|Should Be runtime-baseline-unavailable
     }
 
-    # Scenario: Capability evidence says powershell-runtime is unavailable while the current PSHOME engine is an existing physical leaf.
-    # Purpose: Prove the update-check resolver ignores receipt capability status and returns the real current engine on every supported platform.
-    It 'UnitT00b_returns_the_physical_PSHOME_engine_when_runtime_capability_is_unavailable' {
+    # Scenario: The engine leaf is a hard link, as it can be in a Microsoft Store PowerShell installation.
+    # Purpose: Prove the production helper accepts the Store-pwsh shape and returns the hard link's full path.
+    It 'UnitT00b_accepts_a_hard_link_engine_for_Store_PowerShell' {
         $launcherPath=Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions-installed.ps1'
         $tokens=$null;$parseErrors=$null
         $ast=[Management.Automation.Language.Parser]::ParseFile($launcherPath,[ref]$tokens,[ref]$parseErrors)
         @($parseErrors).Count|Should Be 0
+        $helper=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Resolve-PhysicalInstalledPowerShellEnginePath'},$true))
         $resolver=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Resolve-InstalledPowerShellEnginePath'},$true))
+        $helper.Count|Should Be 1
+        $resolver.Count|Should Be 1
+        Invoke-Expression $helper[0].Extent.Text
+        Invoke-Expression $resolver[0].Extent.Text
+
+        $physicalEngine=Join-Path $TestDrive 'physical-pwsh'
+        $hardLinkEngine=Join-Path $TestDrive 'hard-link-pwsh'
+        [IO.File]::WriteAllText($physicalEngine,'fixture')
+        New-Item -ItemType HardLink -Path $hardLinkEngine -Target $physicalEngine -ErrorAction Stop|Out-Null
+
+        Resolve-PhysicalInstalledPowerShellEnginePath -EnginePath $hardLinkEngine|Should BeExactly ([IO.Path]::GetFullPath($hardLinkEngine))
+    }
+
+    # Scenario: The engine leaf is a symbolic link rather than a physical executable.
+    # Purpose: Prove the production helper refuses symlinks; Windows skips only when the host cannot create one.
+    It 'UnitT00c_refuses_a_symbolic_link_engine_as_not_physical' {
+        $launcherPath=Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions-installed.ps1'
+        $tokens=$null;$parseErrors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($launcherPath,[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count|Should Be 0
+        $helper=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Resolve-PhysicalInstalledPowerShellEnginePath'},$true))
+        $resolver=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Resolve-InstalledPowerShellEnginePath'},$true))
+        $helper.Count|Should Be 1
+        $resolver.Count|Should Be 1
+        Invoke-Expression $helper[0].Extent.Text
+        Invoke-Expression $resolver[0].Extent.Text
+
+        $physicalEngine=Join-Path $TestDrive 'symbolic-link-target-pwsh'
+        $symbolicLinkEngine=Join-Path $TestDrive 'symbolic-link-pwsh'
+        [IO.File]::WriteAllText($physicalEngine,'fixture')
+        try{New-Item -ItemType SymbolicLink -Path $symbolicLinkEngine -Target $physicalEngine -ErrorAction Stop|Out-Null}
+        catch{
+            if([Environment]::OSVersion.Platform-eq[PlatformID]::Win32NT){
+                Set-ItResult -Skipped -Because "Windows could not create the symbolic-link fixture: $($_.Exception.Message)"
+                return
+            }
+            throw
+        }
+
+        $caught=$null
+        try{Resolve-PhysicalInstalledPowerShellEnginePath -EnginePath $symbolicLinkEngine|Out-Null}catch{$caught=$_}
+
+        $caught|Should Not BeNullOrEmpty
+        [string]$caught.Exception.Message|Should Match 'is not a physical file:'
+        [string]$caught.Exception.Message|Should Match 'classification=compatibility; retryable=false'
+        (Get-AiInstructionsRefusalCode $caught)|Should Be runtime-baseline-unavailable
+    }
+
+    # Scenario: The supplied engine path names a directory.
+    # Purpose: Prove the production helper requires a leaf and refuses a container with the classified code.
+    It 'UnitT00d_refuses_a_directory_engine' {
+        $launcherPath=Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions-installed.ps1'
+        $tokens=$null;$parseErrors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($launcherPath,[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count|Should Be 0
+        $helper=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Resolve-PhysicalInstalledPowerShellEnginePath'},$true))
+        $resolver=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Resolve-InstalledPowerShellEnginePath'},$true))
+        $helper.Count|Should Be 1
+        $resolver.Count|Should Be 1
+        Invoke-Expression $helper[0].Extent.Text
+        Invoke-Expression $resolver[0].Extent.Text
+
+        $directoryEngine=Join-Path $TestDrive 'directory-pwsh'
+        New-Item -ItemType Directory -Path $directoryEngine|Out-Null
+        $caught=$null
+        try{Resolve-PhysicalInstalledPowerShellEnginePath -EnginePath $directoryEngine|Out-Null}catch{$caught=$_}
+
+        $caught|Should Not BeNullOrEmpty
+        [string]$caught.Exception.Message|Should Match 'classification=compatibility; retryable=false'
+        (Get-AiInstructionsRefusalCode $caught)|Should Be runtime-baseline-unavailable
+    }
+
+    # Scenario: The update check resolves the executable of the currently running PowerShell host.
+    # Purpose: Prove the resolver delegates physical validation without consulting receipts, capability status, or PATH.
+    It 'UnitT00e_returns_the_current_PSHOME_engine_without_receipt_or_PATH_lookup' {
+        $launcherPath=Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions-installed.ps1'
+        $tokens=$null;$parseErrors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($launcherPath,[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count|Should Be 0
+        $helper=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Resolve-PhysicalInstalledPowerShellEnginePath'},$true))
+        $resolver=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Resolve-InstalledPowerShellEnginePath'},$true))
+        $helper.Count|Should Be 1
         $resolver.Count|Should Be 1
         $resolverText=$resolver[0].Extent.Text
-        $resolverText|Should Not Match 'CapabilityReceipt|capabilities|powershell-runtime|powerShellExecutablePath'
+        $resolverText|Should Not Match 'CapabilityReceipt|capabilities|powershell-runtime|powerShellExecutablePath|Get-Command'
+        Invoke-Expression $helper[0].Extent.Text
         Invoke-Expression $resolverText
 
-        $unavailableReceipt=[pscustomobject]@{capabilities=@([pscustomobject]@{name='powershell-runtime';status='unavailable'})}
-        $unavailableReceipt.capabilities[0].status|Should Be unavailable
         $isWindowsHost=[Environment]::OSVersion.Platform-eq[PlatformID]::Win32NT
         $expectedEngine=[IO.Path]::GetFullPath((Join-Path $PSHOME $(if($isWindowsHost){'pwsh.exe'}else{'pwsh'})))
         Resolve-InstalledPowerShellEnginePath|Should BeExactly $expectedEngine
