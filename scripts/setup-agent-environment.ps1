@@ -486,15 +486,16 @@ function Invoke-SetupProjectionCollisionPreflight {
     $preflightRun=Invoke-SetupCoordinatorChild -RuntimeExecutable $RuntimeExecutable -EntryPath $environmentEntry -CodexHome $CodexHome -UserHome $UserHome -Mode WhatIf -Environment $Environment -WorkingDirectory $RepositoryRoot
     $preflight=ConvertFrom-SetupOwnedJsonResult $preflightRun projection-failed 'USER projection WhatIf' $UserHome
     $preflightDecision=Resolve-AgentEnvironmentSetupProjectionResult $preflight -AllowedActions @('planned','current')
+    $childResult=Get-AgentEnvironmentSetupProjectionResultSummary -Result $preflight -UserHome $UserHome
     $childError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$preflightRun.stderr) -UserHome $UserHome
     if([string]$preflightDecision.code-ceq'projection-collision'){
-        throw (New-AgentEnvironmentSetupRefusal projection-collision "USER projection WhatIf refused unmanaged target bytes before runtime mutation. Child stderr: $childError")
+        throw (New-AgentEnvironmentSetupRefusal projection-collision "USER projection WhatIf refused unmanaged target bytes before runtime mutation. Child result: $childResult. Child stderr: $childError")
     }
     if($null-ne$preflightDecision.code){
-        throw (New-AgentEnvironmentSetupRefusal ([string]$preflightDecision.code) "USER projection WhatIf was refused before runtime mutation. Child stderr: $childError")
+        throw (New-AgentEnvironmentSetupRefusal ([string]$preflightDecision.code) "USER projection WhatIf was refused before runtime mutation. Child result: $childResult. Child stderr: $childError")
     }
     if([string]$preflightDecision.action-cnotin@('planned','current')){
-        throw (New-AgentEnvironmentSetupRefusal projection-failed "USER projection WhatIf returned an unsupported action. Child stderr: $childError")
+        throw (New-AgentEnvironmentSetupRefusal projection-failed "USER projection WhatIf returned an unsupported action. Child result: $childResult. Child stderr: $childError")
     }
 }
 
@@ -625,14 +626,16 @@ function Invoke-SetupLinuxCloudWiring {
     $applyRun=Invoke-SetupCoordinatorChild -RuntimeExecutable $RuntimeExecutable -EntryPath $environmentEntry -CodexHome $CodexHome -UserHome $UserHome -Mode Apply -Environment $Environment -WorkingDirectory $RepositoryRoot
     $apply=ConvertFrom-SetupOwnedJsonResult $applyRun projection-failed 'USER projection Apply' $UserHome
     $applyDecision=Resolve-AgentEnvironmentSetupProjectionResult $apply -AllowedActions @('applied','current')
+    $applyResult=Get-AgentEnvironmentSetupProjectionResultSummary -Result $apply -UserHome $UserHome
     $applyError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$applyRun.stderr) -UserHome $UserHome
-    if([string]$applyDecision.code-ceq'projection-collision'){throw (New-AgentEnvironmentSetupRefusal projection-collision "USER projection Apply refused unmanaged target bytes after the pre-mutation preflight. Child stderr: $applyError")}
-    if($null-ne$applyDecision.code){throw (New-AgentEnvironmentSetupRefusal ([string]$applyDecision.code) "USER projection Apply was refused. Child stderr: $applyError")}
+    if([string]$applyDecision.code-ceq'projection-collision'){throw (New-AgentEnvironmentSetupRefusal projection-collision "USER projection Apply refused unmanaged target bytes after the pre-mutation preflight. Child result: $applyResult. Child stderr: $applyError")}
+    if($null-ne$applyDecision.code){throw (New-AgentEnvironmentSetupRefusal ([string]$applyDecision.code) "USER projection Apply was refused. Child result: $applyResult. Child stderr: $applyError")}
     $verifyRun=Invoke-SetupCoordinatorChild -RuntimeExecutable $RuntimeExecutable -EntryPath $environmentEntry -CodexHome $CodexHome -UserHome $UserHome -Mode VerifyOnly -Environment $Environment -WorkingDirectory $RepositoryRoot
     $verify=ConvertFrom-SetupOwnedJsonResult $verifyRun projection-failed 'USER projection VerifyOnly' $UserHome
     $verifyDecision=Resolve-AgentEnvironmentSetupProjectionResult $verify -AllowedActions current
+    $verifyResult=Get-AgentEnvironmentSetupProjectionResultSummary -Result $verify -UserHome $UserHome
     $verifyError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$verifyRun.stderr) -UserHome $UserHome
-    if($null-ne$verifyDecision.code-or$verifyDecision.action-cne'current'){throw (New-AgentEnvironmentSetupRefusal $(if($null-ne$verifyDecision.code){[string]$verifyDecision.code}else{'projection-failed'}) "USER projection readiness verification was refused. Child stderr: $verifyError")}
+    if($null-ne$verifyDecision.code-or$verifyDecision.action-cne'current'){throw (New-AgentEnvironmentSetupRefusal $(if($null-ne$verifyDecision.code){[string]$verifyDecision.code}else{'projection-failed'}) "USER projection readiness verification was refused. Child result: $verifyResult. Child stderr: $verifyError")}
     return [pscustomobject][ordered]@{runtimeCommit=[string]$activeBundle.commit;installAction=$installAction;projectionAction=[string]$applyDecision.action}
 }
 
