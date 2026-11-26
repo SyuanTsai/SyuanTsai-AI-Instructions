@@ -15,8 +15,11 @@ function Get-SetupTestRepositoryRoot { return (Split-Path -Parent $PSScriptRoot)
 function ConvertTo-SetupTestDiagnosticStderr {
     param([AllowNull()][string]$Stderr)
     if ([string]::IsNullOrEmpty($Stderr)) { return '<empty>' }
-    $sanitized = [regex]::Replace($Stderr,'(?im)\b(authorization|proxy-authorization|token|secret|password|passwd|api[_-]?key|credential)(\s*[:=]\s*)([^\s;]+)','$1$2[REDACTED]')
-    $sanitized = [regex]::Replace($sanitized,'(?i)\bBearer\s+[^\s;]+','Bearer [REDACTED]')
+    $cultureInvariant = [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    $sanitized = [regex]::Replace($Stderr,'(?i)\b((?:proxy-)?authorization["'']?[^\S\r\n]*[:=][^\S\r\n]*)[^\r\n]*','$1[REDACTED]',$cultureInvariant)
+    $sanitized = [regex]::Replace($sanitized,'(?im)\b(token|secret|password|passwd|api[_-]?key|credential)(\s*[:=]\s*)([^\s;]+)','$1$2[REDACTED]')
+    $sanitized = [regex]::Replace($sanitized,'(?i)\bBearer\s+[^\s;]+','Bearer [REDACTED]',$cultureInvariant)
+    $sanitized = [regex]::Replace($sanitized,'(?i)\bBasic[^\S\r\n]+[^\s;]+','Basic [REDACTED]',$cultureInvariant)
     $utf8 = [Text.UTF8Encoding]::new($false)
     if ($utf8.GetByteCount($sanitized) -le 4096) { return $sanitized }
     $low = 0
@@ -1171,6 +1174,84 @@ exit 1
         [IO.File]::WriteAllText((Join-Path $runtime 'runtime-bundle.json'),(@{commit=('a'*40)}|ConvertTo-Json))
         {Publish-AiInstructionsSourceCache -CodexHome $fixtureHome -RuntimeRoot $runtime -ExpectedCommit ('a'*40) -InstructionArchiveBytes ([byte[]]@(1))}|Should Throw 'to be identical'
         Test-Path (Join-Path $fixtureHome 'ai-instructions-source-cache')|Should Be $false
+    }
+
+    # Scenario: Linux cloud wiring chooses a first install, a new-pin update, or a same-pin validation.
+    # Purpose: Require the shared blob verifier before either installer execution path and keep it out of same-pin validation.
+    It 'UnitT61_verifies_the_installer_before_each_cloud_execution_path' {
+        $cloudFunction = Get-SetupTestEntryFunctionSource Invoke-SetupLinuxCloudWiring
+        $installBranch = [regex]::Match($cloudFunction,'(?s)if\(\$cloudPlan\.action-ceq''install''\)\{(.*?)\r?\n    \}else\{').Groups[1].Value
+        $samePinBranch = [regex]::Match($cloudFunction,'(?s)if\(\$current-ceq\$ExpectedCommit\)\{(.*?)\r?\n        \}else\{').Groups[1].Value
+        $updateBranch = [regex]::Match($cloudFunction,'(?s)\$installAction=''current''\s*\}else\{(.*?)\r?\n        \}').Groups[1].Value
+
+        $installBranch | Should Match '(?s)Assert-SetupVerifierTrustedBlob.*?Invoke-SetupOwnedCommand[^\r\n]*Linux V3V5 installer'
+        $samePinBranch | Should Match 'Linux same-pin validation child'
+        $samePinBranch | Should Not Match 'Assert-SetupVerifierTrustedBlob'
+        $updateBranch | Should Match '(?s)Assert-SetupVerifierTrustedBlob.*?Invoke-SetupLinuxUpdaterChild'
+        (Get-SetupTestEntryFunctionSource Assert-SetupBootstrapTrust) | Should Match 'Assert-SetupVerifierTrustedBlob'
+    }
+
+    # Scenario: A committed file is verified, edited, staged, and restored in a disposable Git repository.
+    # Purpose: Detect both raw worktree drift and staged substitutions, and verify clean bytes repeatedly.
+    It 'UnitT62_compares_expected_index_and_raw_worktree_blobs' {
+        foreach ($name in @('New-SetupEarlyFailure','Invoke-SetupVerifierGit','Assert-SetupVerifierRegularFile','Assert-SetupVerifierTrustedBlob')) {
+            . ([scriptblock]::Create((Get-SetupTestEntryFunctionSource $name)))
+        }
+        $gitPath = [string](Get-Command git -CommandType Application | Select-Object -First 1).Source
+        $root = Join-Path $TestDrive 'trusted-blob'
+        [void][IO.Directory]::CreateDirectory($root)
+        $relative = 'installer.ps1'
+        $path = Join-Path $root $relative
+        [IO.File]::WriteAllText($path, '# original')
+        & $gitPath -C $root init -q
+        $LASTEXITCODE | Should Be 0
+        & $gitPath -C $root add -- $relative
+        $LASTEXITCODE | Should Be 0
+        & $gitPath -C $root -c user.name=setup-test -c user.email=setup-test@example.invalid commit -q -m fixture
+        $LASTEXITCODE | Should Be 0
+        $expected = [string](& $gitPath -C $root rev-parse HEAD)
+        $verify = { Assert-SetupVerifierTrustedBlob -GitPath $gitPath -RepositoryRoot $root -ExpectedCommit $expected -RelativePath $relative }
+
+        $verify | Should Not Throw
+        [IO.File]::WriteAllText($path, '# changed')
+        $verify | Should Throw
+        & $gitPath -C $root add -- $relative
+        $LASTEXITCODE | Should Be 0
+        $verify | Should Throw
+
+        & $gitPath -C $root checkout $expected -- $relative
+        $LASTEXITCODE | Should Be 0
+        $verify | Should Not Throw
+        $verify | Should Not Throw
+    }
+
+    # Scenario: Setup and test diagnostics contain authorization headers and standalone authentication schemes.
+    # Purpose: Redact complete header values, preserve line boundaries, and keep repeated sanitization stable.
+    It 'UnitT63_redacts_complete_authorization_values_in_setup_and_test_diagnostics' {
+        $cases = @(
+            @{ Input = 'Authorization: Bearer example-token'; Expected = 'Authorization: [REDACTED]' }
+            @{ Input = 'Proxy-Authorization: Basic example-credential'; Expected = 'Proxy-Authorization: [REDACTED]' }
+            @{ Input = 'authorization: bearer x'; Expected = 'authorization: [REDACTED]' }
+            @{ Input = 'authorization=Basic x'; Expected = 'authorization=[REDACTED]' }
+            @{ Input = 'authorization=''Basic abc'''; Expected = 'authorization=[REDACTED]' }
+            @{ Input = '{"Authorization": "Bearer abc123"}'; Expected = '{"Authorization": [REDACTED]' }
+            @{ Input = 'Basic dXNlcjpwYXNz'; Expected = 'Basic [REDACTED]' }
+            @{ Input = 'Bearer abc'; Expected = 'Bearer [REDACTED]' }
+            @{ Input = "first line ok`r`nAUTHORIZATION: Custom value with spaces`r`nnext line ok`nlast line ok"; Expected = "first line ok`r`nAUTHORIZATION: [REDACTED]`r`nnext line ok`nlast line ok" }
+            @{ Input = 'token=example-token; next field ok'; Expected = 'token=[REDACTED]; next field ok' }
+        )
+        foreach ($case in $cases) {
+            $setup = ConvertTo-AgentEnvironmentSetupSanitizedText $case.Input $TestDrive
+            $diagnostic = ConvertTo-SetupTestDiagnosticStderr $case.Input
+            $setup | Should BeExactly $case.Expected
+            $diagnostic | Should BeExactly $case.Expected
+            (ConvertTo-AgentEnvironmentSetupSanitizedText $setup $TestDrive) | Should BeExactly $setup
+            (ConvertTo-SetupTestDiagnosticStderr $diagnostic) | Should BeExactly $diagnostic
+        }
+
+        $url = ConvertTo-AgentEnvironmentSetupSanitizedText 'https://user:pass@example.test/path' $TestDrive
+        $url | Should BeExactly 'https://[REDACTED]@example.test/path'
+        (ConvertTo-AgentEnvironmentSetupSanitizedText $url $TestDrive) | Should BeExactly $url
     }
 }
 
@@ -2452,6 +2533,29 @@ function Get-SkillsSourceArchives {
     AfterAll {
         & git -C $script:UnixRepo checkout -q --detach $script:UnixCommits['runtime'] 2>$null | Out-Null
         Remove-Module agent-environment-setup -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($IsLinux) {
+    # Scenario: Linux --prepare reaches the first-install branch with dirty installer bytes and an otherwise trusted setup commit.
+    # Purpose: Refuse before executing the installer or publishing its CODEX_HOME runtime bundle.
+    It 'InterT51_refuses_a_dirty_cloud_installer_before_runtime_installation' {
+        $userHome = New-UnixHome 'cloud-dirty-installer'
+        $relative = 'scripts/install-ai-instructions-bootstrap.ps1'
+        & git -C $script:UnixRepo checkout -q --detach $script:UnixCommits['runtime']
+        $LASTEXITCODE | Should Be 0
+        $installerPath = Join-Path $script:UnixRepo $relative
+        $originalBytes = [IO.File]::ReadAllBytes($installerPath)
+        try {
+            [IO.File]::AppendAllText($installerPath,"`n# uncommitted installer change`n")
+            $run = Invoke-UnixSetup $userHome @('--prepare') -NoCheckout
+            Assert-SetupTestExitCode $run 15
+            $run.Json.code | Should BeExactly 'commit-mismatch'
+            $run.Stderr | Should Match 'install-ai-instructions-bootstrap\.ps1.*expected commit'
+            Test-Path -LiteralPath (Join-Path $userHome '.codex/hooks/ai-instructions-runtime/runtime-bundle.json') | Should Be $false
+        } finally {
+            [IO.File]::WriteAllBytes($installerPath,$originalBytes)
+        }
+    }
     }
 
     # Scenario: Linux --prepare with a pre-placed verified cache completes cloud wiring, then --offline only re-verifies the runtime.

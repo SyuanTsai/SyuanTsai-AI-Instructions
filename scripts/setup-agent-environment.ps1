@@ -127,6 +127,29 @@ function Assert-SetupVerifierRegularFile {
     }
 }
 
+function Assert-SetupVerifierTrustedBlob {
+    param(
+        [Parameter(Mandatory = $true)][string] $GitPath,
+        [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+        [Parameter(Mandatory = $true)][string] $ExpectedCommit,
+        [Parameter(Mandatory = $true)][string] $RelativePath
+    )
+    $path = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot $RelativePath))
+    Assert-SetupVerifierRegularFile $path $RelativePath
+    # J1: direct object identity comparison never invokes attributes, clean
+    # filters, textconv, diff drivers, hooks, or fsmonitor. The worktree hash
+    # explicitly bypasses filters, and every Git child disables replacements.
+    $expectedBlob = Invoke-SetupVerifierGit $GitPath $RepositoryRoot @('rev-parse',"$ExpectedCommit`:$RelativePath")
+    $indexEntry = Invoke-SetupVerifierGit $GitPath $RepositoryRoot @('ls-files','--stage','--',$RelativePath)
+    $rawBlob = Invoke-SetupVerifierGit $GitPath $RepositoryRoot @('hash-object','--no-filters','--',$path)
+    $indexMatch = [regex]::Match([string]$indexEntry.Text,'^(?<mode>[0-9]{6}) (?<blob>[0-9a-f]{40,64}) 0\t[^\r\n]+$',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    if ($expectedBlob.ExitCode -ne 0 -or $expectedBlob.Text -cnotmatch '^[0-9a-f]{40,64}$' -or
+        $indexEntry.ExitCode -ne 0 -or -not $indexMatch.Success -or $rawBlob.ExitCode -ne 0 -or
+        $expectedBlob.Text -cne $indexMatch.Groups['blob'].Value -or $expectedBlob.Text -cne $rawBlob.Text) {
+        throw (New-SetupEarlyFailure commit-mismatch "Trusted file '$RelativePath' expected, index, and raw worktree blobs differ.")
+    }
+}
+
 # F1 trust anchor: this verifier is intentionally self-contained. It uses only
 # .NET and git, and runs before either repository module can execute.
 function Assert-SetupBootstrapTrust {
@@ -167,20 +190,7 @@ function Assert-SetupBootstrapTrust {
     )
     $trustFiles = @($setupBound + $manifestRelative + @($fileList | Where-Object { $_ -cne 'platform-runtime.psd1' } | ForEach-Object { 'scripts/' + $_ }) | Select-Object -Unique)
     foreach ($relative in $trustFiles) {
-        $path = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot $relative))
-        Assert-SetupVerifierRegularFile $path $relative
-        # J1: direct object identity comparison never invokes attributes, clean
-        # filters, textconv, diff drivers, hooks, or fsmonitor. The worktree hash
-        # explicitly bypasses filters, and every Git child disables replacements.
-        $expectedBlob = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('rev-parse',"$ExpectedCommit`:$relative")
-        $indexEntry = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('ls-files','--stage','--',$relative)
-        $rawBlob = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('hash-object','--no-filters','--',$path)
-        $indexMatch = [regex]::Match([string]$indexEntry.Text,'^(?<mode>[0-9]{6}) (?<blob>[0-9a-f]{40,64}) 0\t[^\r\n]+$',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
-        if ($expectedBlob.ExitCode -ne 0 -or $expectedBlob.Text -cnotmatch '^[0-9a-f]{40,64}$' -or
-            $indexEntry.ExitCode -ne 0 -or -not $indexMatch.Success -or $rawBlob.ExitCode -ne 0 -or
-            $expectedBlob.Text -cne $indexMatch.Groups['blob'].Value -or $expectedBlob.Text -cne $rawBlob.Text) {
-            throw (New-SetupEarlyFailure commit-mismatch "Trusted file '$relative' expected, index, and raw worktree blobs differ.")
-        }
+        Assert-SetupVerifierTrustedBlob -GitPath $gitPath -RepositoryRoot $RepositoryRoot -ExpectedCommit $ExpectedCommit -RelativePath $relative
     }
 
     $manifestDisk = [IO.File]::ReadAllBytes((Join-Path $RepositoryRoot $manifestRelative))
@@ -596,9 +606,15 @@ function Invoke-SetupLinuxCloudWiring {
     }
     $cloudPlan=Get-AgentEnvironmentSetupCloudPlan -Rid $Rid -ExpectedCommit $ExpectedCommit -InstalledBundle $installedBundle
     Invoke-SetupProjectionCollisionPreflight -RepositoryRoot $RepositoryRoot -CodexHome $CodexHome -UserHome $UserHome -ExpectedCommit $ExpectedCommit -RuntimeExecutable $RuntimeExecutable -Environment $Environment
-    $installerPath=Join-Path $RepositoryRoot 'scripts/install-ai-instructions-bootstrap.ps1'
+    $installerRelative='scripts/install-ai-instructions-bootstrap.ps1'
+    $installerPath=Join-Path $RepositoryRoot $installerRelative
+    $installerMismatch="Installer '$installerRelative' does not match expected commit $ExpectedCommit."
     $commonInstaller=@('-NoLogo','-NoProfile','-NonInteractive','-File',$installerPath,'-RepositoryRoot',$RepositoryRoot,'-CodexHome',$CodexHome,'-SourceCommit',$ExpectedCommit)
     if($cloudPlan.action-ceq'install'){
+        try {
+            $gitPath=[string](Get-Command git -CommandType Application|Select-Object -First 1).Source
+            Assert-SetupVerifierTrustedBlob -GitPath $gitPath -RepositoryRoot $RepositoryRoot -ExpectedCommit $ExpectedCommit -RelativePath $installerRelative
+        } catch { throw (New-AgentEnvironmentSetupRefusal commit-mismatch $installerMismatch) }
         [void](Invoke-SetupOwnedCommand -RuntimeExecutable $RuntimeExecutable -Arguments ($commonInstaller+@('-WriterSchema','V3V5')) -Environment $Environment -WorkingDirectory $RepositoryRoot -FailureCode update-failed -Context 'Linux V3V5 installer')
         $installAction='installed'
     }else{
@@ -609,8 +625,12 @@ function Invoke-SetupLinuxCloudWiring {
             [void](Invoke-SetupOwnedCommand -RuntimeExecutable $RuntimeExecutable -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-File',$validationLauncher,'-ValidateOnly') -Environment $Environment -WorkingDirectory $RepositoryRoot -FailureCode update-failed -Context 'Linux same-pin validation child')
             $installAction='current'
         }else{
-            $relation=Invoke-SetupVerifierGit -GitPath ([string](Get-Command git -CommandType Application|Select-Object -First 1).Source) -RepositoryRoot $RepositoryRoot -Arguments @('merge-base','--is-ancestor',$current,$ExpectedCommit)
+            $gitPath=[string](Get-Command git -CommandType Application|Select-Object -First 1).Source
+            $relation=Invoke-SetupVerifierGit -GitPath $gitPath -RepositoryRoot $RepositoryRoot -Arguments @('merge-base','--is-ancestor',$current,$ExpectedCommit)
             if($relation.ExitCode-ne0){throw (New-AgentEnvironmentSetupRefusal update-failed 'The expected setup commit is not ahead of the installed runtime pin.')}
+            try {
+                Assert-SetupVerifierTrustedBlob -GitPath $gitPath -RepositoryRoot $RepositoryRoot -ExpectedCommit $ExpectedCommit -RelativePath $installerRelative
+            } catch { throw (New-AgentEnvironmentSetupRefusal commit-mismatch $installerMismatch) }
             [void](Invoke-SetupLinuxUpdaterChild -RepositoryRoot $RepositoryRoot -CodexHome $CodexHome -ExpectedCommit $ExpectedCommit -RuntimeExecutable $RuntimeExecutable -Environment $Environment)
             $installAction='installed'
         }
