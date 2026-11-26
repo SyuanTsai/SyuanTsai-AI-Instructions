@@ -813,6 +813,10 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         [regex]::Matches($readme, 'sh scripts/setup-agent-environment\.sh --expected-commit "\$pin" < /dev/null').Count | Should Be 2
         $readme | Should Match '變更 setup script 的 `pin=` 後，必須啟動新的 session'
         $readme | Should Match 'after changing `pin=` in the environment setup script, start a new session'
+        $readme | Should Not Match '修改環境 setup script 的 `--expected-commit` pin'
+        $readme | Should Not Match 'changing the environment setup script''s `--expected-commit` pin'
+        $readme | Should Match '雲端 session 的 runtime／Skills 更新須在環境 setup script 中修改 `pin=`'
+        $readme | Should Match 'Updating runtime or Skills for cloud sessions requires changing \x60pin=\x60 in the environment setup script \(the value the template passes to \x60--expected-commit\x60\) and starting a new session; in-session updates or edits are lost\.'
         $readme | Should Not Match 'P10b (?:尚未接線|is not wired yet)'
     }
 
