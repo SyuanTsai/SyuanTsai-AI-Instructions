@@ -560,3 +560,268 @@ Describe 'SYP-511 launcher capability evidence fan-out' {
         }
     }
 }
+
+Describe 'Installed bootstrap source cache and disposition' {
+    BeforeAll {
+        Import-Module (Join-Path $script:RepositoryRoot 'scripts/platform-runtime.psd1') -Force
+        $script:SourceCacheTestRoot=$TestDrive
+        if([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT){
+            # Resolve the trusted test anchor, including macOS /var -> /private/var.
+            $physical='/'
+            foreach($part in ([IO.Path]::GetFullPath($TestDrive)).Trim('/').Split('/')){
+                $item=[IO.DirectoryInfo]::new((Join-Path $physical $part));$target=$item.ResolveLinkTarget($true)
+                $physical=if($null -eq $target){$item.FullName}else{$target.FullName}
+            }
+            $script:SourceCacheTestRoot=$physical
+        }
+        $launcher=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions-installed.ps1'
+        $text=[IO.File]::ReadAllText($launcher)
+        $tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseInput($text,[ref]$tokens,[ref]$errors)
+        $parser=$ast.Find({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-InstalledAiInstructionsFailureDisposition'},$true)
+        . ([scriptblock]::Create($parser.Extent.Text))
+        # Exercise the real final launcher block with a parameter-recording
+        # multisource fixture. Its earlier inventory gate is covered by installer
+        # tests; CloudT1b additionally runs the complete verified launcher.
+        $script:CacheLauncherTail=$text.Substring($text.LastIndexOf('$runtimeReadLock = Open-InstalledRuntimeReadLock',[StringComparison]::Ordinal))
+
+        function New-SourceCacheLauncherFixture {
+            param([string]$Name,[switch]$WithoutCache)
+            $fixtureHome=Join-Path $script:SourceCacheTestRoot $Name;[void][IO.Directory]::CreateDirectory($fixtureHome)
+            $runtime=Join-Path $fixtureHome 'hooks/ai-instructions-runtime';[void][IO.Directory]::CreateDirectory((Join-Path $runtime 'catalog'))
+            Copy-Item (Join-Path $script:RepositoryRoot 'scripts/skills-source-retrieval.psm1') (Join-Path $runtime 'skills-source-retrieval.psm1')
+            $commit='c'*40;$repository='https://github.com/example/instructions.git'
+            $configuration=@{catalog=@{ref=$commit;repository=$repository}}
+            $instruction=[Text.Encoding]::UTF8.GetBytes('instruction archive');$source=[Text.Encoding]::UTF8.GetBytes('source archive')
+            $ih=Get-TestFileSha256Bytes $instruction;$sh=Get-TestFileSha256Bytes $source
+            $lockPath=Join-Path $runtime 'catalog/skills-catalog-lock.json'
+            [IO.File]::WriteAllText($lockPath,(@{sources=@(@{id='source-a';resolvedCommit=('a'*40);archiveSha256=$sh})}|ConvertTo-Json -Depth 6))
+            $manifest=@{schemaVersion=1;commit=$commit;repository=$repository;lockSha256=(Get-TestFileSha256 $lockPath);instruction=@{fileName="$ih.zip";sha256=$ih};sources=@(@{id='source-a';resolvedCommit=('a'*40);archiveSha256=$sh;fileName="$sh.zip"})}
+            $cache=Join-Path $fixtureHome 'ai-instructions-source-cache'
+            if(-not$WithoutCache){
+                $lease=Open-PlatformDirectory -Root $fixtureHome -RelativePath 'ai-instructions-source-cache' -CreatePrivate
+                try{
+                    foreach($pair in @(@{Name="$ih.zip";Bytes=$instruction},@{Name="$sh.zip";Bytes=$source},@{Name='manifest.json';Bytes=([Text.Encoding]::UTF8.GetBytes(($manifest|ConvertTo-Json -Depth 8)))})){
+                        $file=Open-PlatformFile -ParentLease $lease -Leaf $pair.Name -Access ReadWrite -CreateMode CreateNew
+                        try{$file.WriteNewBytes($pair.Bytes)}finally{$file.Dispose()}
+                    }
+                }finally{$lease.Dispose()}
+            }
+            $record=Join-Path $fixtureHome 'record.json'
+            $fanout=@'
+param($CatalogPath,$LockPath,$ConfigurationPath,$RuntimeRoot,$UserHome,$TargetRoot,[switch]$WhatIf,$InstructionSourceArchivePath,$InstructionSourceCommit,[hashtable]$SourceArchivePaths)
+$record=@{overrides=$PSBoundParameters.ContainsKey('InstructionSourceArchivePath');commit=$InstructionSourceCommit;instruction=$null;source=$null}
+if($record.overrides){$record.instruction=[IO.File]::ReadAllText($InstructionSourceArchivePath);$record.source=[IO.File]::ReadAllText($SourceArchivePaths['source-a'])}
+[IO.File]::WriteAllText((Join-Path $UserHome 'record.json'),($record|ConvertTo-Json))
+'@
+            $fanoutPath=Join-Path $fixtureHome 'fanout.ps1';[IO.File]::WriteAllText($fanoutPath,$fanout)
+            $harness=Join-Path $fixtureHome 'launcher.ps1'
+            $header=@'
+param($FixtureHome,$PlatformManifest)
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+$codexHome=$FixtureHome;$runtimeRoot=Join-Path $codexHome 'hooks/ai-instructions-runtime'
+$catalogPath=Join-Path $runtimeRoot 'catalog/skills-catalog.json';$lockPath=Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json'
+$configurationPath=Join-Path $codexHome 'configuration.json';$platformRuntimeManifestPath=$PlatformManifest
+$UserHome=$FixtureHome;$TargetRoot=$FixtureHome;$WhatIf=$false;$bootstrapPath=Join-Path $FixtureHome 'fanout.ps1'
+function Open-InstalledRuntimeReadLock {return [IO.MemoryStream]::new()}
+function Assert-NoLauncherInterruptedInstallResidue {}
+function Assert-VerifiedInstalledRuntime {return [pscustomobject]@{Configuration=(Get-Content -Raw $configurationPath|ConvertFrom-Json);Bundle=[pscustomobject]@{commit=('c'*40)}}}
+'@
+            [IO.File]::WriteAllText((Join-Path $fixtureHome 'configuration.json'),($configuration|ConvertTo-Json -Depth 6))
+            [IO.File]::WriteAllText($harness,$header+"`n"+$script:CacheLauncherTail)
+            return [pscustomobject]@{Home=$fixtureHome;Runtime=$runtime;Cache=$cache;Manifest=$manifest;Harness=$harness;Record=$record}
+        }
+        function Get-TestFileSha256Bytes {
+            param([byte[]]$Bytes)
+            $sha=[Security.Cryptography.SHA256]::Create()
+            try{return [BitConverter]::ToString($sha.ComputeHash($Bytes)).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+        }
+        function Invoke-SourceCacheLauncherFixture {
+            param($Fixture)
+            $start=[Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+            foreach($arg in @('-NoProfile','-NonInteractive','-File',$Fixture.Harness,'-FixtureHome',$Fixture.Home,'-PlatformManifest',(Join-Path $script:RepositoryRoot 'scripts/platform-runtime.psd1'))){$start.ArgumentList.Add($arg)}
+            $start.UseShellExecute=$false;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+            $start.Environment['HOME']=$Fixture.Home;$start.Environment['USERPROFILE']=$Fixture.Home;$start.Environment['CODEX_HOME']=$Fixture.Home
+            $process=[Diagnostics.Process]::Start($start)
+            try{
+                $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+                if(-not$process.WaitForExit(60000)){$process.Kill($true);throw 'Cache launcher fixture timed out.'}
+                $process.WaitForExit()
+                return [pscustomobject]@{ExitCode=$process.ExitCode;Text=($stdout.Result+$stderr.Result)}
+            }finally{$process.Dispose()}
+        }
+    }
+
+    # Scenario: Child output contains ANSI and interpolated source text before its final updater disposition.
+    # Purpose: Ignore the garbage-producing source marker and prefer the last well-formed updater marker.
+    It 'UnitT00_parses_the_real_updater_disposition_after_ANSI_source_lines' {
+        $message=([string][char]27)+'[31mAt update-ai-instructions.ps1:123'+"`n"+'[classification=$($disposition.classification); retryable=$retryable]'+"`n"+'AI instructions updater stopped [classification=operational; installationState=not-installed; retryable=false].'+([string][char]27)+'[0m'+"`n"+'[classification=sandbox; retryable=true]'
+        $result=Get-InstalledAiInstructionsFailureDisposition -Message $message
+        $result.classification|Should BeExactly operational;$result.retryable|Should Be $false
+        (Get-InstalledAiInstructionsFailureDisposition -Message '[classification=integrity; retryable=false] [classification=configuration; retryable=false]').classification|Should BeExactly configuration
+    }
+
+    # Scenario: No cache was written (the default Windows installation path).
+    # Purpose: Preserve multisource invocation without archive overrides.
+    It 'UnitT10_calls_multisource_without_overrides_when_cache_is_absent' {
+        foreach($kind in @('root','manifest')){
+            $fixture=New-SourceCacheLauncherFixture "no-cache-$kind" -WithoutCache:($kind -ceq 'root')
+            if($kind -ceq 'manifest'){[IO.File]::Delete((Join-Path $fixture.Cache 'manifest.json'))}
+            $run=Invoke-SourceCacheLauncherFixture $fixture
+            $run.ExitCode|Should Be 0
+            (Get-Content -Raw $fixture.Record|ConvertFrom-Json).overrides|Should Be $false
+        }
+    }
+
+    # Scenario: The cached commit or raw lock hash belongs to a previous runtime generation.
+    # Purpose: Report staleness once and retain the normal download path.
+    It 'UnitT20_ignores_stale_commit_or_lock_with_an_information_line' {
+        foreach($kind in @('commit','lock')){
+            $fixture=New-SourceCacheLauncherFixture "stale-$kind"
+            if($kind -ceq 'commit'){$fixture.Manifest.commit='d'*40}else{$fixture.Manifest.lockSha256='e'*64}
+            [IO.File]::WriteAllText((Join-Path $fixture.Cache 'manifest.json'),($fixture.Manifest|ConvertTo-Json -Depth 8))
+            $run=Invoke-SourceCacheLauncherFixture $fixture
+            $run.ExitCode|Should Be 0;$run.Text|Should Match 'cache is stale'
+            (Get-Content -Raw $fixture.Record|ConvertFrom-Json).overrides|Should Be $false
+        }
+    }
+
+    # Scenario: Matching cache metadata refers to tampered instruction/source bytes, missing files or malformed metadata.
+    # Purpose: Fail with an integrity disposition before multisource, without falling back to downloads.
+    It 'UnitT30_refuses_matching_corrupt_or_incomplete_cache' {
+        foreach($kind in @('instruction','source','missing','malformed','malformed-metadata')){
+            $fixture=New-SourceCacheLauncherFixture "corrupt-$kind"
+            switch($kind){
+                instruction {[IO.File]::WriteAllText((Join-Path $fixture.Cache $fixture.Manifest.instruction.fileName),'tampered')}
+                source {[IO.File]::WriteAllText((Join-Path $fixture.Cache $fixture.Manifest.sources[0].fileName),'tampered')}
+                missing {[IO.File]::Delete((Join-Path $fixture.Cache $fixture.Manifest.instruction.fileName))}
+                malformed {[IO.File]::WriteAllText((Join-Path $fixture.Cache 'manifest.json'),'{')}
+                malformed-metadata {$fixture.Manifest.instruction.fileName=@($fixture.Manifest.instruction.fileName);[IO.File]::WriteAllText((Join-Path $fixture.Cache 'manifest.json'),($fixture.Manifest|ConvertTo-Json -Depth 8))}
+            }
+            $run=Invoke-SourceCacheLauncherFixture $fixture
+            $run.ExitCode|Should Not Be 0;$run.Text|Should Match 'classification=integrity'
+            Test-Path $fixture.Record|Should Be $false
+        }
+    }
+
+    # Scenario: Every cached archive matches the manifest and active runtime lock.
+    # Purpose: Pass verified private snapshots and exact commit to multisource, then remove the snapshots.
+    It 'UnitT40_passes_matching_verified_cache_overrides' {
+        $fixture=New-SourceCacheLauncherFixture 'valid-cache'
+        $run=Invoke-SourceCacheLauncherFixture $fixture
+        if($run.ExitCode -ne 0){throw $run.Text}
+        $record=Get-Content -Raw $fixture.Record|ConvertFrom-Json
+        $record.overrides|Should Be $true;$record.commit|Should BeExactly ('c'*40)
+        $record.instruction|Should BeExactly 'instruction archive';$record.source|Should BeExactly 'source archive'
+        # The shared store persists so another reader can create its snapshot.
+        Test-Path (Join-Path $fixture.Cache '.ai-instructions-txn')|Should Be $true
+        @(Get-ChildItem -Force (Join-Path $fixture.Cache '.ai-instructions-txn')).Count|Should Be 0
+    }
+
+    # Scenario: Retrieval writes a umask-mode archive, then the next source download fails.
+    # Purpose: Clean incomplete downloads without requiring published-file modes and permit a later publication.
+    It 'UnitT50_retries_publication_after_a_partial_source_download_failure' {
+        $fixture=New-SourceCacheLauncherFixture 'partial-download' -WithoutCache
+        Copy-Item (Join-Path $fixture.Home 'configuration.json') (Join-Path $fixture.Home 'ai-instructions-sync.json')
+        [IO.File]::WriteAllText((Join-Path $fixture.Runtime 'runtime-bundle.json'),('{"commit":"'+('c'*40)+'"}'))
+        $lockPath=Join-Path $fixture.Runtime 'catalog/skills-catalog-lock.json'
+        $document=Get-Content -Raw $lockPath|ConvertFrom-Json
+        $document.sources+=@([pscustomobject]@{id='source-b';resolvedCommit=('b'*40);archiveSha256=$document.sources[0].archiveSha256})
+        [IO.File]::WriteAllText($lockPath,($document|ConvertTo-Json -Depth 6))
+        $retrieval=Import-Module (Join-Path $fixture.Runtime 'skills-source-retrieval.psm1') -Force -PassThru
+        & $retrieval {
+            $script:FailSecondDownload=$true
+            function script:Get-SkillsSourceArchives {
+                param($Plan,[string]$DestinationRoot)
+                $result=@{}
+                foreach($source in $Plan.Sources){
+                    if($script:FailSecondDownload -and $source.id -ceq 'source-b'){throw 'Fixture source download failed.'}
+                    $path=Join-Path $DestinationRoot ($source.id+'.zip')
+                    [IO.File]::WriteAllText($path,'source archive')
+                    if([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT){[IO.File]::SetUnixFileMode($path,[IO.UnixFileMode]420)}
+                    $result[[string]$source.id]=$path
+                }
+                return $result
+            }
+        }
+        $publish=@{CodexHome=$fixture.Home;RuntimeRoot=$fixture.Runtime;ExpectedCommit=('c'*40);InstructionArchiveBytes=[Text.Encoding]::UTF8.GetBytes('instruction archive')}
+        try {
+            {Publish-AiInstructionsSourceCache @publish}|Should Throw 'Fixture source download failed.'
+            Test-Path (Join-Path $fixture.Cache 'manifest.json')|Should Be $false
+            @(Get-ChildItem -Force (Join-Path $fixture.Cache '.ai-instructions-txn')).Count|Should Be 0
+            & $retrieval {$script:FailSecondDownload=$false}
+            Publish-AiInstructionsSourceCache @publish
+            $configuration=Get-Content -Raw (Join-Path $fixture.Home 'ai-instructions-sync.json')|ConvertFrom-Json
+            $opened=Open-AiInstructionsSourceCache -CodexHome $fixture.Home -RuntimeRoot $fixture.Runtime -Configuration $configuration -Bundle ([pscustomobject]@{commit=('c'*40)})
+            try {
+                $opened.Arguments.SourceArchivePaths.Count|Should Be 2
+                foreach($path in $opened.Arguments.SourceArchivePaths.Values){[IO.File]::ReadAllText($path)|Should BeExactly 'source archive'}
+            } finally {Remove-AiSourceCacheSnapshot $opened.Snapshot}
+        } finally {Remove-Module $retrieval -Force}
+    }
+
+    # Scenario: An aborted process leaves an owned 0644 download inside its private transaction directory.
+    # Purpose: Accept owned abandoned staging while preserving strict modes for published entries.
+    It 'UnitT60_publishes_with_an_abandoned_umask_mode_download' {
+        $fixture=New-SourceCacheLauncherFixture 'abandoned-download'
+        Copy-Item (Join-Path $fixture.Home 'configuration.json') (Join-Path $fixture.Home 'ai-instructions-sync.json')
+        [IO.File]::WriteAllText((Join-Path $fixture.Runtime 'runtime-bundle.json'),('{"commit":"'+('c'*40)+'"}'))
+        $stage=Open-PlatformDirectory -Root $fixture.Cache -RelativePath ('.ai-instructions-txn/'+('a'*32)) -CreatePrivate
+        try {
+            $path=Join-Path $fixture.Cache ('.ai-instructions-txn/'+('a'*32)+'/source-a.zip')
+            [IO.File]::WriteAllText($path,'incomplete download')
+            if([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT){[IO.File]::SetUnixFileMode($path,[IO.UnixFileMode]420)}
+        } finally {$stage.Dispose()}
+        $retrieval=Import-Module (Join-Path $fixture.Runtime 'skills-source-retrieval.psm1') -Force -PassThru
+        & $retrieval {
+            function script:Get-SkillsSourceArchives {
+                param($Plan,[string]$DestinationRoot)
+                $path=Join-Path $DestinationRoot 'source-a.zip';[IO.File]::WriteAllText($path,'source archive')
+                return @{'source-a'=$path}
+            }
+        }
+        try {
+            $publish=@{CodexHome=$fixture.Home;RuntimeRoot=$fixture.Runtime;ExpectedCommit=('c'*40);InstructionArchiveBytes=[Text.Encoding]::UTF8.GetBytes('instruction archive')}
+            if([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT){
+                $manifestPath=Join-Path $fixture.Cache 'manifest.json'
+                [IO.File]::SetUnixFileMode($manifestPath,[IO.UnixFileMode]420)
+                try{{Publish-AiInstructionsSourceCache @publish}|Should Throw 'private 0700/0600 modes'}
+                finally{[IO.File]::SetUnixFileMode($manifestPath,[IO.UnixFileMode]384)}
+            }
+            Publish-AiInstructionsSourceCache @publish
+            (Get-Content -Raw (Join-Path $fixture.Cache 'manifest.json')|ConvertFrom-Json).commit|Should BeExactly ('c'*40)
+            [IO.File]::ReadAllText($path)|Should BeExactly 'incomplete download'
+            if([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT){
+                foreach($entry in Get-ChildItem -LiteralPath $fixture.Cache -File){[int][IO.File]::GetUnixFileMode($entry.FullName)|Should Be 384}
+            }
+        } finally {Remove-Module $retrieval -Force}
+    }
+
+    # Scenario: One reader finishes while another has opened the store but has not created a snapshot.
+    # Purpose: Keep the shared directory alive through both readers' cleanup and subsequent cache reads.
+    It 'UnitT70_keeps_the_snapshot_store_between_interleaved_readers' {
+        $fixture=New-SourceCacheLauncherFixture 'interleaved-readers'
+        $retrieval=Import-Module (Join-Path $fixture.Runtime 'skills-source-retrieval.psm1') -Force -PassThru
+        $configuration=Get-Content -Raw (Join-Path $fixture.Home 'configuration.json')|ConvertFrom-Json
+        $arguments=@{CodexHome=$fixture.Home;RuntimeRoot=$fixture.Runtime;Configuration=$configuration;Bundle=[pscustomobject]@{commit=('c'*40)}}
+        $first=$null;$second=$null;$store=$null
+        try {
+            $first=Open-AiInstructionsSourceCache @arguments
+            $store=Open-PlatformDirectory -Root $fixture.Cache -RelativePath '.ai-instructions-txn'
+            Remove-AiSourceCacheSnapshot $first.Snapshot;$first=$null
+            Test-Path (Join-Path $fixture.Cache '.ai-instructions-txn')|Should Be $true
+            $second=Open-AiInstructionsSourceCache @arguments
+            [IO.File]::ReadAllText($second.Arguments.InstructionSourceArchivePath)|Should BeExactly 'instruction archive'
+            $store.Dispose();$store=$null
+            Remove-AiSourceCacheSnapshot $second.Snapshot;$second=$null
+            Test-Path (Join-Path $fixture.Cache '.ai-instructions-txn')|Should Be $true
+            @(Get-ChildItem -Force (Join-Path $fixture.Cache '.ai-instructions-txn')).Count|Should Be 0
+        } finally {
+            if($null -ne $store){$store.Dispose()}
+            if($null -ne $first){Remove-AiSourceCacheSnapshot $first.Snapshot}
+            if($null -ne $second){Remove-AiSourceCacheSnapshot $second.Snapshot}
+            Remove-Module $retrieval -Force
+        }
+    }
+}

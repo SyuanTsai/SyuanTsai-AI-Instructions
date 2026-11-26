@@ -656,6 +656,18 @@ function Invoke-SetupLinuxCloudWiring {
     $verifyResult=Get-AgentEnvironmentSetupProjectionResultSummary -Result $verify -UserHome $UserHome
     $verifyError=Get-AgentEnvironmentSetupChildErrorLine -Stderr ([string]$verifyRun.stderr) -UserHome $UserHome
     if($null-ne$verifyDecision.code-or$verifyDecision.action-cne'current'){throw (New-AgentEnvironmentSetupRefusal $(if($null-ne$verifyDecision.code){[string]$verifyDecision.code}else{'projection-failed'}) "USER projection readiness verification was refused. Child result: $verifyResult. Child stderr: $verifyError")}
+    try{
+        $runtimeRoot=Join-Path $CodexHome 'hooks/ai-instructions-runtime'
+        Import-Module (Join-Path $runtimeRoot 'skills-source-retrieval.psm1') -Force -ErrorAction Stop
+        $archive=Invoke-SetupVerifierGit -GitPath ([string](Get-Command git -CommandType Application|Select-Object -First 1).Source) -RepositoryRoot $RepositoryRoot -Arguments @('archive','--format=zip',"--prefix=instructions-$ExpectedCommit/",$ExpectedCommit) -Binary
+        if($archive.ExitCode-ne0){throw 'The local pinned instruction archive could not be created.'}
+        Publish-AiInstructionsSourceCache -CodexHome $CodexHome -RuntimeRoot $runtimeRoot -ExpectedCommit $ExpectedCommit -InstructionArchiveBytes $archive.Bytes
+    }catch{
+        # Runtime/projections already succeeded. This is an incomplete installed
+        # update (existing code 30), not a rollback of verified USER projections.
+        $cacheError=ConvertTo-AgentEnvironmentSetupSanitizedText -Text $_.Exception.Message -UserHome $UserHome
+        throw (New-AgentEnvironmentSetupRefusal update-failed "Runtime and USER projections verified, but source cache publication failed: $cacheError")
+    }
     return [pscustomobject][ordered]@{runtimeCommit=[string]$activeBundle.commit;installAction=$installAction;projectionAction=[string]$applyDecision.action}
 }
 

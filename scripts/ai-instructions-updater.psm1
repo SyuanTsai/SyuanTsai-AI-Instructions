@@ -233,6 +233,27 @@ function Test-AiInstructionsTransientNetworkError {
     return $false
 }
 
+function Test-AiInstructionsCandidateAccessPolicyError {
+    param([Parameter(Mandatory = $true)][System.Exception] $Exception)
+
+    # Only typed HTTP responses from read-only candidate resolution qualify.
+    # Message text (including integrity/compatibility refusals) is not HTTP evidence.
+    $current = $Exception
+    while ($null -ne $current) {
+        if ($current.GetType().FullName -in @('System.Net.Http.HttpRequestException','Microsoft.PowerShell.Commands.HttpResponseException')) {
+            $status = $current.PSObject.Properties['StatusCode']
+            if (($null -eq $status -or $null -eq $status.Value) -and $null -ne $current.PSObject.Properties['Response'] -and $null -ne $current.Response) {
+                $status = $current.Response.PSObject.Properties['StatusCode']
+            }
+            if ($null -ne $status -and $null -ne $status.Value -and
+                ($status.Value -is [System.Net.HttpStatusCode] -or $status.Value -is [int]) -and
+                [int]$status.Value -in @(401,403,407)) { return $true }
+        }
+        $current = $current.InnerException
+    }
+    return $false
+}
+
 function Get-AiInstructionsUpdateDisposition {
     [CmdletBinding()]
     param(
@@ -682,7 +703,10 @@ function Invoke-AiInstructionsUpdateWorkflow {
             $resolvedCandidate = ConvertTo-AiInstructionsResolvedCandidate -Value (& $ResolveCandidate $request) -CurrentCommit ([string]$bundle.commit)
         }
         catch {
-            $resolveOutcome = if (Test-AiInstructionsTransientNetworkError -Exception $_.Exception) { 'offline' } else { 'failed' }
+            # Keep the existing transient/rate-limit decision first. Access policy
+            # is offline only here; acquire, re-resolution and install still fail.
+            $resolveOutcome = if ((Test-AiInstructionsTransientNetworkError -Exception $_.Exception) -or
+                (Test-AiInstructionsCandidateAccessPolicyError -Exception $_.Exception)) { 'offline' } else { 'failed' }
             $result = New-AiInstructionsUpdateResult -CheckedAtUtc $NowUtc -Configuration $configuration -CurrentCommit ([string]$bundle.commit) -CandidateCommit $null -Outcome $resolveOutcome -ArchiveSha256 $null -Message $_.Exception.Message
             Write-AiInstructionsUpdateReceipt -Path $receiptPath -Result $result
             return $result
