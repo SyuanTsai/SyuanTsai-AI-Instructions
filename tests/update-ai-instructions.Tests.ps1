@@ -547,6 +547,47 @@ Describe 'AI instructions updater workflow' {
         $result.outcome | Should Be 'offline'
     }
 
+    # Scenario: Session access policy returns a real PowerShell HTTP exception during candidate resolution.
+    # Purpose: Preserve the verified runtime and receipt for 401/403/407 without acquiring or installing bytes.
+    It 'UnitT52a_treats_candidate_HTTP_access_policy_as_offline' {
+        Get-Command Invoke-RestMethod | Out-Null
+        $exceptionType = ([Management.Automation.PSTypeName]'Microsoft.PowerShell.Commands.HttpResponseException').Type
+        foreach ($status in @(401,403,407)) {
+            $codexHome = Join-Path $TestDrive "access-policy-$status"
+            New-TestUpdaterHome -Path $codexHome -Mode auto-install-approved
+            $response = [Net.Http.HttpResponseMessage]::new([Net.HttpStatusCode]$status)
+            $body = '{"message":"GitHub access to this repository is not enabled for this session. Use add_repo to request access. ..."}'
+            $response.Content = [Net.Http.StringContent]::new($body)
+            $failure = [Activator]::CreateInstance($exceptionType,[object[]]@("HTTP $status. $body",$response))
+            try {
+                $result = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
+                    -ResolveCandidate { throw $failure } -AcquireCandidate { throw 'acquire must not run' } -InstallCandidate { throw 'install must not run' }
+                $result.outcome | Should BeExactly offline
+                (Get-Content -Raw (Join-Path $codexHome 'ai-instructions-update-receipt.json') | ConvertFrom-Json).outcome | Should BeExactly offline
+            } finally { $response.Dispose() }
+        }
+    }
+
+    # Scenario: An access-policy response occurs after candidate resolution, or a non-HTTP integrity refusal occurs.
+    # Purpose: Limit the offline exception to read-only candidate discovery, preserving acquire/install fail-closed behavior.
+    It 'UnitT52b_keeps_HTTP_acquire_install_and_non_HTTP_integrity_failures_failed' {
+        Get-Command Invoke-RestMethod | Out-Null
+        $exceptionType = ([Management.Automation.PSTypeName]'Microsoft.PowerShell.Commands.HttpResponseException').Type
+        $response = [Net.Http.HttpResponseMessage]::new([Net.HttpStatusCode]::Forbidden)
+        $failure = [Activator]::CreateInstance($exceptionType,[object[]]@('HTTP 403 Forbidden',$response))
+        try {
+            foreach ($phase in @('acquire','install','integrity')) {
+                $codexHome = Join-Path $TestDrive "failed-policy-$phase"
+                New-TestUpdaterHome -Path $codexHome -Mode auto-install-approved
+                $result = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
+                    -ResolveCandidate { if ($phase -ceq 'integrity') { throw [IO.InvalidDataException]::new('Integrity mismatch; HTTP 403 is only source text') }; [pscustomobject]@{Commit=('b'*40);Relation='ahead'} } `
+                    -AcquireCandidate { if ($phase -ceq 'acquire') { throw $failure }; [pscustomobject]@{ArchiveSha256=('d'*64)} } `
+                    -InstallCandidate { throw $failure }
+                $result.outcome | Should BeExactly failed
+            }
+        } finally { $response.Dispose() }
+    }
+
     # Scenario: A successful update check occurred inside the configured minimum interval.
     # Purpose: Rate-limit bootstrap-triggered network checks while keeping a manual force option.
     It 'UnitT53_rate_limits_automatic_checks' {

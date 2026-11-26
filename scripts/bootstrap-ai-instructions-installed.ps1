@@ -18,10 +18,15 @@ function Get-InstalledAiInstructionsFailureDisposition {
         [ValidateSet('operational','integrity')][string] $FallbackClassification = 'operational'
     )
 
-    if ($Message -match '\[classification=([^;\]]+);[^\]]*retryable=(true|false)\]') {
+    $Message = [regex]::Replace($Message,'\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\))','')
+    $marker = '\[classification=([a-z][a-z-]*);[^\]]*retryable=(true|false)\]'
+    $markers = [regex]::Matches($Message,('AI instructions updater stopped ' + $marker))
+    if ($markers.Count -eq 0) { $markers = [regex]::Matches($Message,$marker) }
+    if ($markers.Count -gt 0) {
+        $lastMarker = $markers[$markers.Count - 1]
         return [pscustomobject]@{
-            classification = [string]$Matches[1]
-            retryable = [bool]([string]$Matches[2] -ceq 'true')
+            classification = [string]$lastMarker.Groups[1].Value
+            retryable = [bool]([string]$lastMarker.Groups[2].Value -ceq 'true')
         }
     }
     $currentException = $Exception
@@ -904,9 +909,10 @@ if (-not $SkipUpdateCheck -and -not $WhatIf) {
 }
 
 $runtimeReadLock = Open-InstalledRuntimeReadLock
+$sourceCache = $null
 try {
     Assert-NoLauncherInterruptedInstallResidue
-    Assert-VerifiedInstalledRuntime | Out-Null
+    $verifiedState = Assert-VerifiedInstalledRuntime
     $arguments = @{
         CatalogPath = $catalogPath
         LockPath = $lockPath
@@ -916,6 +922,24 @@ try {
         WhatIf = $WhatIf
     }
     if (-not [string]::IsNullOrWhiteSpace($TargetRoot)) { $arguments.TargetRoot = $TargetRoot }
+    # Load cache code only after the stable launcher and runtime inventory gate.
+    # Absence (the normal Windows path) retains the existing download behavior.
+    $cacheEntry = @(Get-ChildItem -Force -LiteralPath $codexHome | Where-Object Name -CEQ 'ai-instructions-source-cache')
+    if ($cacheEntry.Count -gt 0) {
+        try {
+            Import-Module $platformRuntimeManifestPath -ErrorAction Stop
+            Import-Module (Join-Path $runtimeRoot 'skills-source-retrieval.psm1') -Force -ErrorAction Stop
+            $sourceCache = Open-AiInstructionsSourceCache -CodexHome $codexHome -RuntimeRoot $runtimeRoot -Configuration $verifiedState.Configuration -Bundle $verifiedState.Bundle
+            if ($null -ne $sourceCache) { foreach ($key in $sourceCache.Arguments.Keys) { $arguments[$key] = $sourceCache.Arguments[$key] } }
+        }
+        catch {
+            throw [System.InvalidOperationException]::new(
+                "AI instructions source cache verification failed: $($_.Exception.Message)`nAI instructions bootstrap stopped [classification=integrity; retryable=false].", $_.Exception)
+        }
+    }
     & $bootstrapPath @arguments
 }
-finally { $runtimeReadLock.Dispose() }
+finally {
+    try { if ($null -ne $sourceCache) { Remove-AiSourceCacheSnapshot $sourceCache.Snapshot } }
+    finally { $runtimeReadLock.Dispose() }
+}
