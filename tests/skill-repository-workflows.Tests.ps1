@@ -614,29 +614,36 @@ jobs:
         $unix = ConvertTo-WorkflowLf $unix
         Assert-RequiredCheckNameContract -WindowsCoreText $core -WindowsInstallSmokeText $install
         Assert-Match $unix '(?m)^name: Unix Core \(non-required\)$' 'Unix Core must identify itself as non-required.'
-        Assert-Match $unix '(?m)^    name: \$\{\{ matrix\.display \}\} Core / \$\{\{ matrix\.file \}\}$' 'Unix Core per-file checks must preserve platform and file names.'
+        Assert-Match $unix '(?m)^    name: \$\{\{ matrix\.display \}\} Core shard \$\{\{ matrix\.shard \}\}$' 'Unix Core shard checks must preserve platform and shard names.'
         Assert-Equal ([regex]::Matches($unix, '(?m)^    name: \$\{\{ matrix\.display \}\} Core$')).Count 1 'Unix Core must define one platform aggregate job template.'
         Assert-Match $unix 'DDBC4A2D113BBD46D283CFEDCBCD117A70CAEFD7673F41F2B4E0000BADF103BC' 'Unix Core must bind the reviewed Linux x64 PowerShell hash.'
         Assert-Match $unix '6DF833D094EBAC1C1A74340D7B3437F4AAF5E03CE640484A1C4359F3CE8B3DB1' 'Unix Core must bind the reviewed macOS arm64 PowerShell hash.'
         Assert-Match $unix '(?m)^permissions:\r?\n  contents: read$' 'Unix Core must retain read-only contents permission.'
         Assert-Match $unix 'fail-fast:\s*false' 'Unix Core must allow all platform/file jobs to report.'
-        Assert-Match $unix 'timeout-minutes: 90' 'Unix Core per-file execution must have a bounded timeout.'
-        Assert-Match $unix 'failedTests' 'Unix Core summaries must record failing test names.'
+        Assert-Match $unix 'timeout-minutes: 150' 'Unix Core shard execution must have a bounded timeout.'
         Assert-NotMatch $unix 'continue-on-error|name: Windows Core|name: Windows Install Smoke|name: Consumer transition probe aggregate' 'Unix Core must not soften failures or collide with required check names.'
         $unixArtifactStructure = Get-GitHubArtifactWorkflowStructure -WorkflowText $unix
-        Assert-Equal @($unixArtifactStructure.Uploads).Count 4 'Unix Core must retain plan, authority, per-file and aggregate artifact uploads.'
-        Assert-Equal @($unixArtifactStructure.Downloads).Count 3 'Unix Core aggregate must consume plan, authority and per-file artifacts.'
+        Assert-Equal @($unixArtifactStructure.Uploads).Count 4 'Unix Core must retain plan, authority, shard and aggregate artifact uploads.'
+        Assert-Equal @($unixArtifactStructure.Downloads).Count 3 'Unix Core aggregate must consume plan, authority and shard artifacts.'
         foreach ($upload in @($unixArtifactStructure.Uploads)) {
-            Assert-True $upload.Name.Contains('${{ github.run_attempt }}') "Unix Core artifact '$($upload.Name)' must bind the current workflow attempt."
+            Assert-True $upload.Name.Contains('${{ github.run_id }}') "Unix Core artifact '$($upload.Name)' must bind the workflow run."
+        }
+        foreach ($upload in @($unixArtifactStructure.Uploads | Where-Object { $_.Name -notlike '*-aggregate-*' })) {
+            Assert-True (-not $upload.Name.Contains('run_attempt')) "Unix Core plan, authority and shard artifact '$($upload.Name)' must remain reusable across attempts when failed jobs alone are rerun."
         }
         foreach ($download in @($unixArtifactStructure.Downloads)) {
-            Assert-True $download.Selector.Contains('${{ github.run_attempt }}') "Unix Core artifact selector '$($download.Selector)' must bind the current workflow attempt."
+            Assert-True (-not $download.Selector.Contains('run_attempt')) "Unix Core artifact selector '$($download.Selector)' must reuse evidence across attempts when failed jobs alone are rerun."
         }
-        Assert-Match $unix '\[string\]\$plan\.runId -cne \[string\]\$env:GITHUB_RUN_ID -or \[int\]\$plan\.runAttempt -ne \[int\]\$env:GITHUB_RUN_ATTEMPT' 'Unix Core aggregate must bind plan evidence to the exact current attempt.'
-        Assert-Match $unix '\[int\]\$summary\.runAttempt -ne \[int\]\$env:GITHUB_RUN_ATTEMPT' 'Unix Core aggregate must reject a per-file summary from another attempt.'
-        Assert-Match $unix '\[int\]\$authorityIdentity\.runAttempt -ne \[int\]\$env:GITHUB_RUN_ATTEMPT' 'Unix Core aggregate must bind authority evidence to the exact current attempt.'
+        Assert-Match $unix 'Get-UnixCorePlan\.ps1' 'Unix Core must use the fixed-shard planner.'
+        Assert-Match $unix 'Invoke-UnixCoreShard\.ps1' 'Unix Core must use the fixed-shard runner.'
+        Assert-Match $unix 'Assert-UnixCoreAggregate\.ps1' 'Unix Core must use the shared aggregate assertion.'
+        Assert-Match $unix 'needs\.plan\.outputs\.planRunAttempt' 'Unix Core must propagate the original plan attempt.'
         Assert-Match $unix 'SYP_PESTER_RESULT: \$\{\{ needs\.pester\.result \}\}' 'Unix Core aggregate must receive the upstream per-file matrix result.'
-        Assert-Match $unix 'upstream ''\$\(\$upstreamJob\.name\)'' result must be success' 'Unix Core aggregate must fail when any upstream job is not successful.'
+        $unixAggregate = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Assert-UnixCoreAggregate.ps1')
+        Assert-Match $unixAggregate '\[int64\]\$Attempt -ge \$PlanAttempt -and \[int64\]\$Attempt -le \$CurrentAttempt' 'Unix Core aggregate must accept evidence only from the plan-through-current attempt range.'
+        Assert-True (([regex]::Matches($unixAggregate, '\[string\]\$summary\.planSha256 -cne \$actualPlanSha256')).Count -ge 2) 'Unix Core aggregate must bind both shard and per-file summaries to the plan SHA-256.'
+        Assert-Match $unixAggregate 'failedTests' 'Unix Core summaries must reject named failing tests.'
+        Assert-Match $unixAggregate 'upstream ''\$\(\$upstreamJob\.name\)'' result must be success' 'Unix Core aggregate must fail when any upstream job is not successful.'
     }
 
     # Scenario: One complete-file required workflow invariant is tampered with in a TestDrive copy.
@@ -746,7 +753,7 @@ jobs:
                 } elseif($relativePath -in @('.github/workflows/consumer-transition-probe.yml', '.github/workflows/skill-tools-path-patch.yml')) {
                     Assert-Equal $jobMatches.Count 2 "The three-platform probe '$relativePath' must contain one matrix leg and one aggregate job."
                 } elseif($relativePath -ceq '.github/workflows/unix-core.yml') {
-                    Assert-Equal $jobMatches.Count 4 'Unix Core must contain plan, authority, per-file Pester and aggregate jobs.'
+                    Assert-Equal $jobMatches.Count 4 'Unix Core must contain plan, authority, shard Pester and aggregate jobs.'
                 } else {
                     Assert-Equal $jobMatches.Count 1 "Ordinary pull-request workflow '$relativePath' must have exactly one job."
                     $pullRequestJobNames.Add($jobMatches[0].Groups[1].Value)
@@ -764,7 +771,7 @@ jobs:
             if($relativePath -ceq '.github/workflows/unix-core.yml'){
                 Assert-Match $workflow '(?s)ubuntu-latest.*macos-latest' 'Unix Core must retain Linux and macOS runner rows.'
                 Assert-Match $workflow '(?m)^  (push|pull_request|workflow_dispatch):' 'Unix Core must retain normal and manual triggers.'
-                Assert-Match $workflow 'Invoke-PesterShardProcess\.ps1' 'Unix Core must use the bounded retained-test executor.'
+                Assert-Match $workflow 'Invoke-UnixCoreShard\.ps1' 'Unix Core must use the bounded fixed-shard executor.'
                 Assert-Match $workflow '(?s)Linux.*macOS|display=''Linux''.*display=''macOS''' 'Unix Core must plan both reviewed platforms.'
                 continue
             }
