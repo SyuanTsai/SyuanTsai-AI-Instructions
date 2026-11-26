@@ -956,6 +956,55 @@ exit 0
         $directError.stderr|Should Match 'fixture encoded diagnostic'
         $directError.stderr|Should Not Match '^#< CLIXML'
     }
+
+    # Scenario: Linux cloud wiring chooses a first install, a new-pin update, or a same-pin validation.
+    # Purpose: Require the shared blob verifier before either installer execution path and keep it out of same-pin validation.
+    It 'UnitT52_verifies_the_installer_before_each_cloud_execution_path' {
+        $cloudFunction = Get-SetupTestEntryFunctionSource Invoke-SetupLinuxCloudWiring
+        $installBranch = [regex]::Match($cloudFunction,'(?s)if\(\$cloudPlan\.action-ceq''install''\)\{(.*?)\r?\n    \}else\{').Groups[1].Value
+        $samePinBranch = [regex]::Match($cloudFunction,'(?s)if\(\$current-ceq\$ExpectedCommit\)\{(.*?)\r?\n        \}else\{').Groups[1].Value
+        $updateBranch = [regex]::Match($cloudFunction,'(?s)\$installAction=''current''\s*\}else\{(.*?)\r?\n        \}').Groups[1].Value
+
+        $installBranch | Should Match '(?s)Assert-SetupVerifierTrustedBlob.*?Invoke-SetupOwnedCommand[^\r\n]*Linux V3V5 installer'
+        $samePinBranch | Should Match 'Linux same-pin validation child'
+        $samePinBranch | Should Not Match 'Assert-SetupVerifierTrustedBlob'
+        $updateBranch | Should Match '(?s)Assert-SetupVerifierTrustedBlob.*?Invoke-SetupLinuxUpdaterChild'
+        (Get-SetupTestEntryFunctionSource Assert-SetupBootstrapTrust) | Should Match 'Assert-SetupVerifierTrustedBlob'
+    }
+
+    # Scenario: A committed file is verified, edited, staged, and restored in a disposable Git repository.
+    # Purpose: Detect both raw worktree drift and staged substitutions, and verify clean bytes repeatedly.
+    It 'UnitT53_compares_expected_index_and_raw_worktree_blobs' {
+        foreach ($name in @('New-SetupEarlyFailure','Invoke-SetupVerifierGit','Assert-SetupVerifierRegularFile','Assert-SetupVerifierTrustedBlob')) {
+            . ([scriptblock]::Create((Get-SetupTestEntryFunctionSource $name)))
+        }
+        $gitPath = [string](Get-Command git -CommandType Application | Select-Object -First 1).Source
+        $root = Join-Path $TestDrive 'trusted-blob'
+        [void][IO.Directory]::CreateDirectory($root)
+        $relative = 'installer.ps1'
+        $path = Join-Path $root $relative
+        [IO.File]::WriteAllText($path, '# original')
+        & $gitPath -C $root init -q
+        $LASTEXITCODE | Should Be 0
+        & $gitPath -C $root add -- $relative
+        $LASTEXITCODE | Should Be 0
+        & $gitPath -C $root -c user.name=setup-test -c user.email=setup-test@example.invalid commit -q -m fixture
+        $LASTEXITCODE | Should Be 0
+        $expected = [string](& $gitPath -C $root rev-parse HEAD)
+        $verify = { Assert-SetupVerifierTrustedBlob -GitPath $gitPath -RepositoryRoot $root -ExpectedCommit $expected -RelativePath $relative }
+
+        $verify | Should Not Throw
+        [IO.File]::WriteAllText($path, '# changed')
+        $verify | Should Throw
+        & $gitPath -C $root add -- $relative
+        $LASTEXITCODE | Should Be 0
+        $verify | Should Throw
+
+        & $gitPath -C $root checkout $expected -- $relative
+        $LASTEXITCODE | Should Be 0
+        $verify | Should Not Throw
+        $verify | Should Not Throw
+    }
 }
 
 # Register only on the native host; keep this file's Core CI skip count at zero.
@@ -2207,6 +2256,29 @@ $configuration = [pscustomobject][ordered]@{schemaVersion=5;catalog=$catalogSele
     AfterAll {
         & git -C $script:UnixRepo checkout -q --detach $script:UnixCommits['runtime'] 2>$null | Out-Null
         Remove-Module agent-environment-setup -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($IsLinux) {
+    # Scenario: Linux --prepare reaches the first-install branch with dirty installer bytes and an otherwise trusted setup commit.
+    # Purpose: Refuse before executing the installer or publishing its CODEX_HOME runtime bundle.
+    It 'InterT19_refuses_a_dirty_cloud_installer_before_runtime_installation' {
+        $userHome = New-UnixHome 'cloud-dirty-installer'
+        $relative = 'scripts/install-ai-instructions-bootstrap.ps1'
+        & git -C $script:UnixRepo checkout -q --detach $script:UnixCommits['runtime']
+        $LASTEXITCODE | Should Be 0
+        $installerPath = Join-Path $script:UnixRepo $relative
+        $originalBytes = [IO.File]::ReadAllBytes($installerPath)
+        try {
+            [IO.File]::AppendAllText($installerPath,"`n# uncommitted installer change`n")
+            $run = Invoke-UnixSetup $userHome @('--prepare') -NoCheckout
+            Assert-SetupTestExitCode $run 15
+            $run.Json.code | Should BeExactly 'commit-mismatch'
+            $run.Stderr | Should Match 'install-ai-instructions-bootstrap\.ps1.*expected commit'
+            Test-Path -LiteralPath (Join-Path $userHome '.codex/hooks/ai-instructions-runtime/runtime-bundle.json') | Should Be $false
+        } finally {
+            [IO.File]::WriteAllBytes($installerPath,$originalBytes)
+        }
+    }
     }
 
     # Scenario: Linux --prepare with a pre-placed verified cache completes cloud wiring, then --offline only re-verifies the runtime.
