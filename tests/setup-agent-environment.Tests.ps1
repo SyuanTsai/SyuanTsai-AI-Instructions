@@ -800,12 +800,19 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         [regex]::Matches($readme,'(?m)^\| 0 \| `success` \|.*`completed`').Count | Should Be 2
     }
 
-    # Scenario: D13 remains owned by SYP-535 after Linux cloud wiring is enabled.
-    # Purpose: Keep K13 explicit and prevent this ticket from claiming that managed CLAUDE.md rules work without pwsh on PATH.
-    It 'UnitT45_documents_the_open_K13_limit_without_claiming_P10b_is_unwired' {
+    # Scenario: The cloud README documents the absolute-pwsh managed section and pin-based setup template in both languages.
+    # Purpose: Keep the verified D13 cloud acceptance behavior documented without claiming P10b is unwired.
+    It 'UnitT45_documents_absolute_pwsh_managed_section_and_cloud_pin_template' {
         $readme = [IO.File]::ReadAllText((Join-Path $script:SetupRepositoryRoot 'README.md'))
-        $readme | Should Match 'K13.*SYP-535'
-        $readme | Should Match 'rules.*cannot run.*PATH.*pwsh'
+        $readme | Should Not Match 'K13'
+        $readme | Should Not Match 'SYP-535'
+        $readme | Should Match '~/.claude/CLAUDE\.md.*setup 管理的絕對 pwsh 路徑'
+        $readme | Should Match 'The managed section of `~/.claude/CLAUDE\.md` calls the installed bootstrap through the absolute setup-managed pwsh path'
+        $readme | Should Match '(?m)^pin=<40 位小寫 commit SHA>\r?$'
+        $readme | Should Match '(?m)^pin=<40-character lowercase commit SHA>\r?$'
+        [regex]::Matches($readme, 'sh scripts/setup-agent-environment\.sh --expected-commit "\$pin" < /dev/null').Count | Should Be 2
+        $readme | Should Match '變更 setup script 的 `pin=` 後，必須啟動新的 session'
+        $readme | Should Match 'after changing `pin=` in the environment setup script, start a new session'
         $readme | Should Not Match 'P10b (?:尚未接線|is not wired yet)'
     }
 

@@ -390,9 +390,25 @@ git checkout-index --force --all
 - 受限出站網路（egress allowlist）須允許 `github.com`、`objects.githubusercontent.com`、`release-assets.githubusercontent.com` 與 `codeload.github.com`。`--prepare` 從 `github.com` 及其 release asset redirect hosts 下載官方 PowerShell；USER coordinator（`update-agent-environment.ps1`）依 `catalog/skills-catalog-lock.json` 的 immutable pin，從 `https://codeload.github.com/<owner>/<repo>/zip/<commit>` 下載每個 Skills source ZIP。已安裝 coordinator 的 WhatIf preflight，以及後續 Apply／VerifyOnly 都會下載。Setup 的 runtime 更新使用 expected commit 的本機 `git archive`，不呼叫 `api.github.com`；該 API 僅用於 installed updater 自己的遠端更新檢查，不屬於 setup。`HTTPS_PROXY`／`HTTP_PROXY`／`NO_PROXY` 及其小寫版本會傳給 setup 子程序。
 - 已安裝 coordinator 的 WhatIf preflight 若因 `codeload.github.com` 被封鎖而失敗，setup 會在任何 runtime mutation 前以 exit 31 `projection-failed` 拒絕。Projection 拒絕訊息除了 child stderr，也含 coordinator JSON 的去敏摘要（`outcome`、`exitCode`、`Code`、第一個 `failed` 與最多三筆 `failureDetails`），例如 `Child result: ... failed=Response status code does not indicate success: 403 (Forbidden).`。
 - Linux 重跑依 pin 選擇唯讀驗證或既有 updater workflow：相同 commit 先以 installed launcher 的 `-ValidateOnly` 驗證，再執行 projection preflight／Apply／VerifyOnly。乾淨的相同 pin 重跑保持 `CODEX_HOME` 與受管 USER trees byte-identical；若 manifest-owned 檔案發生受管 drift，Apply 會修復受管內容，而 collision／ownership 檢查會保留 unmanaged bytes 不變。expected commit 前進時只接受目前 installed pin 的 descendant，並在獨立 pwsh 子程序中安裝新 pin、以 `Auto` 保持 V3V5，接著重新 Apply／VerifyOnly projections。所有子程序均以關閉的 stdin、`-NoProfile -NonInteractive` 執行。
-- 雲端環境可能沿用 cached environment snapshot；修改環境 setup script 的 `--expected-commit` pin 不保證既有快取會重跑 setup。變更 pin 後，請核對 setup receipt 的 `runtimeCommit` 或 `~/.codex/hooks/ai-instructions-runtime/runtime-bundle.json` 的 `commit`；在 session 內手動執行 setup 只影響該 session。
+- 將下列內容貼到雲端環境的 setup script。更新時只要改 `pin=`；不需要 secret 或 environment variable，受限網路請允許前述四個網域。
+
+```sh
+set -eu
+pin=<40 位小寫 commit SHA>
+src="$HOME/.local/share/ai-instructions-src"
+if [ ! -d "$src/.git" ]; then
+  git clone --quiet https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git "$src"
+fi
+cd "$src"
+git fetch --quiet origin "$pin"
+git checkout --quiet --detach "$pin"
+sh scripts/setup-agent-environment.sh --expected-commit "$pin" < /dev/null
+```
+
+- 雲端環境可能沿用 cached environment snapshot；變更 setup script 的 `pin=` 後，必須啟動新的 session，執行中的 session 不會取得變更。新的 session 仍可能使用 cached snapshot，請核對 setup receipt 的 `runtimeCommit` 或 `~/.codex/hooks/ai-instructions-runtime/runtime-bundle.json` 的 `commit`；在 session 內手動執行 setup 只影響該 session。
 - 每個雲端 session 都從環境的 setup snapshot 重建；session 內的 `~/.claude` 變更、update-check receipts 與 fan-out 結果不會保留到下一次，因此 installed bootstrap 每個 session 都會重新執行更新檢查與 fan-out。Fan-out 使用 setup 寫入的 source cache，不需在 session 內存取 GitHub。
 - 雲端 session 的 runtime／Skills 更新只能透過修改環境 setup script 的 `--expected-commit` pin 並重建 setup snapshot；session 內的更新或編輯會遺失。
+- `~/.claude/CLAUDE.md` 的 managed section 會透過 setup 管理的絕對 pwsh 路徑呼叫 installed bootstrap，因此不需要 PATH 中有 pwsh。
 - `--offline`：不連網，只讀 cache 並重驗既有 canonical pwsh；cache 必須是目前 uid 擁有、link count 1、`0600` 的一般檔案。Setup 會以 no-follow 方式複製到本次 private temp snapshot，後續 hash、解壓與 PowerShell handoff 只使用該 snapshot。cache 缺少、metadata／hash 不符或尚未 `--prepare` 都會以 typed exit code 失敗，不做任何更新。結果為 `verified-runtime-only`。
 - Setup root 固定為 `$HOME/.local/share/ai-instructions-setup`（不讀 XDG）：`cache/` 放已驗證的 archive，`pwsh/<version>-<rid>-<random>/` 放 immutable canonical pwsh attempt，`pwsh-tmp/` 是 pwsh hand-off 使用、持久存在且會驗證 owner 與 `0700` mode 的 private `TMPDIR`，`receipts/runtime-<version>-<rid>.json` 是唯一 current pointer，另有 `setup-receipt.json`（`0600`）。`tmp/run.<pid>.<random>/` 只屬於單次執行；結束時只會 best-effort 移除本次已知檔案與空目錄，不遞迴刪除、掃描或接管舊 tmp tree。強制終止可能留下私有 tmp 或未被 receipt 指向的 runtime orphan；不要用自動清理猜測 ownership。重驗失敗時 fail closed，不會自動重裝；同時執行時以 setup lock 序列化，被占用時回 `concurrent`，結束時不持有 lock。
 - Receipt 同時以單行 JSON 輸出到 stdout，欄位含 `schemaVersion`、`result`、`code`、`exitCode`、OS／architecture／RID、`setupCommit`、`runtimeCommit`、policy hash、pwsh 路徑與 version、.NET version、capability 名稱與狀態，以及 S5～S9 步驟狀態。Linux completed receipt 的 `runtimeCommit` 為 expected commit；P10a runtime-only receipt 仍為 `null`。路徑一律寫成 `~/...`，不含使用者名稱、token 或 site。
@@ -415,7 +431,6 @@ Durability closure rule：任何 commit marker（`journal.json`、runtime pointe
 
 已知限制：
 
-- K13（由 SYP-535 另行追蹤）：`~/.claude/CLAUDE.md` managed section 保持 verified runtime 產生的原樣；雲端 PATH 沒有 pwsh 時，該區段的 rules 仍無法直接執行。
 - 祖先目錄不得為 symbolic link，且須屬於 root 或目前使用者、不可 group／other 寫入（sticky 例外）。macOS 的 `/var` 等 symlink 祖先，以及 Fedora Atomic 的 `/home` → `/var/home`，會被拒絕。
 - A1：Unix 的保證是 cooperative lock、不跟隨 link 與重驗；同帳號、不遵守 lock 的惡意 writer 不在保證範圍內。
 - P8：所有 projection root 與 USER home 必須在同一個 filesystem；setup 的暫存與 cache 也放在 setup root 底下以便同 filesystem `mv`。
@@ -477,9 +492,25 @@ git checkout-index --force --all
 - Restricted egress allowlists must permit `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`, and `codeload.github.com`. Prepare downloads official PowerShell from `github.com` and its release asset redirect hosts; the USER coordinator (`update-agent-environment.ps1`) downloads each Skills source ZIP from `https://codeload.github.com/<owner>/<repo>/zip/<commit>` using the immutable pins in `catalog/skills-catalog-lock.json`. Downloads occur in the already installed coordinator's WhatIf preflight and again in Apply/VerifyOnly. Setup's runtime update uses a local `git archive` of the expected commit and does not call `api.github.com`; that API is only used by the installed updater's own remote update check, outside setup. `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` and their lowercase forms are forwarded to setup children.
 - If blocked access to `codeload.github.com` fails the installed coordinator's WhatIf preflight, setup refuses with exit 31 `projection-failed` before any runtime mutation. Projection refusals include child stderr plus a sanitized summary of the coordinator JSON (`outcome`, `exitCode`, `Code`, the first `failed`, and up to three `failureDetails`), for example `Child result: ... failed=Response status code does not indicate success: 403 (Forbidden).`.
 - Linux reruns select read-only validation or the existing updater workflow by pin. The same commit first uses the installed launcher's `-ValidateOnly` path, then runs projection preflight, Apply, and VerifyOnly. A clean same-pin rerun remains byte-identical across `CODEX_HOME` and the managed USER trees; if a manifest-owned file has managed drift, Apply repairs the managed content while collision and ownership checks leave unmanaged bytes untouched. A changed expected commit must be a descendant of the installed pin; an isolated pwsh child runs the updater and installs it with `Auto` so V3V5 remains active, then Apply/VerifyOnly runs again. Every child receives closed stdin and `-NoProfile -NonInteractive`.
-- Cloud environments may reuse a cached environment snapshot: changing the environment setup script's `--expected-commit` pin does not guarantee that an existing cache reruns setup. After changing the pin, check `runtimeCommit` in the setup receipt or `commit` in `~/.codex/hooks/ai-instructions-runtime/runtime-bundle.json`; running setup manually in a session affects only that session.
+- Paste the following into the cloud environment's setup script. To update it, change only `pin=`; no secrets or environment variables are needed, and restricted networks must allow the four domains listed above.
+
+```sh
+set -eu
+pin=<40-character lowercase commit SHA>
+src="$HOME/.local/share/ai-instructions-src"
+if [ ! -d "$src/.git" ]; then
+  git clone --quiet https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git "$src"
+fi
+cd "$src"
+git fetch --quiet origin "$pin"
+git checkout --quiet --detach "$pin"
+sh scripts/setup-agent-environment.sh --expected-commit "$pin" < /dev/null
+```
+
+- Cloud environments may reuse a cached environment snapshot: after changing `pin=` in the environment setup script, start a new session because the running session does not pick up the change. The new session may still use a cached snapshot, so check `runtimeCommit` in the setup receipt or `commit` in `~/.codex/hooks/ai-instructions-runtime/runtime-bundle.json`; running setup manually in a session affects only that session.
 - Each cloud session is rebuilt from the environment's setup snapshot; in-session changes to `~/.claude`, update-check receipts, and fan-out results are not kept for the next session, so the installed bootstrap runs its update check and fan-out again in every session. Fan-out uses the setup-written source cache and needs no GitHub access in the session.
 - Updating runtime or Skills for cloud sessions requires changing the environment setup script's `--expected-commit` pin and rebuilding the setup snapshot; in-session updates or edits are lost.
+- The managed section of `~/.claude/CLAUDE.md` calls the installed bootstrap through the absolute setup-managed pwsh path, so it works without pwsh on PATH.
 - `--offline` never uses the network. The cache must be a regular file owned by the current uid, with link count 1 and mode `0600`. Setup makes a no-follow copy into its private per-run temp snapshot; all subsequent hashing, extraction and PowerShell handoff use only that snapshot. A missing cache, invalid metadata, a hash mismatch or a missing `--prepare` is a typed failure with no update. Result: `verified-runtime-only`.
 - The setup root is fixed at `$HOME/.local/share/ai-instructions-setup` (XDG is not read): `cache/` holds verified archives, `pwsh/<version>-<rid>-<random>/` immutable canonical pwsh attempts, `pwsh-tmp/` is the persistent private `TMPDIR` for the pwsh hand-off with owner and `0700` mode checks, and `receipts/runtime-<version>-<rid>.json` is the only current pointer alongside `setup-receipt.json` (`0600`). `tmp/run.<pid>.<random>/` belongs only to one invocation; the exit trap best-effort removes known files and empty directories from that invocation, but never recursively deletes, scans or adopts an older tmp tree. Forced termination can leave private tmp or a runtime orphan not named by a receipt; automated cleanup must not guess ownership. A failed re-verification fails closed without reinstalling. Concurrent runs are serialized by the setup lock and a busy lock returns `concurrent`; no lock is held after exit.
 - The receipt is also printed to stdout as one JSON line with `schemaVersion`, `result`, `code`, `exitCode`, OS/architecture/RID, `setupCommit`, `runtimeCommit`, the policy hash, pwsh path and version, .NET version, capability names and statuses, and the S5-S9 step states. A completed Linux receipt binds `runtimeCommit` to the expected commit; P10a runtime-only receipts keep it `null`. Paths are always `~/...`; no user name, token or site is recorded.
@@ -502,7 +533,6 @@ Manual persistence (D4): setup never edits shell profiles such as `~/.profile` a
 
 Known limitations:
 
-- K13 (tracked separately by SYP-535): the `~/.claude/CLAUDE.md` managed section remains exactly as the verified runtime produces it, so its rules cannot run directly on a cloud host whose PATH has no pwsh.
 - Ancestor directories must not be symbolic links, must be owned by root or the current user, and must not be group/other writable unless sticky. macOS symlinked ancestors such as `/var` and Fedora Atomic `/home` → `/var/home` are refused.
 - A1: on Unix the guarantee is a cooperative lock, no link following and re-verification; a same-account malicious writer that ignores the lock is out of scope.
 - P8: all projection roots and the USER home must share one filesystem; the setup temp and cache also live under the setup root so `mv` stays on one filesystem.
