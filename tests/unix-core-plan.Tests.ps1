@@ -20,8 +20,7 @@ Describe 'Unix Core shard planner' {
 
         foreach ($platformId in @('linux','macos')) {
             $shards = @($result.Plan.shards | Where-Object platform -ceq $platformId)
-            $limit = if ($platformId -ceq 'linux') { 4 } else { 5 }
-            ($shards.Count -le $limit) | Should Be $true
+            $shards.Count | Should Be 4
             $files = @($shards | ForEach-Object files)
             $files.Count | Should Be $result.Plan.selectedTestFiles.Count
             (@($files | Sort-Object -CaseSensitive) -join "`n") | Should Be (@($result.Plan.selectedTestFiles | Sort-Object -CaseSensitive) -join "`n")

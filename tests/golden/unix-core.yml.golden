@@ -214,7 +214,7 @@ jobs:
     name: ${{ matrix.display }} Core
     needs: [plan, authority, pester]
     if: always()
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
@@ -224,14 +224,8 @@ jobs:
         include:
           - platform: linux
             display: Linux
-            runner: ubuntu-latest
-            asset: powershell-7.6.6-linux-x64.tar.gz
-            sha256: DDBC4A2D113BBD46D283CFEDCBCD117A70CAEFD7673F41F2B4E0000BADF103BC
           - platform: macos
             display: macOS
-            runner: macos-latest
-            asset: powershell-7.6.6-osx-arm64.tar.gz
-            sha256: 6DF833D094EBAC1C1A74340D7B3437F4AAF5E03CE640484A1C4359F3CE8B3DB1
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -242,8 +236,8 @@ jobs:
       - name: Setup verified PowerShell
         uses: ./.github/actions/setup-unix-core-pwsh
         with:
-          asset: ${{ matrix.asset }}
-          sha256: ${{ matrix.sha256 }}
+          asset: powershell-7.6.6-linux-x64.tar.gz
+          sha256: DDBC4A2D113BBD46D283CFEDCBCD117A70CAEFD7673F41F2B4E0000BADF103BC
 
       - name: Download Unix Core plan
         if: needs.plan.result == 'success'
