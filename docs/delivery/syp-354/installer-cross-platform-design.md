@@ -277,3 +277,5 @@ Security fixtures 只用 trusted disposable candidates；不在帶有 secrets �
 | Source executable mode／license delivery hash parity | **未驗證：** 現行 content hash 是否覆蓋所需 metadata，license output 是否含 target-specific 值需再追查 | P6/P8 對 canonical inventory、archive metadata 與 delivery payload 做雙 projection exact-byte 比較；不得為平台改 Skill bytes |
 
 本次範圍只有此設計文件與 `licensing-scope.json` 的單一條目；未實作上述 API、未安裝工具、未修改 Standard/schema/CI/pins、未執行 installer 或 runner、未 commit/push/切換分支。完成時以本機 JSON／文件檢查、變更範圍檢查及 `git diff --check` 驗證交付，不把設計完整性當成 Unix runtime 驗證。
+
+<!-- SYP-584 docs-only verification; do not merge -->
