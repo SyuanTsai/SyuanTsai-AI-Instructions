@@ -509,13 +509,13 @@ if ($IsWindows) {
             @('ai-instructions-writer-gate.part9.Tests.ps1','consumer-bootstrap.Tests.ps1','licensing-scope.Tests.ps1','skills-source-retrieval.Tests.ps1','third-party-skill-source.Tests.ps1','update-ai-instructions.Tests.ps1'),
             @('ai-instructions-launcher-recovery.Tests.ps1','install-ai-instructions-bootstrap.part2.Tests.ps1','platform-runtime.Tests.ps1','production-skills-catalog.Tests.ps1','skills-source-routing.Tests.ps1','third-party-source-envelope.Tests.ps1'),
             @('agent-artifact-remediation.Tests.ps1','ai-instructions-runtime-contract.Tests.ps1','ai-instructions-writer-gate.part8.Tests.ps1','routine-semantic-scan.Tests.ps1','setup-agent-environment.Tests.ps1','source-merge-exception-draft.Tests.ps1','unix-core-aggregate.Tests.ps1'),
-            @('ai-instructions-contract.Tests.ps1','bootstrap-ai-instructions-multisource-lock-arrays.Tests.ps1','consumer-source-gate.Tests.ps1','install-ai-instructions-bootstrap.part4.Tests.ps1','safe-zip.Tests.ps1','standard-core-progress.Tests.ps1','unix-core-plan.Tests.ps1'),
-            @('ai-instructions-writer-gate.part7.Tests.ps1','consumer-gate-workflow.Tests.ps1','install-ai-instructions-bootstrap.part1.Tests.ps1','skill-tools-core-path-patch.Tests.ps1','standard-process-discovery.Tests.ps1','standard-validation-runner.Tests.ps1','unix-core-shard.Tests.ps1'),
-            @('ai-instructions-writer-gate.part1.Tests.ps1','standard-semantic-bridge.Tests.ps1','syp214-user-only.Tests.ps1','windows-core-plan.Tests.ps1'),
-            @('ai-instructions-writer-gate.part3.Tests.ps1','ai-instructions-writer-gate.part5.Tests.ps1'),
+            @('ai-instructions-contract.Tests.ps1','bootstrap-ai-instructions-multisource-lock-arrays.Tests.ps1','consumer-source-gate.Tests.ps1','install-ai-instructions-bootstrap.part4.Tests.ps1','safe-zip.Tests.ps1','standard-core-progress.Tests.ps1','unix-core-change-scope.Tests.ps1'),
+            @('ai-instructions-writer-gate.part7.Tests.ps1','consumer-gate-workflow.Tests.ps1','install-ai-instructions-bootstrap.part1.Tests.ps1','skill-tools-core-path-patch.Tests.ps1','standard-process-discovery.Tests.ps1','standard-validation-runner.Tests.ps1','unix-core-plan.Tests.ps1'),
+            @('ai-instructions-writer-gate.part1.Tests.ps1','standard-semantic-bridge.Tests.ps1','syp214-user-only.Tests.ps1','unix-core-shard.Tests.ps1'),
+            @('ai-instructions-writer-gate.part3.Tests.ps1','ai-instructions-writer-gate.part5.Tests.ps1','windows-core-plan.Tests.ps1'),
             @('ai-instructions-writer-gate.part4.Tests.ps1','ai-instructions-writer-gate.part6.Tests.ps1','skills-catalog-contract.Tests.ps1','standard-validation-resolver-hardening.Tests.ps1')
         )
-        $expectedLoads = @(28,28,28,28,28,28,28,28,28,28,27,27)
+        $expectedLoads = @(28,28,28,28,28,28,28,28,28,28,28,27)
         $script:ActualPlan.Plan.shards.Count | Should Be 12
         for ($index = 0; $index -lt $expectedShards.Count; $index++) {
             $shard = $script:ActualPlan.Plan.shards[$index]

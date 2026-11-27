@@ -267,7 +267,7 @@ Describe 'Agent Skill authority workflow contract' {
             '.github/workflows/standards-conformance.yml' = 1
             '.github/workflows/syp101-production-smoke.yml' = 1
             '.github/workflows/syp86-production-lock.yml' = 1
-            '.github/workflows/unix-core.yml' = 4
+            '.github/workflows/unix-core.yml' = 5
             '.github/workflows/validator-maintenance-producer.yml' = 1
         }
         $script:ExpectedOrdinaryWorkflowPaths = @($script:WorkflowExpectations.Keys)
@@ -600,6 +600,38 @@ jobs:
         Assert-NotMatch $unixSetup 'continue-on-error|chmod u\+x --' 'Unix Core setup must not soften errors or use the BSD-incompatible chmod order.'
     }
 
+    # Scenario: A pull request contains only excluded edits, or one upstream result differs from that skip case.
+    # Purpose: Preserve both platform checks and bypass strict evidence validation only for the intentional skip.
+    It 'UnitT11_preserves_the_Unix_Core_path_skip_boundaries' {
+        $unix = ConvertTo-WorkflowLf (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot '.github/workflows/unix-core.yml'))
+        Assert-Match $unix '(?m)^on:\n  push:\n    branches:\n      - main\n  pull_request:\n    branches:\n      - main\n  workflow_dispatch:\n\n' 'Unix Core must trigger for every main PR and push and allow manual runs.'
+        Assert-Match $unix '(?m)^      relevant: \$\{\{ steps\.scope\.outputs\.relevant \}\}$' 'The changes job must publish its scope.'
+        Assert-Match $unix '(?m)^          SYP_UNIX_BASE_SHA: \$\{\{ github\.event\.pull_request\.base\.sha \}\}$' 'The PR base must pass through the environment.'
+        Assert-Match $unix '(?m)^          & \./scripts/Get-UnixCoreChangeScope\.ps1 -EventName \$env:GITHUB_EVENT_NAME -BaseSha \$env:SYP_UNIX_BASE_SHA' 'Scope must compare the event base with the checked-out revision.'
+        Assert-Match $unix '(?m)^    needs: \[changes\]\n    if: needs\.changes\.outputs\.relevant == ''true''$' 'Planning must run only for relevant changes.'
+        Assert-Equal ([regex]::Matches($unix, '(?m)^    needs: \[changes, plan\]\n    if: needs\.changes\.outputs\.relevant == ''true''$')).Count 2 'Authority and Pester must require relevant changes and a successful plan.'
+        Assert-Match $unix '(?m)^    needs: \[changes, plan, authority, pester\]\n    if: always\(\)$' 'Both aggregate checks must run even when dependencies skip or fail.'
+        Assert-Match $unix '(?m)^          if \(\$env:SYP_CHANGES_RESULT -cne ''success''\) \{\n            throw ' 'An unsuccessful changes job must fail the aggregate.'
+        $skipCondition = @'
+          $skip = $env:SYP_UNIX_RELEVANT -ceq 'false' -and
+            $env:SYP_PLAN_RESULT -ceq 'skipped' -and
+            $env:SYP_AUTHORITY_RESULT -ceq 'skipped' -and
+            $env:SYP_PESTER_RESULT -ceq 'skipped'
+'@
+        Assert-True $unix.Contains((ConvertTo-WorkflowLf $skipCondition)) 'Only an irrelevant PR with all three jobs skipped may bypass validation.'
+        foreach ($download in @(
+            @{ Step = 'Download Unix Core plan'; Job = 'plan' },
+            @{ Step = 'Download Unix Core shard evidence'; Job = 'pester' },
+            @{ Step = 'Download Unix Core authority evidence'; Job = 'authority' }
+        )) {
+            $step = [regex]::Escape($download.Step)
+            Assert-Match $unix "(?m)^      - name: $step\n        if: steps\.scope\.outputs\.skip != 'true' && needs\.$($download.Job)\.result == 'success'$" 'Each artifact download must preserve its upstream-success guard.'
+        }
+        Assert-Match $unix '(?m)^      - name: Assert the Unix Core aggregate\n        if: steps\.scope\.outputs\.skip != ''true''$' 'All other cases must run the strict assertion.'
+        Assert-Match $unix '(?m)^      - name: Upload Unix Core aggregate evidence\n        if: always\(\) && !cancelled\(\) && steps\.scope\.outputs\.skip != ''true''$' 'An intentional skip must not upload an aggregate artifact.'
+        Assert-Match $unix '(?m)^      - name: Fail a cancelled Unix Core aggregate\n        if: cancelled\(\)$' 'Cancellation must retain the explicit failure step.'
+    }
+
     # Scenario: Both required workflows and the non-required Unix Core workflow are compared with reviewable complete-file LF goldens.
     # Purpose: Lock every top-level key, job, step, aggregate, pin and check name without fragment gaps.
     It 'UnitT12_matches_both_complete_required_workflow_golden_contracts' {
@@ -753,7 +785,7 @@ jobs:
                 } elseif($relativePath -in @('.github/workflows/consumer-transition-probe.yml', '.github/workflows/skill-tools-path-patch.yml')) {
                     Assert-Equal $jobMatches.Count 2 "The three-platform probe '$relativePath' must contain one matrix leg and one aggregate job."
                 } elseif($relativePath -ceq '.github/workflows/unix-core.yml') {
-                    Assert-Equal $jobMatches.Count 4 'Unix Core must contain plan, authority, shard Pester and aggregate jobs.'
+                    Assert-Equal $jobMatches.Count 5 'Unix Core must contain changes, plan, authority, shard Pester and aggregate jobs.'
                 } else {
                     Assert-Equal $jobMatches.Count 1 "Ordinary pull-request workflow '$relativePath' must have exactly one job."
                     $pullRequestJobNames.Add($jobMatches[0].Groups[1].Value)
