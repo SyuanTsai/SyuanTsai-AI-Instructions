@@ -17,8 +17,41 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Unix Core change scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      relevant: ${{ steps.scope.outputs.relevant }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup verified PowerShell
+        uses: ./.github/actions/setup-unix-core-pwsh
+        with:
+          asset: powershell-7.6.6-linux-x64.tar.gz
+          sha256: DDBC4A2D113BBD46D283CFEDCBCD117A70CAEFD7673F41F2B4E0000BADF103BC
+
+      - name: Determine the Unix Core change scope
+        id: scope
+        shell: pwsh
+        env:
+          SYP_UNIX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./scripts/Get-UnixCoreChangeScope.ps1 -EventName $env:GITHUB_EVENT_NAME -BaseSha $env:SYP_UNIX_BASE_SHA `
+            -OutputPath $env:GITHUB_OUTPUT | Out-Null
+
   plan:
     name: Unix Core plan
+    needs: [changes]
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -60,7 +93,8 @@ jobs:
 
   authority:
     name: ${{ matrix.display }} Core authority
-    needs: plan
+    needs: [changes, plan]
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -145,7 +179,8 @@ jobs:
 
   pester:
     name: ${{ matrix.display }} Core shard ${{ matrix.shard }}
-    needs: plan
+    needs: [changes, plan]
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     permissions:
@@ -212,7 +247,7 @@ jobs:
 
   aggregate:
     name: ${{ matrix.display }} Core
-    needs: [plan, authority, pester]
+    needs: [changes, plan, authority, pester]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -227,40 +262,67 @@ jobs:
           - platform: macos
             display: macOS
     steps:
+      - name: Determine whether Unix Core assertions can be skipped
+        id: scope
+        shell: pwsh
+        env:
+          SYP_UNIX_DISPLAY: ${{ matrix.display }}
+          SYP_CHANGES_RESULT: ${{ needs.changes.result }}
+          SYP_UNIX_RELEVANT: ${{ needs.changes.outputs.relevant }}
+          SYP_PLAN_RESULT: ${{ needs.plan.result }}
+          SYP_AUTHORITY_RESULT: ${{ needs.authority.result }}
+          SYP_PESTER_RESULT: ${{ needs.pester.result }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:SYP_CHANGES_RESULT -cne 'success') {
+            throw "Unix Core change scope must succeed (result: '$env:SYP_CHANGES_RESULT')."
+          }
+          $skip = $env:SYP_UNIX_RELEVANT -ceq 'false' -and
+            $env:SYP_PLAN_RESULT -ceq 'skipped' -and
+            $env:SYP_AUTHORITY_RESULT -ceq 'skipped' -and
+            $env:SYP_PESTER_RESULT -ceq 'skipped'
+          if ($skip) {
+            "$env:SYP_UNIX_DISPLAY Core：無相關變更，已跳過。PR 只修改排除清單內既有的交付 Markdown 文件。" >> $env:GITHUB_STEP_SUMMARY
+          }
+          "skip=$($skip.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
       - name: Checkout
+        if: steps.scope.outputs.skip != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Setup verified PowerShell
+        if: steps.scope.outputs.skip != 'true'
         uses: ./.github/actions/setup-unix-core-pwsh
         with:
           asset: powershell-7.6.6-linux-x64.tar.gz
           sha256: DDBC4A2D113BBD46D283CFEDCBCD117A70CAEFD7673F41F2B4E0000BADF103BC
 
       - name: Download Unix Core plan
-        if: needs.plan.result == 'success'
+        if: steps.scope.outputs.skip != 'true' && needs.plan.result == 'success'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: unix-core-plan-${{ github.run_id }}
           path: ${{ runner.temp }}/unix-core-aggregate/plan
 
       - name: Download Unix Core shard evidence
-        if: needs.pester.result == 'success'
+        if: steps.scope.outputs.skip != 'true' && needs.pester.result == 'success'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: unix-core-${{ matrix.platform }}-shard-*-${{ github.run_id }}
           path: ${{ runner.temp }}/unix-core-aggregate/shards
 
       - name: Download Unix Core authority evidence
-        if: needs.authority.result == 'success'
+        if: steps.scope.outputs.skip != 'true' && needs.authority.result == 'success'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: unix-core-authority-${{ matrix.platform }}-${{ github.run_id }}
           path: ${{ runner.temp }}/unix-core-aggregate/authority
 
       - name: Assert the Unix Core aggregate
+        if: steps.scope.outputs.skip != 'true'
         shell: pwsh
         env:
           SYP_UNIX_PLATFORM: ${{ matrix.platform }}
@@ -281,7 +343,7 @@ jobs:
             -StepSummaryPath $env:GITHUB_STEP_SUMMARY
 
       - name: Upload Unix Core aggregate evidence
-        if: always() && !cancelled()
+        if: always() && !cancelled() && steps.scope.outputs.skip != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: unix-core-${{ matrix.platform }}-aggregate-${{ github.run_id }}-${{ github.run_attempt }}

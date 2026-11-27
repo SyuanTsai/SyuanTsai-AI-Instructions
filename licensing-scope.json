@@ -1002,6 +1002,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/Get-UnixCoreChangeScope.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/Get-UnixCorePlan.ps1",
       "license": "Apache-2.0"
     },
@@ -1899,6 +1903,10 @@
     },
     {
       "path": "tests/unix-core-aggregate.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/unix-core-change-scope.Tests.ps1",
       "license": "Apache-2.0"
     },
     {

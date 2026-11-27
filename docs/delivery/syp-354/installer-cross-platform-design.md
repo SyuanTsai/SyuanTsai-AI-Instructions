@@ -257,6 +257,8 @@ Security fixtures 只用 trusted disposable candidates；不在帶有 secrets �
 5. Windows `ExpectedSkippedCount=5` 不可增加；Linux/macOS 使用經 review 的自己的精確 skip inventory，不複製 Windows 數字或跳過必要 canonical checks。`standards-conformance.yml` 保持 workflow_dispatch 診斷，使用相同 authority gate，不能取代 required Core。
 6. SYP-353 與 SYP-354 以及兩 lanes 的三平台 required legs 全部完成後才結束過渡。下游採新 authority pin 必須同時採三平台 matrix／全部 leg 聚合語意，不沿用 authority 自身的過渡例外；遠端 ruleset 調整另行授權。
 
+`unix-core.yml` 對 main 的 PR 先比對事件的 base SHA 與 checkout 的 `HEAD`。只有所有變更都屬於排除清單內既有的交付 Markdown 文件修改時，才跳過 plan、authority 與 Pester shards。`Linux Core` 與 `macOS Core` 仍由 Ubuntu 上的 aggregate 回報結果並在摘要記錄跳過原因。main push、手動派送、空 diff 及無法判斷的 diff 都會跑完整流程。變更判斷 job 本身失敗時，兩個 aggregate 都會失敗。
+
 ## 10. 風險與未知
 
 | 項目 | 狀態／影響 | 驗證與決策出口 |
