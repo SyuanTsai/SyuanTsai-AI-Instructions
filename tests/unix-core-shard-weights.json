@@ -65,7 +65,7 @@
       }
     },
     "macos": {
-      "partitionCount": 5,
+      "partitionCount": 4,
       "weights": {
         "ai-instructions-writer-gate.part2.Tests.ps1": 26.0,
         "ai-instructions-writer-gate.part9.Tests.ps1": 20.8,

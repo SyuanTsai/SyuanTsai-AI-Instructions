@@ -770,6 +770,10 @@ jobs:
             }
             if($relativePath -ceq '.github/workflows/unix-core.yml'){
                 Assert-Match $workflow '(?s)ubuntu-latest.*macos-latest' 'Unix Core must retain Linux and macOS runner rows.'
+                $aggregateJob = [regex]::Match($workflow, '(?ms)^  aggregate:\r?\n.*?(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
+                Assert-True $aggregateJob.Success 'Unix Core must define its aggregate job.'
+                Assert-Match $aggregateJob.Value '(?m)^    runs-on: ubuntu-latest\r?$' 'Unix Core aggregate must run on Ubuntu.'
+                Assert-NotMatch $aggregateJob.Value 'macos-latest|matrix\.runner|osx-arm64' 'Unix Core aggregate must not require a macOS runner or asset.'
                 Assert-Match $workflow '(?m)^  (push|pull_request|workflow_dispatch):' 'Unix Core must retain normal and manual triggers.'
                 Assert-Match $workflow 'Invoke-UnixCoreShard\.ps1' 'Unix Core must use the bounded fixed-shard executor.'
                 Assert-Match $workflow '(?s)Linux.*macOS|display=''Linux''.*display=''macOS''' 'Unix Core must plan both reviewed platforms.'
