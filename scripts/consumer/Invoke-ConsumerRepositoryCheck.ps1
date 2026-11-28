@@ -347,8 +347,14 @@ try {
         failed = [int]$result.FailedCount
         skipped = [int]$result.SkippedCount
     }
-    if($errors.Count-ne0){foreach($error in $errors){[Console]::Error.WriteLine($error)}
-    exit 1}
+    if ($errors.Count -ne 0) {
+        foreach ($message in $errors) { [Console]::Error.WriteLine($message) }
+        foreach ($message in @($ledger.executionCases | Where-Object { [string]$_.result -ceq 'Failed' } |
+            ForEach-Object { [string]$_.expandedPath })) {
+            [Console]::Error.WriteLine($message)
+        }
+        exit 1
+    }
     [Console]::Out.WriteLine(($summary | ConvertTo-Json -Compress))
     exit 0
 } catch {

@@ -3699,7 +3699,7 @@ if($DefineFunctionsOnly){return}
         $repositoryCheck | Should Match 'identitySet\.Count'
     }
 
-    # Scenario: A synthetic verified Pester closure returns complete, partial, duplicate, skipped, and not-run inventories.
+    # Scenario: A synthetic verified Pester closure returns complete, partial, duplicate, skipped, not-run, and failed inventories.
     # Purpose: Execute the repository wrapper and prove closure bytes plus complete case identity are enforced behaviorally.
     It 'InterT56_executes_verified_pester_closure_and_complete_discovery' {
         $coreRunId = '1234567890abcdef1234567890abcdef'
@@ -3708,7 +3708,7 @@ if($DefineFunctionsOnly){return}
             -CandidateRoot $TestDrive -AdapterPath 'unused' -ArtifactsRoot $TestDrive `
             -SourceRepository 'https://example.test/consumer-check.git' -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
         Initialize-StandardValidationPlatformRuntime
-        foreach ($scenario in @('success-file','success-runner','tampered','duplicatepath','partial','duplicate','skipped','notrun')) {
+        foreach ($scenario in @('success-file','success-runner','tampered','duplicatepath','partial','duplicate','skipped','notrun','failed')) {
             $workRoot = Join-Path $TestDrive "pester-wrapper-$scenario"
             $candidate = Join-Path $workRoot "$coreRunId/candidate"
             $runtime = Join-Path $workRoot 'runtime/consumer'
@@ -3750,18 +3750,24 @@ function Invoke-Pester {
     $file = Get-ChildItem -LiteralPath $Configuration.Run.Path -Filter '*.Tests.ps1' | Sort-Object Name | Select-Object -First 1
     $block = (Get-Command $file.FullName -CommandType ExternalScript).ScriptBlock
     $scenario = [string]$env:FAKE_PESTER_SCENARIO
-    $resultName = if ($scenario -eq 'skipped') { 'Skipped' } elseif ($scenario -eq 'notrun') { 'NotRun' } else { 'Passed' }
+    $resultName = switch ($scenario) {
+        'skipped' { 'Skipped' }
+        'notrun' { 'NotRun' }
+        'failed' { 'Failed' }
+        default { 'Passed' }
+    }
     $executed = $scenario -ne 'notrun'
-    $test = [pscustomobject]@{ ScriptBlock=$block; ExpandedPath='fixture/passes'; Result=$resultName; Executed=$executed }
+    $expandedPath = if ($scenario -eq 'failed') { 'fixture/failed-case' } else { 'fixture/passes' }
+    $test = [pscustomobject]@{ ScriptBlock=$block; ExpandedPath=$expandedPath; Result=$resultName; Executed=$executed }
     $tests = if ($scenario -eq 'duplicate') { @($test,$test) } else { @($test) }
     $total = $tests.Count
     [pscustomobject]@{
-        Result = if ($scenario -in @('skipped','notrun')) { 'Failed' } else { 'Passed' }
+        Result = if ($scenario -in @('skipped','notrun','failed')) { 'Failed' } else { 'Passed' }
         Tests = $tests
         Containers = @([pscustomobject]@{ Name=$file.FullName })
         TotalCount = $total
         PassedCount = if ($resultName -eq 'Passed') { $total } else { 0 }
-        FailedCount = 0
+        FailedCount = if ($resultName -eq 'Failed') { $total } else { 0 }
         SkippedCount = if ($resultName -eq 'Skipped') { $total } else { 0 }
         InconclusiveCount = 0
         NotRunCount = if ($resultName -eq 'NotRun') { $total } else { 0 }
@@ -3899,6 +3905,18 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
             }
             else {
                 $exitCode | Should Be 1
+                $outputText = $output -join "`n"
+                $outputText | Should Not Match 'Cannot overwrite variable'
+                $outputText | Should Not Match '無法覆寫變數'
+                if ($scenario -in @('skipped','failed')) {
+                    $outputText | Should Match ([regex]::Escape('Pester did not report a complete unskipped pass.'))
+                }
+                if ($scenario -in @('partial','duplicate')) {
+                    $outputText | Should Match ([regex]::Escape('Pester case, container, or test-file identity is incomplete.'))
+                }
+                if ($scenario -eq 'failed') {
+                    $outputText | Should Match ([regex]::Escape('fixture/failed-case'))
+                }
             }
         }
     }
